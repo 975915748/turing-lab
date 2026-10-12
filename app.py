@@ -1,0 +1,1168 @@
+"""多人图灵测试：单进程 FastAPI + WebSocket + SQLite，纯手动 AI 转录。"""
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import os
+import re
+import secrets
+import sqlite3
+from contextlib import contextmanager
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from typing import Optional
+from urllib.parse import urlparse
+
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, PlainTextResponse
+from pydantic import BaseModel, Field
+from starlette.staticfiles import StaticFiles
+
+ROOT = Path(__file__).resolve().parent
+DATABASE = ROOT / 'data' / 'game.sqlite3'
+COOKIE = 'turing_sid'
+MAX_PLAYERS = 8
+MAX_ROUNDS = 100
+MAX_JUDGES = 12
+DURATION_DAYS = 7
+
+
+def utcnow():
+    return datetime.now(timezone.utc).isoformat(timespec='seconds')
+
+
+def hash_password(password: str, salt: Optional[bytes] = None) -> str:
+    if len(password) < 8:
+        raise ValueError('密码至少需要 8 个字符。')
+    salt = salt or secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 310_000)
+    return f'pbkdf2_sha256$310000${salt.hex()}${digest.hex()}'
+
+
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        alg, rounds, salt, checksum = stored.split('$')
+        if alg != 'pbkdf2_sha256':
+            return False
+        calc = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), bytes.fromhex(salt), int(rounds))
+        return hmac.compare_digest(calc, bytes.fromhex(checksum))
+    except (ValueError, TypeError):
+        return False
+
+
+def db_open(path):
+    db = sqlite3.connect(str(path), timeout=20, check_same_thread=False)
+    db.row_factory = sqlite3.Row
+    db.execute('PRAGMA foreign_keys=ON')
+    db.execute('PRAGMA busy_timeout=20000')
+    return db
+
+
+def init_db(path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # 首次升级旧版数据库前制作一致性快照（SQLite Backup API 兼容 WAL）。
+    # 备份位于与数据库相同的本地目录，不会包含在提供给其他人的源码 ZIP 中。
+    if path.is_file() and path.stat().st_size > 0:
+        with db_open(path) as old:
+            old_tables = {row['name'] for row in old.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            if 'users' in old_tables and ('room_judges' not in old_tables or 'ai_judges' not in old_tables):
+                stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
+                backup_tag = 'v1_1' if 'room_judges' not in old_tables else 'v1_2'
+                backup_path = path.with_name(path.stem + f'.pre-{backup_tag}-{stamp}-{secrets.token_hex(2)}.sqlite3')
+                with sqlite3.connect(str(backup_path)) as backup:
+                    old.backup(backup)
+                print(f'[数据保护] 升级前数据库备份：{backup_path}')
+    with db_open(path) as db:
+        db.execute('PRAGMA journal_mode=WAL')
+        db.executescript('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            display_name TEXT NOT NULL, pw_hash TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS sessions (
+            token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            csrf TEXT NOT NULL, expires_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS login_attempts (
+            identity TEXT PRIMARY KEY, failure_count INTEGER NOT NULL,
+            first_failed_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS rooms (
+            id INTEGER PRIMARY KEY, title TEXT NOT NULL, code TEXT NOT NULL UNIQUE,
+            judge TEXT NOT NULL DEFAULT '裁判', status TEXT NOT NULL DEFAULT 'open',
+            current_round INTEGER NOT NULL DEFAULT 1,
+            verdict_json TEXT, verdict_locked_at TEXT, revealed_at TEXT,
+            created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS members (
+            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            alias TEXT NOT NULL, joined_at TEXT NOT NULL,
+            PRIMARY KEY (room_id,user_id), UNIQUE(room_id,alias));
+        CREATE TABLE IF NOT EXISTS ai_players (
+            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            alias TEXT NOT NULL, name TEXT NOT NULL,
+            PRIMARY KEY(room_id,alias));
+        CREATE TABLE IF NOT EXISTS rounds (
+            id INTEGER PRIMARY KEY, room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            number INTEGER NOT NULL, question TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'draft', created_at TEXT NOT NULL,
+            revealed_at TEXT, UNIQUE(room_id,number));
+        CREATE TABLE IF NOT EXISTS answers (
+            id INTEGER PRIMARY KEY, round_id INTEGER NOT NULL REFERENCES rounds(id) ON DELETE CASCADE,
+            alias TEXT NOT NULL, text TEXT NOT NULL, submitted_at TEXT NOT NULL,
+            UNIQUE(round_id,alias));
+        CREATE TABLE IF NOT EXISTS suggestions (
+            id INTEGER PRIMARY KEY, room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            round_number INTEGER NOT NULL, sender_id INTEGER NOT NULL REFERENCES users(id),
+            text TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY, room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            round_number INTEGER NOT NULL, kind TEXT NOT NULL, actor TEXT NOT NULL,
+            text TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS room_judges (
+            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            label TEXT NOT NULL, created_at TEXT NOT NULL,
+            PRIMARY KEY (room_id,user_id));
+        CREATE TABLE IF NOT EXISTS judge_questions (
+            id INTEGER PRIMARY KEY, room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            round_number INTEGER NOT NULL, judge_user_id INTEGER NOT NULL REFERENCES users(id),
+            text TEXT NOT NULL, created_at TEXT NOT NULL,
+            UNIQUE(room_id,round_number,judge_user_id));
+        CREATE TABLE IF NOT EXISTS judge_verdicts (
+            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            judge_user_id INTEGER NOT NULL REFERENCES users(id),
+            verdict_json TEXT NOT NULL, locked_at TEXT NOT NULL,
+            PRIMARY KEY(room_id,judge_user_id));
+        -- AI 裁判不创建登录账户，所有读写由管理员代理。
+        CREATE TABLE IF NOT EXISTS ai_judges (
+            id INTEGER PRIMARY KEY,
+            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            label TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS ai_judge_questions (
+            id INTEGER PRIMARY KEY,
+            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            round_number INTEGER NOT NULL,
+            ai_judge_id INTEGER NOT NULL REFERENCES ai_judges(id) ON DELETE CASCADE,
+            text TEXT NOT NULL, created_at TEXT NOT NULL,
+            UNIQUE(room_id,round_number,ai_judge_id));
+        CREATE TABLE IF NOT EXISTS ai_judge_verdicts (
+            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            ai_judge_id INTEGER NOT NULL REFERENCES ai_judges(id) ON DELETE CASCADE,
+            verdict_json TEXT NOT NULL, locked_at TEXT NOT NULL,
+            PRIMARY KEY(room_id,ai_judge_id));
+        CREATE TABLE IF NOT EXISTS packets (
+            id INTEGER PRIMARY KEY, room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            through_round INTEGER NOT NULL, version INTEGER NOT NULL, content TEXT NOT NULL,
+            sha256 TEXT NOT NULL, created_at TEXT NOT NULL, sent_at TEXT,
+            UNIQUE(room_id,through_round,version));
+        ''')
+
+
+def seed_admin(path, username, display, password):
+    """首次初始化唯一管理员；不会重置已存在的管理员密码。"""
+    init_db(path)
+    with db_open(path) as db:
+        if db.execute('SELECT 1 FROM users WHERE is_admin=1').fetchone():
+            return False
+        if not re.fullmatch(r'[A-Za-z0-9_]{3,30}', username):
+            raise ValueError('管理员登录名须为 3–30 位英文、数字或下划线。')
+        db.execute('INSERT INTO users (username,display_name,pw_hash,is_admin,created_at) VALUES (?,?,?,?,?)',
+                   (username, display, hash_password(password), 1, utcnow()))
+        return True
+
+
+class LoginData(BaseModel):
+    username: str = Field(min_length=3, max_length=30)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class RegisterData(LoginData):
+    display_name: str = Field(min_length=1, max_length=40)
+    code: str = Field(min_length=6, max_length=20)
+
+
+class CodeData(BaseModel):
+    code: str = Field(min_length=6, max_length=20)
+
+
+class RoomData(BaseModel):
+    title: str = Field(min_length=1, max_length=80)
+    judge: str = Field(default='裁判', min_length=1, max_length=40)
+
+
+class AIData(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+
+
+class JudgeAccountData(BaseModel):
+    username: str = Field(min_length=3, max_length=30)
+    display_name: str = Field(min_length=1, max_length=40)
+    password: str = Field(min_length=8, max_length=200)
+
+
+class ExistingJudgeData(BaseModel):
+    username: str = Field(min_length=3, max_length=30)
+    label: str = Field(min_length=1, max_length=40)
+
+
+class TextData(BaseModel):
+    text: str = Field(min_length=1, max_length=12000)
+
+
+class VerdictData(BaseModel):
+    predictions: dict[str, str]
+    evidence: str = Field(min_length=1, max_length=5000)
+    confidence: int = Field(ge=0, le=100)
+    weakness: str = Field(default='', max_length=5000)
+    possible_error: str = Field(default='', max_length=5000)
+
+
+def norm_text(value, max_len):
+    value = value.strip()
+    if not value or len(value) > max_len:
+        raise HTTPException(422, f'内容需要 1～{max_len} 字。')
+    return value
+
+
+def auth(db, token):
+    if not token:
+        raise HTTPException(401, '请先登录。')
+    row = db.execute('''SELECT u.id,u.username,u.display_name,u.is_admin,s.csrf FROM sessions s
+        JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?''',
+                     (hashlib.sha256(token.encode()).hexdigest(), utcnow())).fetchone()
+    if not row:
+        raise HTTPException(401, '登录已过期，请重新登录。')
+    return dict(row)
+
+
+def require_admin(u):
+    if not u['is_admin']:
+        raise HTTPException(403, '此操作仅管理员可用。')
+
+
+def check_csrf(request, u):
+    if not hmac.compare_digest(request.headers.get('x-csrf-token', ''), u['csrf']):
+        raise HTTPException(403, '请求校验失败，请刷新页面。')
+
+
+def check_origin(headers):
+    """阻止其他站点借用浏览器 Cookie 发起 POST / WebSocket 请求。"""
+    origin = headers.get('origin')
+    if not origin:
+        return True
+    try:
+        parsed = urlparse(origin)
+        host = headers.get('host', '')
+        allowed = [v.strip() for v in os.getenv('ALLOWED_ORIGINS', '').split(',') if v.strip()]
+        return parsed.scheme in ('http', 'https') and (parsed.netloc == host or origin in allowed)
+    except ValueError:
+        return False
+
+
+def require_origin(headers):
+    if not check_origin(headers):
+        raise HTTPException(403, '不允许跨站请求。')
+
+
+def is_judge(db, room_id, user):
+    return db.execute('SELECT label FROM room_judges WHERE room_id=? AND user_id=?',
+                      (room_id, user['id'])).fetchone()
+
+
+def permission(db, room_id, user):
+    room = db.execute('SELECT * FROM rooms WHERE id=?', (room_id,)).fetchone()
+    if not room:
+        raise HTTPException(404, '房间不存在。')
+    membership = db.execute('SELECT alias FROM members WHERE room_id=? AND user_id=?',
+                            (room_id, user['id'])).fetchone()
+    if not membership and not user['is_admin'] and not is_judge(db, room_id, user):
+        raise HTTPException(403, '你不属于这个房间。')
+    return room, (membership['alias'] if membership else None)
+
+
+def require_judge(db, room_id, user):
+    # 管理员、普通参赛者不能冒充裁判（即使拥有其他房间的裁判资格）。
+    record = is_judge(db, room_id, user)
+    if not record or user['is_admin']:
+        raise HTTPException(403, '只有本房间的独立裁判可以执行此操作。')
+    return record
+
+
+def judge_records(db, room_id):
+    """统一返回真人和 AI 裁判状态；绝不在此读取判决内容。"""
+    people = db.execute("""SELECT j.user_id,j.label,u.username,j.created_at,
+        EXISTS(SELECT 1 FROM judge_verdicts v WHERE v.room_id=j.room_id AND v.judge_user_id=j.user_id) AS locked
+        FROM room_judges j JOIN users u ON u.id=j.user_id
+        WHERE j.room_id=?""", (room_id,)).fetchall()
+    ai = db.execute("""SELECT j.id,j.label,j.created_at,
+        EXISTS(SELECT 1 FROM ai_judge_verdicts v WHERE v.room_id=j.room_id AND v.ai_judge_id=j.id) AS locked
+        FROM ai_judges j WHERE j.room_id=?""", (room_id,)).fetchall()
+    data = [dict(r, id=r['user_id'], kind='human') for r in people]
+    data += [dict(r, kind='ai', username=None, user_id=None) for r in ai]
+    return sorted(data, key=lambda r: (r['created_at'], r['kind'], r['id']))
+
+
+def check_judge_registration(db, room, user_id):
+    if room['status'] != 'open' or room['verdict_locked_at'] or db.execute(
+        'SELECT 1 FROM judge_verdicts WHERE room_id=? LIMIT 1',(room['id'],)).fetchone() or db.execute(
+        'SELECT 1 FROM ai_judge_verdicts WHERE room_id=? LIMIT 1',(room['id'],)).fetchone():
+        raise HTTPException(409, '比赛已结束或有人锁定结论，不能再添加裁判。')
+    if db.execute('SELECT 1 FROM members WHERE room_id=? AND user_id=?',(room['id'],user_id)).fetchone():
+        raise HTTPException(409, '本房间的参赛者不能同时担任裁判。')
+    if len(judge_records(db,room['id'])) >= MAX_JUDGES:
+        raise HTTPException(409,f'每个房间最多 {MAX_JUDGES} 位裁判。')
+
+
+def aliases(db, room_id):
+    humans = db.execute('''SELECT m.alias,m.user_id,u.display_name,u.username FROM members m
+        JOIN users u ON u.id=m.user_id WHERE m.room_id=? ORDER BY m.alias''', (room_id,)).fetchall()
+    ais = db.execute('SELECT alias,name FROM ai_players WHERE room_id=? ORDER BY alias', (room_id,)).fetchall()
+    all_aliases = sorted([r['alias'] for r in humans] + [r['alias'] for r in ais])
+    return humans, ais, all_aliases
+
+
+def new_alias(db, room_id):
+    _, _, taken = aliases(db, room_id)
+    if len(taken) >= MAX_PLAYERS:
+        raise HTTPException(409, f'最多支持 {MAX_PLAYERS} 位参赛者。')
+    return next(c for c in 'ABCDEFGH' if c not in taken)
+
+
+def ensure_roster_unlocked(db, room):
+    if room['status'] != 'open':
+        raise HTTPException(409, '比赛已结束。')
+    r = db.execute('SELECT question FROM rounds WHERE room_id=? AND number=1', (room['id'],)).fetchone()
+    if (r and r['question']) or db.execute(
+        'SELECT 1 FROM judge_questions WHERE room_id=? AND round_number=1 LIMIT 1',(room['id'],)).fetchone():
+        raise HTTPException(409, '首轮裁判问题已提交，无法再修改参赛名单。')
+
+
+def current_round(db, room, number=None):
+    num = number or room['current_round']
+    rnd = db.execute('SELECT * FROM rounds WHERE room_id=? AND number=?', (room['id'], num)).fetchone()
+    if not rnd:
+        raise HTTPException(404, '轮次不存在。')
+    return rnd
+
+
+def public_room(db, room, user, mine):
+    is_admin = bool(user['is_admin'])
+    judge = is_judge(db, room['id'], user)
+    is_judge_view = bool(judge) and not is_admin
+    humans, ais, roster = aliases(db, room['id'])
+    judges = judge_records(db,room['id'])
+    rounds = db.execute('SELECT * FROM rounds WHERE room_id=? ORDER BY number', (room['id'],)).fetchall()
+    body = []
+    for r in rounds:
+        got = db.execute('SELECT alias,text,submitted_at FROM answers WHERE round_id=? ORDER BY alias', (r['id'],)).fetchall()
+        answer_map = {a['alias']: {'text': a['text'], 'submitted_at': a['submitted_at']}
+                      for a in got if r['status'] == 'revealed' or (not is_judge_view and a['alias'] == mine)}
+        qrows = db.execute('''SELECT q.id,q.text,q.created_at,q.judge_user_id,j.label,'human' AS kind,q.judge_user_id AS judge_id
+            FROM judge_questions q JOIN room_judges j ON q.room_id=j.room_id AND q.judge_user_id=j.user_id
+            WHERE q.room_id=? AND q.round_number=?
+            UNION ALL
+            SELECT q.id,q.text,q.created_at,NULL AS judge_user_id,j.label,'ai' AS kind,q.ai_judge_id AS judge_id
+            FROM ai_judge_questions q JOIN ai_judges j ON q.ai_judge_id=j.id
+            WHERE q.room_id=? AND q.round_number=?
+            ORDER BY 3,6,1''',(room['id'],r['number'],room['id'],r['number'])).fetchall()
+        body.append(dict(number=r['number'], question=r['question'], status=r['status'],
+                         revealed_at=r['revealed_at'], submitted=[a['alias'] for a in got],
+                         questions=[{'id':x['id'],'text':x['text'],'created_at':x['created_at'],
+                                     'judge':x['label'],'kind':x['kind'],'judge_id':x['judge_id'],
+                                     'mine':x['kind']=='human' and x['judge_user_id']==user['id']} for x in qrows],
+                         answers=answer_map))
+    pkts = db.execute('SELECT id,through_round,version,sha256,created_at,sent_at FROM packets WHERE room_id=? ORDER BY id DESC',
+                      (room['id'],)).fetchall()
+    verdict = None
+    if room['revealed_at'] and room['verdict_json'] and not is_judge_view:
+        verdict = json.loads(room['verdict_json'])
+    verdicts = []
+    if room['revealed_at'] and not is_judge_view:
+        if verdict:
+            verdicts.append({'judge':room['judge'],'legacy':True,**verdict})
+        for row in db.execute('''SELECT j.label,v.verdict_json FROM judge_verdicts v
+            JOIN room_judges j ON j.room_id=v.room_id AND j.user_id=v.judge_user_id
+            WHERE v.room_id=? ORDER BY j.created_at,j.user_id''',(room['id'],)):
+            verdicts.append({'judge':row['label'],'kind':'human','legacy':False,
+                             **json.loads(row['verdict_json'])})
+        for row in db.execute('''SELECT j.label,v.verdict_json FROM ai_judge_verdicts v
+            JOIN ai_judges j ON j.id=v.ai_judge_id
+            WHERE v.room_id=? ORDER BY j.created_at,j.id''',(room['id'],)):
+            verdicts.append({'judge':row['label'],'kind':'ai','legacy':False,
+                             **json.loads(row['verdict_json'])})
+    my_verdict = None
+    if is_judge_view:
+        row = db.execute('SELECT verdict_json FROM judge_verdicts WHERE room_id=? AND judge_user_id=?',
+                         (room['id'],user['id'])).fetchone()
+        if row:
+            my_verdict = json.loads(row['verdict_json'])
+    # 裁判永远只收到代号，不收到 A/B 属于人类还是 AI、任何玩家账户信息或他人裁判结论。
+    if is_judge_view:
+        suggestions = []
+        for s in db.execute('''SELECT s.round_number,s.text,s.created_at,m.alias
+            FROM suggestions s LEFT JOIN members m ON m.room_id=s.room_id AND m.user_id=s.sender_id
+            WHERE s.room_id=? ORDER BY s.id''', (room['id'],)):
+            suggestions.append({'round_number':s['round_number'],'text':s['text'],
+                'created_at':s['created_at'],'alias':s['alias'] or '主持人'})
+        return {'id':room['id'],'title':room['title'],'status':room['status'],
+            'current_round':room['current_round'],'verdict_locked':bool(my_verdict),
+            'revealed_at':room['revealed_at'],'mine':None,'is_admin':False,'is_judge':True,
+            'my_judge_label':judge['label'],'my_verdict':my_verdict,
+            'aliases':roster,'rounds':body,'suggestions':suggestions,
+            'judges_count':len(judges)}
+    suggestions = db.execute('''SELECT s.id,s.round_number,s.text,s.created_at,u.display_name,
+        m.alias FROM suggestions s JOIN users u ON u.id=s.sender_id
+        LEFT JOIN members m ON m.room_id=s.room_id AND m.user_id=s.sender_id
+        WHERE s.room_id=? ORDER BY s.id''', (room['id'],)).fetchall()
+    return {'id':room['id'],'title':room['title'],'judge':room['judge'],
+            'status':room['status'],'current_round':room['current_round'],
+            'verdict_locked':bool(room['verdict_locked_at']) or (bool(judges) and all(j['locked'] for j in judges)),
+            'revealed_at':room['revealed_at'],'verdict':verdict,'verdicts':verdicts,
+            'mine':mine,'is_admin':is_admin,'is_judge':False,
+            'invite_code':room['code'] if is_admin else None,
+            'humans':[{'alias':r['alias'],'user_id':r['user_id'],'name':r['display_name'], 'username':r['username']} for r in humans],
+            'ais':[{'alias':r['alias'],'name':r['name']} for r in ais],
+            'judges': [{'id':r['id'],'kind':r['kind'],'user_id':r['user_id'],
+                        'label':r['label'],'username':r['username'],
+                        'locked':bool(r['locked'])} for r in judges] if is_admin else
+                      [{'kind':r['kind'],'label':r['label'],'locked':bool(r['locked'])} for r in judges],
+            'rounds':body,'suggestions':[dict(s) for s in suggestions],
+            'packets':[dict(p) for p in pkts]}
+
+
+def is_complete(db, rnd, room_id):
+    _, _, expected = aliases(db, room_id)
+    collected = {r['alias'] for r in db.execute('SELECT alias FROM answers WHERE round_id=?', (rnd['id'],))}
+    if len(expected) >= 2 and set(expected) == collected:
+        db.execute('UPDATE rounds SET status=?,revealed_at=? WHERE id=?', ('revealed', utcnow(), rnd['id']))
+        return True
+    return False
+
+
+def log_event(db, room_id, number, kind, actor, text):
+    db.execute('INSERT INTO events (room_id,round_number,kind,actor,text,created_at) VALUES(?,?,?,?,?,?)',
+               (room_id,number,kind,actor,text,utcnow()))
+
+
+def judge_packet(db, room, through):
+    humans, ais, roster = aliases(db, room['id'])
+    if len(roster) < 2:
+        raise HTTPException(409, '参赛者不足两人。')
+    lines = ['AI 图灵测试 · 裁判统一消息包', f'范围：第 1～{through} 轮', '参赛者代号固定不变；请仅根据匿名回答判断人类/AI。',
+             '请勿使用历史聊天、账号信息或外部资料进行身份判断。',
+             '在最终锁定前可提出追问，由主持人转录。']
+    for num in range(1, through + 1):
+        rnd = current_round(db, room, num)
+        if rnd['status'] != 'revealed':
+            raise HTTPException(409, f'第 {num} 轮尚未统一揭晓，不能制作裁判包。')
+        a = {x['alias']:x['text'] for x in db.execute('SELECT alias,text FROM answers WHERE round_id=?', (rnd['id'],))}
+        lines += ['', '='*30, f'第 {num} 轮', '【裁判提问】', rnd['question']]
+        for code in roster:
+            lines += ['', f'【参与者 {code} · 原始回答】', a[code]]
+    lines += ['', '—— 匿名资料结束 ——']
+    return '\n'.join(lines) + '\n'
+
+
+def round_markdown(db, room, number, user, mine):
+    data = public_room(db, room, user, mine)
+    r = data['rounds'][number-1]
+    if data['is_judge']:
+        lines = [f'# {room["title"]} · 第 {number} 轮 · 裁判匿名记录', '',
+                 f'状态：{r["status"]}', '', '## 本轮问题', '',
+                 r['question'] or '（等待管理员开启作答）', '', '## 匿名参赛者回答', '']
+        for alias in data['aliases']:
+            answer = r['answers'].get(alias)
+            lines += [f'### 参与者 {alias}',
+                      answer['text'] if answer else '（已提交，待统一揭晓）' if alias in r['submitted'] else '（未提交）', '']
+        return '\n'.join(lines) + '\n'
+    lines = [f'# {room["title"]} · 第 {number} 轮', '',f'状态：{r["status"]}',
+             f'裁判：{room["judge"]}', '', '## 裁判问题', '', r['question'] or '（尚未发布）',
+             '', '## 本轮玩家提议 / 追问', '']
+    for s in data['suggestions']:
+        if s['round_number'] == number:
+            lines += [f'- {s["created_at"]} {s["alias"] or "管理员"}（{s["display_name"]}）：{s["text"]}']
+    lines += ['', '## 参赛者回答', '']
+    for h in data['humans']:
+        a = h['alias']
+        answer = r['answers'].get(a)
+        # 未公开时只显示提交状态，自己可以看到自己的回答。
+        lines += [f'### {a} · 人类 · {h["name"]} (@{h["username"]})',
+                  f'提交时间：{answer["submitted_at"]}' if answer else '',
+                  answer['text'] if answer else '（已提交，待统一揭晓）' if a in r['submitted'] else '（未提交）', '']
+    for ai in data['ais']:
+        a = ai['alias']
+        answer = r['answers'].get(a)
+        lines += [f'### {a} · AI · {ai["name"]}', '', answer['text'] if answer else '（已提交，待统一揭晓）' if a in r['submitted'] else '（未提交）', '']
+    lines += ['', '## 本轮事件时间线', '']
+    for event in db.execute('SELECT kind,actor,text,created_at FROM events WHERE room_id=? AND round_number=? ORDER BY id',
+                            (room['id'],number)):
+        lines.append(f'- {event["created_at"]} · {event["actor"]} · {event["text"]}')
+    return '\n'.join(lines) + '\n'
+
+
+class Hub:
+    def __init__(self, path):
+        self.path = path
+        self.groups: dict[int, set[WebSocket]] = {}
+
+    async def notify(self, room_id, reason):
+        for ws in list(self.groups.get(room_id, set())):
+            try:
+                # 登出/会话失效后，不再向旧 WebSocket 推送房间变更。
+                with db_open(self.path) as db:
+                    user = auth(db, ws.cookies.get(COOKIE))
+                    permission(db, room_id, user)
+                await ws.send_json({'type':'room_updated','room_id':room_id,'reason':reason})
+            except Exception:
+                self.groups.get(room_id, set()).discard(ws)
+                try:
+                    await ws.close(code=1008)
+                except Exception:
+                    pass
+
+
+def create_app(db_path=None):
+    path = Path(db_path or os.getenv('DB_PATH', str(DATABASE)))
+    init_db(path)
+    app = FastAPI(title='图灵测试多人主持台', docs_url=None, redoc_url=None)
+    app.state.path = path
+    app.state.hub = Hub(path)
+    app.mount('/static', StaticFiles(directory=ROOT/'static'), name='static')
+
+    @app.middleware('http')
+    async def security_headers(request, call_next):
+        response = await call_next(request)
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['X-Frame-Options'] = 'DENY'
+        response.headers['Referrer-Policy'] = 'same-origin'
+        if request.url.path.startswith('/api/') or request.url.path == '/':
+            response.headers['Cache-Control'] = 'no-store'
+        return response
+
+    @contextmanager
+    def connection(immediate=False):
+        db = db_open(path)
+        try:
+            if immediate:
+                db.execute('BEGIN IMMEDIATE')
+            yield db
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def caller(request, db, mutate=False):
+        if mutate:
+            require_origin(request.headers)
+        u = auth(db, request.cookies.get(COOKIE))
+        if mutate:
+            check_csrf(request, u)
+        return u
+
+    def set_session(response, db, user_id):
+        token = secrets.token_urlsafe(32)
+        csrf = secrets.token_urlsafe(28)
+        expires = (datetime.now(timezone.utc)+timedelta(days=DURATION_DAYS)).isoformat(timespec='seconds')
+        db.execute('INSERT INTO sessions(token_hash,user_id,csrf,expires_at) VALUES(?,?,?,?)',
+                   (hashlib.sha256(token.encode()).hexdigest(),user_id,csrf,expires))
+        secure = os.getenv('COOKIE_SECURE', '0') == '1'
+        response.set_cookie(COOKIE,token,httponly=True,secure=secure,samesite='lax',max_age=86400*DURATION_DAYS,path='/')
+
+    @app.get('/')
+    def home():
+        return FileResponse(ROOT/'static'/'index.html')
+
+    @app.get('/api/health')
+    def health():
+        return {'ok': True}
+
+    @app.get('/api/me')
+    def me(request:Request):
+        with connection() as db:
+            u=caller(request,db)
+            rooms = db.execute('''SELECT DISTINCT r.id,r.title,r.status,r.current_round,r.created_at,
+                CASE WHEN ?=1 THEN 'admin'
+                     WHEN EXISTS(SELECT 1 FROM room_judges j WHERE j.room_id=r.id AND j.user_id=?) THEN 'judge'
+                     ELSE 'player' END AS role
+                FROM rooms r LEFT JOIN members m ON r.id=m.room_id
+                LEFT JOIN room_judges j ON j.room_id=r.id
+                WHERE m.user_id=? OR j.user_id=? OR ?=1 ORDER BY r.id DESC''',
+                (u['is_admin'],u['id'],u['id'],u['id'],u['is_admin'])).fetchall()
+            return {'user':u, 'rooms':[dict(x) for x in rooms]}
+
+    @app.post('/api/login')
+    def login(body:LoginData, request:Request, response:Response):
+        require_origin(request.headers)
+        identity=(request.client.host if request.client else 'unknown')+':'+body.username.strip().lower()
+        now=datetime.now(timezone.utc)
+        blocked=False
+        invalid=False
+        with connection(immediate=True) as db:
+            attempt=db.execute('SELECT * FROM login_attempts WHERE identity=?',(identity,)).fetchone()
+            if attempt:
+                first=datetime.fromisoformat(attempt['first_failed_at'])
+                if now-first>timedelta(minutes=15):
+                    db.execute('DELETE FROM login_attempts WHERE identity=?',(identity,))
+                    attempt=None
+            if attempt and attempt['failure_count']>=8:
+                blocked=True
+            else:
+                row=db.execute('SELECT * FROM users WHERE username=?',(body.username.strip(),)).fetchone()
+                if not row or not verify_password(body.password,row['pw_hash']):
+                    invalid=True
+                    if attempt:
+                        db.execute('UPDATE login_attempts SET failure_count=failure_count+1 WHERE identity=?',(identity,))
+                    else:
+                        db.execute('INSERT INTO login_attempts(identity,failure_count,first_failed_at) VALUES(?,?,?)',
+                                   (identity,1,now.isoformat(timespec='seconds')))
+                else:
+                    db.execute('DELETE FROM login_attempts WHERE identity=?',(identity,))
+                    set_session(response,db,row['id'])
+        if blocked:
+            raise HTTPException(429,'登录失败次数太多，请 15 分钟后重试。')
+        if invalid:
+            raise HTTPException(401,'账号或密码错误。')
+        return {'ok':True}
+
+    @app.post('/api/register')
+    async def register(body:RegisterData, request:Request, response:Response):
+        require_origin(request.headers)
+        with connection(immediate=True) as db:
+            room=db.execute('SELECT * FROM rooms WHERE code=?',(body.code.strip().upper(),)).fetchone()
+            if not room:
+                raise HTTPException(404,'邀请码无效。')
+            ensure_roster_unlocked(db,room)
+            username=body.username.strip()
+            if not re.fullmatch(r'[A-Za-z0-9_]{3,30}', username):
+                raise HTTPException(422,'账号只能使用 3–30 位英文、数字或下划线。')
+            if db.execute('SELECT 1 FROM users WHERE username=?',(username,)).fetchone():
+                raise HTTPException(409,'账号已被使用，请登录后加入房间。')
+            try:
+                pw_hash=hash_password(body.password)
+            except ValueError as exc:
+                raise HTTPException(422,str(exc))
+            cur=db.execute('INSERT INTO users(username,display_name,pw_hash,is_admin,created_at) VALUES(?,?,?,?,?)',
+                           (username,norm_text(body.display_name,40),pw_hash,0,utcnow()))
+            uid=cur.lastrowid
+            alias=new_alias(db,room['id'])
+            db.execute('INSERT INTO members(room_id,user_id,alias,joined_at) VALUES(?,?,?,?)',
+                       (room['id'],uid,alias,utcnow()))
+            log_event(db,room['id'],1,'joined',alias,'加入比赛')
+            set_session(response,db,uid)
+            room_id=room['id']
+        await app.state.hub.notify(room_id, 'joined')
+        return {'ok':True,'room_id':room_id}
+
+    @app.post('/api/logout')
+    def logout(request:Request, response:Response):
+        with connection() as db:
+            u=caller(request,db,mutate=True)
+            tok=request.cookies.get(COOKIE,'')
+            db.execute('DELETE FROM sessions WHERE token_hash=?',(hashlib.sha256(tok.encode()).hexdigest(),))
+        response.delete_cookie(COOKIE)
+        return {'ok':True}
+
+    @app.post('/api/rooms')
+    def create_room(body:RoomData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            require_admin(u)
+            code=secrets.token_hex(5).upper()
+            cur=db.execute('INSERT INTO rooms(title,code,judge,created_at) VALUES(?,?,?,?)',
+                           (norm_text(body.title,80),code,norm_text(body.judge,40),utcnow()))
+            room_id=cur.lastrowid
+            db.execute('INSERT INTO rounds(room_id,number,created_at) VALUES(?,?,?)',(room_id,1,utcnow()))
+            log_event(db,room_id,1,'created','管理员','创建比赛')
+            return {'room_id':room_id, 'code':code}
+
+    @app.post('/api/join')
+    async def join(body:CodeData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room=db.execute('SELECT * FROM rooms WHERE code=?',(body.code.strip().upper(),)).fetchone()
+            if not room:
+                raise HTTPException(404,'邀请码无效。')
+            old=db.execute('SELECT alias FROM members WHERE room_id=? AND user_id=?',(room['id'],u['id'])).fetchone()
+            if old:
+                return {'room_id':room['id'],'alias':old['alias']}
+            ensure_roster_unlocked(db,room)
+            if is_judge(db,room['id'],u):
+                raise HTTPException(409,'本房间裁判不能作为参赛者加入。')
+            alias=new_alias(db,room['id'])
+            db.execute('INSERT INTO members(room_id,user_id,alias,joined_at) VALUES(?,?,?,?)',
+                       (room['id'],u['id'],alias,utcnow()))
+            log_event(db,room['id'],1,'joined',alias,'加入比赛')
+            room_id=room['id']
+        await app.state.hub.notify(room_id,'joined')
+        return {'room_id':room_id,'alias':alias}
+
+    @app.get('/api/rooms/{room_id}')
+    def room_info(room_id:int,request:Request):
+        with connection() as db:
+            u=caller(request,db)
+            room,mine=permission(db,room_id,u)
+            return public_room(db,room,u,mine)
+
+    @app.post('/api/rooms/{room_id}/judges')
+    async def add_judge(room_id:int,body:JudgeAccountData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            require_admin(u)
+            room,_=permission(db,room_id,u)
+            username=body.username.strip()
+            if not re.fullmatch(r'[A-Za-z0-9_]{3,30}',username):
+                raise HTTPException(422,'裁判账号应为 3～30 位英文、数字或下划线。')
+            if db.execute('SELECT 1 FROM users WHERE username=?',(username,)).fetchone():
+                raise HTTPException(409,'账号已存在；请使用“绑定已有账号”功能。')
+            check_judge_registration(db,room,-1)
+            try:
+                pw_hash=hash_password(body.password)
+            except ValueError as exc:
+                raise HTTPException(422,str(exc))
+            label=norm_text(body.display_name,40)
+            cur=db.execute('INSERT INTO users(username,display_name,pw_hash,is_admin,created_at) VALUES(?,?,?,?,?)',
+                           (username,label,pw_hash,0,utcnow()))
+            db.execute('INSERT INTO room_judges(room_id,user_id,label,created_at) VALUES(?,?,?,?)',
+                       (room_id,cur.lastrowid,label,utcnow()))
+            log_event(db,room_id,room['current_round'],'judge_added','管理员','已添加独立裁判')
+        await app.state.hub.notify(room_id,'judge_added')
+        return {'ok':True,'username':username,'label':label}
+
+    @app.post('/api/rooms/{room_id}/judges/assign')
+    async def assign_judge(room_id:int,body:ExistingJudgeData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            require_admin(u)
+            room,_=permission(db,room_id,u)
+            target=db.execute('SELECT id,is_admin FROM users WHERE username=?',(body.username.strip(),)).fetchone()
+            if not target or target['is_admin']:
+                raise HTTPException(404,'用户不存在或不可作为独立裁判。')
+            if is_judge(db,room_id,{'id':target['id']}):
+                raise HTTPException(409,'此账号已经是本房间裁判。')
+            check_judge_registration(db,room,target['id'])
+            label=norm_text(body.label,40)
+            db.execute('INSERT INTO room_judges(room_id,user_id,label,created_at) VALUES(?,?,?,?)',
+                       (room_id,target['id'],label,utcnow()))
+            log_event(db,room_id,room['current_round'],'judge_added','管理员','已绑定独立裁判账号')
+        await app.state.hub.notify(room_id,'judge_added')
+        return {'ok':True}
+
+    @app.post('/api/rooms/{room_id}/ai-judges')
+    async def add_ai_judge(room_id:int,body:AIData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            require_admin(u)
+            room,_=permission(db,room_id,u)
+            check_judge_registration(db,room,-1)
+            label=norm_text(body.name,60)
+            cur=db.execute('INSERT INTO ai_judges(room_id,label,created_at) VALUES(?,?,?)',
+                           (room_id,label,utcnow()))
+            log_event(db,room_id,room['current_round'],'ai_judge_added','管理员','已添加 AI 裁判席')
+            jid=cur.lastrowid
+        await app.state.hub.notify(room_id,'ai_judge_added')
+        return {'ok':True,'id':jid,'label':label}
+
+    @app.post('/api/rooms/{room_id}/ai-judges/{judge_id}/questions')
+    async def ai_judge_question(room_id:int,judge_id:int,body:TextData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            require_admin(u)
+            room,_=permission(db,room_id,u)
+            if not db.execute('SELECT 1 FROM ai_judges WHERE room_id=? AND id=?',
+                              (room_id,judge_id)).fetchone():
+                raise HTTPException(404,'AI 裁判席不存在。')
+            if room['status']!='open' or room['verdict_locked_at']:
+                raise HTTPException(409,'比赛已结束。')
+            rnd=current_round(db,room)
+            if rnd['status']!='draft':
+                raise HTTPException(409,'仅可在本轮开启作答前录入 AI 裁判问题。')
+            if db.execute('SELECT 1 FROM ai_judge_questions WHERE room_id=? AND round_number=? AND ai_judge_id=?',
+                          (room_id,rnd['number'],judge_id)).fetchone():
+                raise HTTPException(409,'此 AI 裁判本轮已提交问题。')
+            _,_,roster=aliases(db,room_id)
+            if len(roster)<2:
+                raise HTTPException(409,'至少需要两名参赛者。')
+            msg=norm_text(body.text,3000)
+            db.execute('INSERT INTO ai_judge_questions(room_id,round_number,ai_judge_id,text,created_at) VALUES(?,?,?,?,?)',
+                       (room_id,rnd['number'],judge_id,msg,utcnow()))
+            log_event(db,room_id,rnd['number'],'ai_judge_question','管理员','已转录 AI 裁判问题')
+        await app.state.hub.notify(room_id,'ai_judge_question')
+        return {'ok':True}
+
+    @app.post('/api/rooms/{room_id}/judge-questions')
+    async def judge_question(room_id:int,body:TextData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,_=permission(db,room_id,u)
+            label=require_judge(db,room_id,u)['label']
+            if room['status']!='open' or room['verdict_locked_at']:
+                raise HTTPException(409,'比赛已结束。')
+            rnd=current_round(db,room)
+            if rnd['status']!='draft':
+                raise HTTPException(409,'仅可在本轮尚未开始作答时提出问题。')
+            if db.execute('SELECT 1 FROM judge_questions WHERE room_id=? AND round_number=? AND judge_user_id=?',
+                          (room_id,rnd['number'],u['id'])).fetchone():
+                raise HTTPException(409,'你已经提交本轮问题；每位裁判每轮限提交一次。')
+            _,_,roster=aliases(db,room_id)
+            if len(roster)<2:
+                raise HTTPException(409,'至少需要两名参赛者。')
+            text=norm_text(body.text,3000)
+            db.execute('INSERT INTO judge_questions(room_id,round_number,judge_user_id,text,created_at) VALUES(?,?,?,?,?)',
+                       (room_id,rnd['number'],u['id'],text,utcnow()))
+            # 审计日志只记录提交动作，不存入账号信息或答案。
+            log_event(db,room_id,rnd['number'],'judge_question_proposed','裁判','已提交本轮问题')
+        await app.state.hub.notify(room_id,'judge_question_proposed')
+        return {'ok':True}
+
+    @app.post('/api/rooms/{room_id}/start')
+    async def start_round(room_id:int,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            require_admin(u)
+            room,_=permission(db,room_id,u)
+            if room['status']!='open' or room['verdict_locked_at']:
+                raise HTTPException(409,'比赛已结束。')
+            rnd=current_round(db,room)
+            if rnd['status']!='draft':
+                raise HTTPException(409,'本轮已经开始。')
+            qs=db.execute('''SELECT q.text,q.created_at,j.label,'human' AS kind,q.id
+                FROM judge_questions q JOIN room_judges j
+                ON j.room_id=q.room_id AND j.user_id=q.judge_user_id
+                WHERE q.room_id=? AND q.round_number=?
+                UNION ALL
+                SELECT q.text,q.created_at,j.label,'ai' AS kind,q.id
+                FROM ai_judge_questions q JOIN ai_judges j ON j.id=q.ai_judge_id
+                WHERE q.room_id=? AND q.round_number=?
+                ORDER BY 2,4,5''',(room_id,rnd['number'],room_id,rnd['number'])).fetchall()
+            if not qs:
+                raise HTTPException(409,'还没有裁判提交问题。')
+            question='\n\n'.join(f'【裁判问题 {i}】\n{q["text"]}' for i,q in enumerate(qs,1))
+            if len(question)>6000:
+                raise HTTPException(409,'裁判问题合计超过 6000 字，请减少内容后重新开局。')
+            db.execute('UPDATE rounds SET question=?,status=? WHERE id=?',(question,'collecting',rnd['id']))
+            log_event(db,room_id,rnd['number'],'judge_question','独立裁判组','主持人已开启统一作答')
+        await app.state.hub.notify(room_id,'judge_question')
+        return {'ok':True}
+
+    @app.post('/api/rooms/{room_id}/ai')
+    async def add_ai(room_id:int,body:AIData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            require_admin(u)
+            room,_=permission(db,room_id,u)
+            ensure_roster_unlocked(db,room)
+            alias=new_alias(db,room_id)
+            db.execute('INSERT INTO ai_players(room_id,alias,name) VALUES(?,?,?)',
+                       (room_id,alias,norm_text(body.name,60)))
+            log_event(db,room_id,1,'ai_joined',alias,'AI 参赛位已添加')
+        await app.state.hub.notify(room_id,'ai_joined')
+        return {'alias':alias}
+
+    @app.post('/api/rooms/{room_id}/question')
+    async def set_question(room_id:int,body:TextData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            require_admin(u)
+            room,_=permission(db,room_id,u)
+            if room['status']!='open':
+                raise HTTPException(409,'比赛已经结束。')
+            rnd=current_round(db,room)
+            if rnd['status']!='draft':
+                raise HTTPException(409,'本轮问题已经发布，无法更改。')
+            if judge_records(db,room_id):
+                raise HTTPException(409,'已启用真人 / AI 独立裁判，请由各裁判出题或由管理员代理 AI 出题。')
+            _,_,roster=aliases(db,room_id)
+            if len(roster)<2:
+                raise HTTPException(409,'至少要有两名参赛者才能开始。')
+            question=norm_text(body.text,6000)
+            db.execute('UPDATE rounds SET question=?,status=? WHERE id=?',(question,'collecting',rnd['id']))
+            log_event(db,room_id,rnd['number'],'judge_question',room['judge'],question)
+        await app.state.hub.notify(room_id,'judge_question')
+        return {'ok':True}
+
+    @app.post('/api/rooms/{room_id}/suggestions')
+    async def suggest(room_id:int,body:TextData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,mine=permission(db,room_id,u)
+            if room['status']!='open' or room['verdict_locked_at']:
+                raise HTTPException(409,'比赛已经停止接收问题。')
+            if is_judge(db,room_id,u) and not u['is_admin']:
+                raise HTTPException(403,'裁判请使用独立裁判提问区。')
+            msg=norm_text(body.text,2000)
+            db.execute('INSERT INTO suggestions(room_id,round_number,sender_id,text,created_at) VALUES(?,?,?,?,?)',
+                       (room_id,room['current_round'],u['id'],msg,utcnow()))
+            log_event(db,room_id,room['current_round'],'suggestion',mine or '管理员',msg)
+        await app.state.hub.notify(room_id,'suggestion')
+        return {'ok':True}
+
+    @app.post('/api/rooms/{room_id}/answers')
+    async def answer(room_id:int,body:TextData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,mine=permission(db,room_id,u)
+            if not mine:
+                raise HTTPException(403,'你没有作为参赛者加入该房间。管理员可先输入房间邀请码加入。')
+            if room['status']!='open':
+                raise HTTPException(409,'比赛已结束。')
+            rnd=current_round(db,room)
+            if rnd['status']!='collecting':
+                raise HTTPException(409,'本轮目前不能提交回答。')
+            if db.execute('SELECT 1 FROM answers WHERE round_id=? AND alias=?',(rnd['id'],mine)).fetchone():
+                raise HTTPException(409,'本轮已经提交，不能修改回答。')
+            ans=norm_text(body.text,12000)
+            db.execute('INSERT INTO answers(round_id,alias,text,submitted_at) VALUES(?,?,?,?)',
+                       (rnd['id'],mine,ans,utcnow()))
+            log_event(db,room_id,rnd['number'],'answer_submitted',mine,'已提交回答（内容暂时隐藏）')
+            finished=is_complete(db,rnd,room_id)
+            if finished:
+                log_event(db,room_id,rnd['number'],'round_revealed','系统','本轮全部回答已公开')
+        await app.state.hub.notify(room_id,'round_revealed' if finished else 'answer_submitted')
+        return {'ok':True,'revealed':finished}
+
+    @app.post('/api/rooms/{room_id}/ai/{alias}/answer')
+    async def ai_answer(room_id:int,alias:str,body:TextData,request:Request):
+        alias=alias.upper()
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            require_admin(u)
+            room,_=permission(db,room_id,u)
+            if room['status']!='open':
+                raise HTTPException(409,'比赛已结束。')
+            if not db.execute('SELECT 1 FROM ai_players WHERE room_id=? AND alias=?',(room_id,alias)).fetchone():
+                raise HTTPException(404,'没有这个 AI 参赛位。')
+            rnd=current_round(db,room)
+            if rnd['status']!='collecting':
+                raise HTTPException(409,'本轮不能录入回答。')
+            if db.execute('SELECT 1 FROM answers WHERE round_id=? AND alias=?',(rnd['id'],alias)).fetchone():
+                raise HTTPException(409,'此 AI 已录入本轮回答。')
+            ans=norm_text(body.text,12000)
+            db.execute('INSERT INTO answers(round_id,alias,text,submitted_at) VALUES(?,?,?,?)',
+                       (rnd['id'],alias,ans,utcnow()))
+            log_event(db,room_id,rnd['number'],'answer_submitted',alias,'管理员已录入 AI 回答（内容暂时隐藏）')
+            finished=is_complete(db,rnd,room_id)
+            if finished:
+                log_event(db,room_id,rnd['number'],'round_revealed','系统','本轮全部回答已公开')
+        await app.state.hub.notify(room_id,'round_revealed' if finished else 'answer_submitted')
+        return {'ok':True,'revealed':finished}
+
+    @app.post('/api/rooms/{room_id}/next')
+    async def next_round(room_id:int,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            require_admin(u)
+            room,_=permission(db,room_id,u)
+            if room['status']!='open' or room['verdict_locked_at'] or db.execute(
+                'SELECT 1 FROM judge_verdicts WHERE room_id=? LIMIT 1',(room_id,)).fetchone() or db.execute(
+                'SELECT 1 FROM ai_judge_verdicts WHERE room_id=? LIMIT 1',(room_id,)).fetchone():
+                raise HTTPException(409,'比赛已结束或已有裁判锁定最终判断，不能再开启新轮次。')
+            rnd=current_round(db,room)
+            if rnd['status']!='revealed':
+                raise HTTPException(409,'必须先完成本轮全部回答。')
+            if rnd['number']>=MAX_ROUNDS:
+                raise HTTPException(409,'轮次数量已达上限。')
+            next_num=rnd['number']+1
+            db.execute('INSERT INTO rounds(room_id,number,created_at) VALUES(?,?,?)',
+                       (room_id,next_num,utcnow()))
+            db.execute('UPDATE rooms SET current_round=? WHERE id=?',(next_num,room_id))
+            log_event(db,room_id,next_num,'new_round','管理员','进入下一轮')
+        await app.state.hub.notify(room_id,'new_round')
+        return {'number':next_num}
+
+    @app.get('/api/rooms/{room_id}/rounds/{number}/log')
+    def download_log(room_id:int,number:int,request:Request):
+        with connection() as db:
+            u=caller(request,db)
+            room,mine=permission(db,room_id,u)
+            current_round(db,room,number)
+            content=round_markdown(db,room,number,u,mine)
+        return PlainTextResponse(content,media_type='text/markdown; charset=utf-8',headers={
+            'Content-Disposition':f'attachment; filename="room-{room_id}-round-{number}.md"',
+            'Cache-Control':'no-store'})
+
+    @app.post('/api/rooms/{room_id}/packets')
+    async def create_packet(room_id:int,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            require_admin(u)
+            room,_=permission(db,room_id,u)
+            if room['revealed_at']:
+                raise HTTPException(409,'已揭晓，不能再制作匿名裁判包。')
+            rnd=current_round(db,room)
+            last=rnd['number'] if rnd['status']=='revealed' else rnd['number']-1
+            if last<1:
+                raise HTTPException(409,'目前尚无完成的轮次。')
+            packet=judge_packet(db,room,last)
+            previous=db.execute('SELECT COALESCE(MAX(version),0) AS n FROM packets WHERE room_id=? AND through_round=?',
+                                (room_id,last)).fetchone()['n']
+            checksum=hashlib.sha256(packet.encode()).hexdigest()
+            cur=db.execute('INSERT INTO packets(room_id,through_round,version,content,sha256,created_at) VALUES(?,?,?,?,?,?)',
+                           (room_id,last,previous+1,packet,checksum,utcnow()))
+            pid=cur.lastrowid
+            log_event(db,room_id,last,'packet_created','管理员',f'已制作裁判包 v{previous+1}，SHA256 {checksum[:12]}')
+        await app.state.hub.notify(room_id,'packet_created')
+        return {'packet_id':pid,'version':previous+1,'through_round':last,'sha256':checksum}
+
+    @app.get('/api/rooms/{room_id}/packets/{packet_id}')
+    def packet_text(room_id:int,packet_id:int,request:Request):
+        with connection() as db:
+            u=caller(request,db)
+            require_admin(u)
+            permission(db,room_id,u)
+            r=db.execute('SELECT * FROM packets WHERE id=? AND room_id=?',(packet_id,room_id)).fetchone()
+            if not r:
+                raise HTTPException(404,'没有这个裁判包。')
+            if hashlib.sha256(r['content'].encode()).hexdigest()!=r['sha256']:
+                raise HTTPException(500,'快照校验失败。')
+            return {'id':r['id'],'content':r['content'],'sha256':r['sha256'],
+                    'through_round':r['through_round'],'version':r['version'],'sent_at':r['sent_at']}
+
+    @app.post('/api/rooms/{room_id}/packets/{packet_id}/sent')
+    async def mark_sent(room_id:int,packet_id:int,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            require_admin(u)
+            room,_=permission(db,room_id,u)
+            if room['revealed_at']:
+                raise HTTPException(409,'已揭晓。')
+            r=db.execute('SELECT * FROM packets WHERE id=? AND room_id=?',(packet_id,room_id)).fetchone()
+            if not r:
+                raise HTTPException(404,'裁判包不存在。')
+            db.execute('UPDATE packets SET sent_at=? WHERE id=?',(utcnow(),packet_id))
+            log_event(db,room_id,r['through_round'],'packet_sent','管理员',f'确认已手动发送裁判包 v{r["version"]}')
+        await app.state.hub.notify(room_id,'packet_sent')
+        return {'ok':True}
+
+    @app.post('/api/rooms/{room_id}/verdict')
+    async def lock_verdict(room_id:int,body:VerdictData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            require_admin(u)
+            room,_=permission(db,room_id,u)
+            if room['status']!='open' or room['verdict_locked_at']:
+                raise HTTPException(409,'裁判结论已锁定或比赛已结束。')
+            if judge_records(db,room_id):
+                raise HTTPException(409,'本房间启用了独立裁判，请由裁判本人登录后锁定判断。')
+            _,_,roster=aliases(db,room_id)
+            if len(roster)<2 or set(body.predictions)!=set(roster) or not all(v in ('Human','AI') for v in body.predictions.values()):
+                raise HTTPException(422,'需要为全部参赛者选择人类 / AI。')
+            rows=db.execute('SELECT status FROM rounds WHERE room_id=?',(room_id,)).fetchall()
+            if not rows or any(r['status']!='revealed' for r in rows):
+                raise HTTPException(409,'所有已创建的轮次必须结束后才能锁定结论。')
+            payload=body.model_dump()
+            payload['locked_at']=utcnow()
+            db.execute('UPDATE rooms SET verdict_json=?,verdict_locked_at=? WHERE id=?',
+                       (json.dumps(payload,ensure_ascii=False),utcnow(),room_id))
+            log_event(db,room_id,room['current_round'],'verdict_locked','管理员','裁判结论已锁定（揭晓前保密）')
+        await app.state.hub.notify(room_id,'verdict_locked')
+        return {'ok':True}
+
+    @app.post('/api/rooms/{room_id}/judge-verdict')
+    async def lock_judge_verdict(room_id:int,body:VerdictData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,_=permission(db,room_id,u)
+            require_judge(db,room_id,u)
+            if room['status']!='open' or room['verdict_locked_at']:
+                raise HTTPException(409,'比赛已结束或历史判决已锁定。')
+            if db.execute('SELECT 1 FROM judge_verdicts WHERE room_id=? AND judge_user_id=?',
+                          (room_id,u['id'])).fetchone():
+                raise HTTPException(409,'你的裁判结论已锁定，不能修改。')
+            _,_,roster=aliases(db,room_id)
+            if len(roster)<2 or set(body.predictions)!=set(roster) or not all(
+                v in ('Human','AI') for v in body.predictions.values()):
+                raise HTTPException(422,'必须给每个匿名代号选择 Human 或 AI。')
+            rounds=db.execute('SELECT status FROM rounds WHERE room_id=?',(room_id,)).fetchall()
+            if not rounds or any(r['status']!='revealed' for r in rounds):
+                raise HTTPException(409,'所有已创建轮次必须统一揭晓后才能锁定结论。')
+            payload=body.model_dump()
+            payload['locked_at']=utcnow()
+            db.execute('INSERT INTO judge_verdicts(room_id,judge_user_id,verdict_json,locked_at) VALUES(?,?,?,?)',
+                       (room_id,u['id'],json.dumps(payload,ensure_ascii=False),utcnow()))
+            log_event(db,room_id,room['current_round'],'judge_verdict_locked','裁判','独立裁判已锁定判断（不包含判决内容）')
+        await app.state.hub.notify(room_id,'judge_verdict_locked')
+        return {'ok':True}
+
+    @app.post('/api/rooms/{room_id}/ai-judges/{judge_id}/verdict')
+    async def lock_ai_judge_verdict(room_id:int,judge_id:int,body:VerdictData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            require_admin(u)
+            room,_=permission(db,room_id,u)
+            if not db.execute('SELECT 1 FROM ai_judges WHERE room_id=? AND id=?',
+                              (room_id,judge_id)).fetchone():
+                raise HTTPException(404,'AI 裁判席不存在。')
+            if room['status']!='open' or room['verdict_locked_at']:
+                raise HTTPException(409,'比赛已结束或历史判决已锁定。')
+            if db.execute('SELECT 1 FROM ai_judge_verdicts WHERE room_id=? AND ai_judge_id=?',
+                          (room_id,judge_id)).fetchone():
+                raise HTTPException(409,'此 AI 裁判判断已锁定，不能修改。')
+            _,_,roster=aliases(db,room_id)
+            if len(roster)<2 or set(body.predictions)!=set(roster) or not all(
+                v in ('Human','AI') for v in body.predictions.values()):
+                raise HTTPException(422,'必须给每个匿名代号选择 Human 或 AI。')
+            rounds=db.execute('SELECT status FROM rounds WHERE room_id=?',(room_id,)).fetchall()
+            if not rounds or any(r['status']!='revealed' for r in rounds):
+                raise HTTPException(409,'所有已创建轮次必须统一揭晓后才能锁定结论。')
+            payload=body.model_dump()
+            payload['locked_at']=utcnow()
+            db.execute('INSERT INTO ai_judge_verdicts(room_id,ai_judge_id,verdict_json,locked_at) VALUES(?,?,?,?)',
+                       (room_id,judge_id,json.dumps(payload,ensure_ascii=False),utcnow()))
+            # 日志不包含内容，防止在最终揭晓前泄露判断。
+            log_event(db,room_id,room['current_round'],'ai_judge_verdict_locked','管理员','AI 裁判判决已手动转录并锁定')
+        await app.state.hub.notify(room_id,'ai_judge_verdict_locked')
+        return {'ok':True}
+
+    @app.post('/api/rooms/{room_id}/reveal')
+    async def reveal(room_id:int,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            require_admin(u)
+            room,_=permission(db,room_id,u)
+            judges=judge_records(db,room_id)
+            if judges:
+                if room['status']!='open' or not all(bool(j['locked']) for j in judges):
+                    raise HTTPException(409,'所有独立裁判均需锁定结论后才能揭晓。')
+            elif room['status']!='open' or not room['verdict_locked_at']:
+                raise HTTPException(409,'必须先锁定裁判最终判断才可揭晓。')
+            r=current_round(db,room)
+            if r['status']!='revealed':
+                raise HTTPException(409,'本轮未完成。')
+            db.execute('UPDATE rooms SET status=?,revealed_at=? WHERE id=?',('finished',utcnow(),room_id))
+            log_event(db,room_id,room['current_round'],'identity_revealed','管理员','已揭晓真实身份与裁判得分')
+        await app.state.hub.notify(room_id,'identity_revealed')
+        return {'ok':True}
+
+    @app.websocket('/ws/rooms/{room_id}')
+    async def socket(websocket:WebSocket,room_id:int):
+        if not check_origin(websocket.headers):
+            await websocket.close(code=1008)
+            return
+        try:
+            with connection() as db:
+                u=auth(db,websocket.cookies.get(COOKIE))
+                permission(db,room_id,u)
+        except HTTPException:
+            await websocket.close(code=1008)
+            return
+        await websocket.accept()
+        clients=app.state.hub.groups.setdefault(room_id,set())
+        clients.add(websocket)
+        try:
+            await websocket.send_json({'type':'connected','room_id':room_id})
+            while True:
+                # 客户端不允许修改状态；只接受 ping，所有变更走有权限检查的 HTTP API。
+                await websocket.receive_text()
+        except WebSocketDisconnect:
+            pass
+        finally:
+            clients.discard(websocket)
+
+    return app
+
+
+app=create_app()
