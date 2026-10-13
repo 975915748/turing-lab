@@ -69,14 +69,26 @@ function updateTypingBadges(){
 }
 function maybeNotifyJudge(){
  const r=state.room;
- if(!r?.is_judge || r.status!=='open')return;
- const rd=r.rounds.find(x=>x.number===r.current_round);
- if(!rd||rd.status!=='revealed')return;
- const key=`judge-notice-${r.id}-${rd.number}`;
+ // 真人裁判可直接查看匿名回复；AI 裁判需主持人代录，因此主持人也要收到提醒。
+ if(!r || (!r.is_judge && !r.is_admin))return;
+ const rd=r.rounds?.find(x=>x.number===r.current_round);
+ // 不依赖比赛是否结束：最后一轮已提交、随后结算也不能漏掉提醒。
+ if(!rd || rd.status!=='revealed')return;
+ const key=`judge-ready-v1.3.1-${r.id}-${rd.number}-${state.me?.user?.id||0}-${r.is_judge?'human-judge':'host'}`;
  if(sessionStorage.getItem(key))return;
- sessionStorage.setItem(key,'1');
- const dlg=$('#judgeNotice');
- if(dlg&&!dlg.open){$('#judgeNoticeText').textContent=`第 ${rd.number} 轮的全部参赛者已经提交回答，现在可以查看匿名回复。`;dlg.showModal();}
+ const dialog=$('#judgeNotice');
+ const message=r.is_judge
+  ? `第 ${rd.number} 轮全部参赛者已提交，可以查看匿名回答并继续裁判。`
+  : `第 ${rd.number} 轮全部参赛者已提交。如有 AI 裁判，请将本轮匿名回答转发给对应 AI 裁判。`;
+ if(!dialog){toast(message);return;}
+ if(dialog.open)return;
+ const label=$('#judgeNoticeText');
+ if(label)label.textContent=message;
+ try{
+  dialog.showModal();
+  // 只有确认显示成功才标记，避免弹窗异常后永远不再提醒。
+  sessionStorage.setItem(key,'1');
+ }catch(e){toast(message);}
 }
 function makeRoster(r){const submitted=new Set(r.rounds.find(x=>x.number===state.selectedRound)?.submitted||[]);
  const people=[...r.humans.map(h=>({...h,role:'人类',label:h.name})),...r.ais.map(a=>({...a,role:'AI',label:a.name}))].sort((a,b)=>a.alias.localeCompare(b.alias));
@@ -239,6 +251,9 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
    if(confirm('确定锁定裁判结论？一旦锁定就不能修改！')){await api(`/api/rooms/${id}/verdict`,{method:'POST',body:{predictions,evidence:data.evidence,confidence:Number(data.confidence),weakness:data.weakness,possible_error:data.possible_error}});await refreshRoom();toast('裁判结论已锁定')}}
  }catch(err){toast(err.message)}finally{if(btn)btn.disabled=false}
 });
+// 页面在后台休眠、网络断线或切回标签页时，重新核对轮次完成状态。
+document.addEventListener('visibilitychange',()=>{if(!document.hidden&&state.roomId&&state.me)refreshRoom()});
+window.addEventListener('focus',()=>{if(state.roomId&&state.me)refreshRoom()});
 window.addEventListener('hashchange',async()=>{const m=/^#room=(\d+)$/.exec(location.hash);if(!state.me)return;if(m&&Number(m[1])!==state.roomId)await openRoom(Number(m[1]));else if(!m&&state.roomId)await loadLobby()});
 setInterval(()=>{if(state.roomId && state.me && (!state.ws||state.ws.readyState!==WebSocket.OPEN))refreshRoom()},15000);
 init();
