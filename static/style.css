@@ -16,3 +16,20 @@ main{min-height:calc(100vh - 170px);padding:32px 0 44px}.card{background:var(--p
 /* v1.3.1: consistent day/night modal appearance. */
 .judge-modal{background:var(--panel);color:var(--dark);border-color:var(--line2);z-index:100}
 .judge-modal::backdrop{background:#171410a8}
+
+/* v1.3.2: right-side navigation with dedicated large working panes. */
+.admin-room-layout{grid-template-columns:235px minmax(0,1fr) 230px}
+.admin-room-layout > .stack{min-width:0}
+.admin-room-layout .right-panel{position:sticky;top:18px;min-width:0}
+.admin-room-layout .room-view-menu{padding:15px}
+.room-view-menu h2{margin:6px 0 14px}
+.room-view-link{display:flex;flex-direction:column;align-items:flex-start;text-align:left;width:100%;margin:8px 0;gap:4px;border-radius:10px;padding:13px 12px;background:var(--pane);border-color:var(--line2);color:var(--dark)}
+.room-view-link span{font-size:.77rem;color:var(--muted);font-weight:400;line-height:1.35}
+.room-view-link.active{background:var(--button);border-color:var(--button);color:var(--buttontext)}
+.room-view-link.active span{color:var(--buttontext);opacity:.84}
+.room-view-hint{margin-top:16px;border-top:1px solid var(--line2);padding-top:11px;font-size:.78rem;color:var(--muted)}
+/* Work forms live in the wider center column rather than the cramped right rail. */
+.admin-room-layout .stack > .card textarea{min-height:125px}
+@media(max-width:1150px){.admin-room-layout{grid-template-columns:195px minmax(0,1fr) 185px;gap:13px}.admin-room-layout .right-panel{grid-column:auto}.admin-room-layout .room-view-menu{padding:12px}.room-view-link{padding:12px 9px}}
+@media(max-width:900px){.admin-room-layout{display:flex;flex-direction:column}.admin-room-layout .right-panel{order:-3;position:static;width:100%;margin:0}.admin-room-layout > .stack{order:-2;width:100%}.admin-room-layout .aside{order:-1;width:100%}.room-view-menu{display:flex;flex-wrap:wrap;align-items:center;gap:7px}.room-view-menu h2,.room-view-menu .overline,.room-view-hint{display:none}.room-view-link{width:auto;flex:1 1 150px;margin:0;min-width:0}}
+@media(max-width:740px){.admin-room-layout > .stack,.admin-room-layout > .aside,.admin-room-layout > .right-panel{margin-top:0}.admin-room-layout > .stack,.admin-room-layout > .aside{margin-top:14px}.room-view-link span{font-size:.7rem}.admin-room-layout .room-view-menu{padding:10px}.admin-room-layout .stack > .card textarea{min-height:115px}}
