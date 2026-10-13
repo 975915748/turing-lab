@@ -68,9 +68,14 @@ def init_db(path):
         with db_open(path) as old:
             old_tables = {row['name'] for row in old.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
-            if 'users' in old_tables and ('room_judges' not in old_tables or 'ai_judges' not in old_tables):
+            if 'users' in old_tables and (
+                'room_judges' not in old_tables or 'ai_judges' not in old_tables or
+                ('members' in old_tables and 'removed_at' not in {
+                    x['name'] for x in old.execute('PRAGMA table_info(members)')}) or
+                ('answers' in old_tables and 'edited_at' not in {
+                    x['name'] for x in old.execute('PRAGMA table_info(answers)')})):
                 stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
-                backup_tag = 'v1_1' if 'room_judges' not in old_tables else 'v1_2'
+                backup_tag = 'v1_3' if 'ai_judges' in old_tables else ('v1_1' if 'room_judges' not in old_tables else 'v1_2')
                 backup_path = path.with_name(path.stem + f'.pre-{backup_tag}-{stamp}-{secrets.token_hex(2)}.sqlite3')
                 with sqlite3.connect(str(backup_path)) as backup:
                     old.backup(backup)
@@ -152,12 +157,20 @@ def init_db(path):
             ai_judge_id INTEGER NOT NULL REFERENCES ai_judges(id) ON DELETE CASCADE,
             verdict_json TEXT NOT NULL, locked_at TEXT NOT NULL,
             PRIMARY KEY(room_id,ai_judge_id));
+        CREATE TABLE IF NOT EXISTS ai_answer_revisions (
+            id INTEGER PRIMARY KEY, room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            round_number INTEGER NOT NULL, alias TEXT NOT NULL,
+            previous_text TEXT NOT NULL, replacement_text TEXT NOT NULL, changed_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS packets (
             id INTEGER PRIMARY KEY, room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
             through_round INTEGER NOT NULL, version INTEGER NOT NULL, content TEXT NOT NULL,
             sha256 TEXT NOT NULL, created_at TEXT NOT NULL, sent_at TEXT,
             UNIQUE(room_id,through_round,version));
         ''')
+        if 'removed_at' not in {x['name'] for x in db.execute('PRAGMA table_info(members)')}:
+            db.execute('ALTER TABLE members ADD COLUMN removed_at TEXT')
+        if 'edited_at' not in {x['name'] for x in db.execute('PRAGMA table_info(answers)')}:
+            db.execute('ALTER TABLE answers ADD COLUMN edited_at TEXT')
 
 
 def seed_admin(path, username, display, password):
@@ -205,6 +218,10 @@ class JudgeAccountData(BaseModel):
 class ExistingJudgeData(BaseModel):
     username: str = Field(min_length=3, max_length=30)
     label: str = Field(min_length=1, max_length=40)
+
+
+class AIAnswerEditData(BaseModel):
+    text: str = Field(min_length=1, max_length=12000)
 
 
 class TextData(BaseModel):
@@ -275,7 +292,7 @@ def permission(db, room_id, user):
     room = db.execute('SELECT * FROM rooms WHERE id=?', (room_id,)).fetchone()
     if not room:
         raise HTTPException(404, '房间不存在。')
-    membership = db.execute('SELECT alias FROM members WHERE room_id=? AND user_id=?',
+    membership = db.execute('SELECT alias FROM members WHERE room_id=? AND user_id=? AND removed_at IS NULL',
                             (room_id, user['id'])).fetchone()
     if not membership and not user['is_admin'] and not is_judge(db, room_id, user):
         raise HTTPException(403, '你不属于这个房间。')
@@ -317,7 +334,7 @@ def check_judge_registration(db, room, user_id):
 
 def aliases(db, room_id):
     humans = db.execute('''SELECT m.alias,m.user_id,u.display_name,u.username FROM members m
-        JOIN users u ON u.id=m.user_id WHERE m.room_id=? ORDER BY m.alias''', (room_id,)).fetchall()
+        JOIN users u ON u.id=m.user_id WHERE m.room_id=? AND m.removed_at IS NULL ORDER BY m.alias''', (room_id,)).fetchall()
     ais = db.execute('SELECT alias,name FROM ai_players WHERE room_id=? ORDER BY alias', (room_id,)).fetchall()
     all_aliases = sorted([r['alias'] for r in humans] + [r['alias'] for r in ais])
     return humans, ais, all_aliases
@@ -325,9 +342,11 @@ def aliases(db, room_id):
 
 def new_alias(db, room_id):
     _, _, taken = aliases(db, room_id)
+    reserved = {x['alias'] for x in db.execute('SELECT alias FROM members WHERE room_id=?',(room_id,))}
+    reserved.update(x['alias'] for x in db.execute('SELECT alias FROM ai_players WHERE room_id=?',(room_id,)))
     if len(taken) >= MAX_PLAYERS:
         raise HTTPException(409, f'最多支持 {MAX_PLAYERS} 位参赛者。')
-    return next(c for c in 'ABCDEFGH' if c not in taken)
+    return next((c for c in 'ABCDEFGH' if c not in reserved), None) or (_ for _ in ()).throw(HTTPException(409,'代号已用尽。'))
 
 
 def ensure_roster_unlocked(db, room):
@@ -356,8 +375,8 @@ def public_room(db, room, user, mine):
     rounds = db.execute('SELECT * FROM rounds WHERE room_id=? ORDER BY number', (room['id'],)).fetchall()
     body = []
     for r in rounds:
-        got = db.execute('SELECT alias,text,submitted_at FROM answers WHERE round_id=? ORDER BY alias', (r['id'],)).fetchall()
-        answer_map = {a['alias']: {'text': a['text'], 'submitted_at': a['submitted_at']}
+        got = db.execute('SELECT alias,text,submitted_at,edited_at FROM answers WHERE round_id=? ORDER BY alias', (r['id'],)).fetchall()
+        answer_map = {a['alias']: {'text': a['text'], 'submitted_at': a['submitted_at'], 'edited_at':a['edited_at']}
                       for a in got if r['status'] == 'revealed' or (not is_judge_view and a['alias'] == mine)}
         qrows = db.execute('''SELECT q.id,q.text,q.created_at,q.judge_user_id,j.label,'human' AS kind,q.judge_user_id AS judge_id
             FROM judge_questions q JOIN room_judges j ON q.room_id=j.room_id AND q.judge_user_id=j.user_id
@@ -368,7 +387,7 @@ def public_room(db, room, user, mine):
             WHERE q.room_id=? AND q.round_number=?
             ORDER BY 3,6,1''',(room['id'],r['number'],room['id'],r['number'])).fetchall()
         body.append(dict(number=r['number'], question=r['question'], status=r['status'],
-                         revealed_at=r['revealed_at'], submitted=[a['alias'] for a in got],
+                         revealed_at=r['revealed_at'], submitted=[a['alias'] for a in got if a['alias'] in roster or r['status']=='revealed'],
                          questions=[{'id':x['id'],'text':x['text'],'created_at':x['created_at'],
                                      'judge':x['label'],'kind':x['kind'],'judge_id':x['judge_id'],
                                      'mine':x['kind']=='human' and x['judge_user_id']==user['id']} for x in qrows],
@@ -416,6 +435,12 @@ def public_room(db, room, user, mine):
         m.alias FROM suggestions s JOIN users u ON u.id=s.sender_id
         LEFT JOIN members m ON m.room_id=s.room_id AND m.user_id=s.sender_id
         WHERE s.room_id=? ORDER BY s.id''', (room['id'],)).fetchall()
+    ai_edits = {}
+    if is_admin:
+        now_round = current_round(db,room)
+        ai_edits = {row['alias']:row['text'] for row in db.execute('''SELECT a.alias,a.text FROM answers a
+            JOIN ai_players ai ON ai.room_id=? AND ai.alias=a.alias
+            WHERE a.round_id=?''',(room['id'],now_round['id']))}
     return {'id':room['id'],'title':room['title'],'judge':room['judge'],
             'status':room['status'],'current_round':room['current_round'],
             'verdict_locked':bool(room['verdict_locked_at']) or (bool(judges) and all(j['locked'] for j in judges)),
@@ -429,13 +454,13 @@ def public_room(db, room, user, mine):
                         'locked':bool(r['locked'])} for r in judges] if is_admin else
                       [{'kind':r['kind'],'label':r['label'],'locked':bool(r['locked'])} for r in judges],
             'rounds':body,'suggestions':[dict(s) for s in suggestions],
-            'packets':[dict(p) for p in pkts]}
+            'ai_edits':ai_edits,'packets':[dict(p) for p in pkts]}
 
 
 def is_complete(db, rnd, room_id):
     _, _, expected = aliases(db, room_id)
     collected = {r['alias'] for r in db.execute('SELECT alias FROM answers WHERE round_id=?', (rnd['id'],))}
-    if len(expected) >= 2 and set(expected) == collected:
+    if len(expected) >= 2 and set(expected).issubset(collected):
         db.execute('UPDATE rounds SET status=?,revealed_at=? WHERE id=?', ('revealed', utcnow(), rnd['id']))
         return True
     return False
@@ -447,21 +472,18 @@ def log_event(db, room_id, number, kind, actor, text):
 
 
 def judge_packet(db, room, through):
-    humans, ais, roster = aliases(db, room['id'])
-    if len(roster) < 2:
-        raise HTTPException(409, '参赛者不足两人。')
-    lines = ['AI 图灵测试 · 裁判统一消息包', f'范围：第 1～{through} 轮', '参赛者代号固定不变；请仅根据匿名回答判断人类/AI。',
-             '请勿使用历史聊天、账号信息或外部资料进行身份判断。',
-             '在最终锁定前可提出追问，由主持人转录。']
-    for num in range(1, through + 1):
-        rnd = current_round(db, room, num)
-        if rnd['status'] != 'revealed':
-            raise HTTPException(409, f'第 {num} 轮尚未统一揭晓，不能制作裁判包。')
-        a = {x['alias']:x['text'] for x in db.execute('SELECT alias,text FROM answers WHERE round_id=?', (rnd['id'],))}
-        lines += ['', '='*30, f'第 {num} 轮', '【裁判提问】', rnd['question']]
-        for code in roster:
-            lines += ['', f'【参与者 {code} · 原始回答】', a[code]]
-    lines += ['', '—— 匿名资料结束 ——']
+    rnd = current_round(db, room, through)
+    if rnd['status'] != 'revealed':
+        raise HTTPException(409,'本轮尚未统一公开，不能生成快照。')
+    entries=db.execute('SELECT alias,text FROM answers WHERE round_id=? ORDER BY alias',(rnd['id'],)).fetchall()
+    if len(entries)<2:
+        raise HTTPException(409,'本轮有效答复不足。')
+    lines = ['AI 图灵测试 · 单轮匿名裁判快照', f'范围：仅第 {through} 轮',
+             '请根据本轮匿名答复判断，不包含之前轮次资料。',
+             '', '【本轮裁判问题】', rnd['question']]
+    for a in entries:
+        lines += ['', f'【参与者 {a["alias"]} · 原始回答】', a['text']]
+    lines += ['', '—— 本轮资料结束 ——']
     return '\n'.join(lines) + '\n'
 
 
@@ -472,10 +494,14 @@ def round_markdown(db, room, number, user, mine):
         lines = [f'# {room["title"]} · 第 {number} 轮 · 裁判匿名记录', '',
                  f'状态：{r["status"]}', '', '## 本轮问题', '',
                  r['question'] or '（等待管理员开启作答）', '', '## 匿名参赛者回答', '']
-        for alias in data['aliases']:
+        for alias in sorted(set(data['aliases']) | set(r['answers'])):
             answer = r['answers'].get(alias)
             lines += [f'### 参与者 {alias}',
                       answer['text'] if answer else '（已提交，待统一揭晓）' if alias in r['submitted'] else '（未提交）', '']
+        lines += ['## 本轮匿名提问与追问', '']
+        for suggestion in data['suggestions']:
+            if suggestion['round_number']==number:
+                lines.append(f'- {suggestion["alias"]}: {suggestion["text"]}')
         return '\n'.join(lines) + '\n'
     lines = [f'# {room["title"]} · 第 {number} 轮', '',f'状态：{r["status"]}',
              f'裁判：{room["judge"]}', '', '## 裁判问题', '', r['question'] or '（尚未发布）',
@@ -491,6 +517,12 @@ def round_markdown(db, room, number, user, mine):
         lines += [f'### {a} · 人类 · {h["name"]} (@{h["username"]})',
                   f'提交时间：{answer["submitted_at"]}' if answer else '',
                   answer['text'] if answer else '（已提交，待统一揭晓）' if a in r['submitted'] else '（未提交）', '']
+    for departed in db.execute('''SELECT m.alias,u.display_name,u.username,m.removed_at FROM members m
+        JOIN users u ON m.user_id=u.id WHERE m.room_id=? AND m.removed_at IS NOT NULL ORDER BY m.alias''',(room['id'],)):
+        a=departed['alias']
+        answer=r['answers'].get(a)
+        lines += [f'### {a} · 已移出的原人类参赛者 · {departed["display_name"]} (@{departed["username"]})',
+                  answer['text'] if answer else '（本轮未提交）', '']
     for ai in data['ais']:
         a = ai['alias']
         answer = r['answers'].get(a)
@@ -506,6 +538,7 @@ class Hub:
     def __init__(self, path):
         self.path = path
         self.groups: dict[int, set[WebSocket]] = {}
+        self.typing: dict[int, dict[WebSocket, str]] = {}
 
     async def notify(self, room_id, reason):
         for ws in list(self.groups.get(room_id, set())):
@@ -521,6 +554,25 @@ class Hub:
                     await ws.close(code=1008)
                 except Exception:
                     pass
+
+    async def typing_status(self, room_id):
+        # Only active human contestants receive typing info; never judges, AI or admin observers.
+        active = self.typing.get(room_id,{})
+        for ws in list(self.groups.get(room_id,set())):
+            try:
+                with db_open(self.path) as db:
+                    u=auth(db,ws.cookies.get(COOKIE))
+                    room,mine=permission(db,room_id,u)
+                    if not mine:
+                        continue
+                    rnd=current_round(db,room)
+                    roster=set(aliases(db,room_id)[2])
+                    states={alias:True for alias in active.values() if alias in roster and rnd['status']=='collecting'}
+                    await ws.send_json({'type':'typing_status','room_id':room_id,
+                                        'round':rnd['number'],'states':states})
+            except Exception:
+                self.groups.get(room_id,set()).discard(ws)
+
 
 
 def create_app(db_path=None):
@@ -590,7 +642,7 @@ def create_app(db_path=None):
                      ELSE 'player' END AS role
                 FROM rooms r LEFT JOIN members m ON r.id=m.room_id
                 LEFT JOIN room_judges j ON j.room_id=r.id
-                WHERE m.user_id=? OR j.user_id=? OR ?=1 ORDER BY r.id DESC''',
+                WHERE (m.user_id=? AND m.removed_at IS NULL) OR j.user_id=? OR ?=1 ORDER BY r.id DESC''',
                 (u['is_admin'],u['id'],u['id'],u['id'],u['is_admin'])).fetchall()
             return {'user':u, 'rooms':[dict(x) for x in rooms]}
 
@@ -686,9 +738,12 @@ def create_app(db_path=None):
             room=db.execute('SELECT * FROM rooms WHERE code=?',(body.code.strip().upper(),)).fetchone()
             if not room:
                 raise HTTPException(404,'邀请码无效。')
-            old=db.execute('SELECT alias FROM members WHERE room_id=? AND user_id=?',(room['id'],u['id'])).fetchone()
+            old=db.execute('SELECT alias FROM members WHERE room_id=? AND user_id=? AND removed_at IS NULL',(room['id'],u['id'])).fetchone()
             if old:
                 return {'room_id':room['id'],'alias':old['alias']}
+            if db.execute('SELECT 1 FROM members WHERE room_id=? AND user_id=? AND removed_at IS NOT NULL',
+                          (room['id'],u['id'])).fetchone():
+                raise HTTPException(403,'你已被主持人移出这个房间，不能重新加入。')
             ensure_roster_unlocked(db,room)
             if is_judge(db,room['id'],u):
                 raise HTTPException(409,'本房间裁判不能作为参赛者加入。')
@@ -950,6 +1005,67 @@ def create_app(db_path=None):
         await app.state.hub.notify(room_id,'round_revealed' if finished else 'answer_submitted')
         return {'ok':True,'revealed':finished}
 
+    @app.put('/api/rooms/{room_id}/ai/{alias}/answer')
+    async def revise_ai_answer(room_id:int,alias:str,body:AIAnswerEditData,request:Request):
+        alias=alias.upper()
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            require_admin(u)
+            room,_=permission(db,room_id,u)
+            if room['status']!='open' or room['revealed_at'] or room['verdict_locked_at']:
+                raise HTTPException(409,'比赛已结束或判决已锁定，不能修改 AI 回答。')
+            if db.execute('SELECT 1 FROM judge_verdicts WHERE room_id=? LIMIT 1',(room_id,)).fetchone() or db.execute(
+                'SELECT 1 FROM ai_judge_verdicts WHERE room_id=? LIMIT 1',(room_id,)).fetchone():
+                raise HTTPException(409,'已有裁判锁定判断，不能修改已经展示的回答。')
+            if not db.execute('SELECT 1 FROM ai_players WHERE room_id=? AND alias=?',(room_id,alias)).fetchone():
+                raise HTTPException(404,'AI 参赛位不存在。')
+            rnd=current_round(db,room)
+            if rnd['status'] not in ('collecting','revealed'):
+                raise HTTPException(409,'仅能修改当前轮次的已提交 AI 回答。')
+            old=db.execute('SELECT text FROM answers WHERE round_id=? AND alias=?',(rnd['id'],alias)).fetchone()
+            if not old:
+                raise HTTPException(409,'该 AI 本轮尚未提交回复。')
+            text=norm_text(body.text,12000)
+            if text==old['text']:
+                return {'ok':True,'changed':False}
+            now=utcnow()
+            db.execute('INSERT INTO ai_answer_revisions(room_id,round_number,alias,previous_text,replacement_text,changed_at) VALUES(?,?,?,?,?,?)',
+                       (room_id,rnd['number'],alias,old['text'],text,now))
+            db.execute('UPDATE answers SET text=?, edited_at=? WHERE round_id=? AND alias=?',
+                       (text,now,rnd['id'],alias))
+            log_event(db,room_id,rnd['number'],'ai_answer_revised','管理员',f'修订了 AI 参赛者 {alias} 的回答（有历史版本存档）')
+        await app.state.hub.notify(room_id,'ai_answer_revised')
+        return {'ok':True,'changed':True}
+
+    @app.post('/api/rooms/{room_id}/members/{user_id}/remove')
+    async def remove_member(room_id:int,user_id:int,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            require_admin(u)
+            room,_=permission(db,room_id,u)
+            if room['status']!='open' or room['verdict_locked_at'] or db.execute(
+                'SELECT 1 FROM judge_verdicts WHERE room_id=? LIMIT 1',(room_id,)).fetchone() or db.execute(
+                'SELECT 1 FROM ai_judge_verdicts WHERE room_id=? LIMIT 1',(room_id,)).fetchone():
+                raise HTTPException(409,'比赛结束或裁判开始锁定最终判断后不可移除参赛者。')
+            member=db.execute('SELECT alias FROM members WHERE room_id=? AND user_id=? AND removed_at IS NULL',
+                              (room_id,user_id)).fetchone()
+            if not member:
+                raise HTTPException(404,'此用户并非当前房间的参赛者。')
+            _,_,roster=aliases(db,room_id)
+            if len(roster)<=2:
+                raise HTTPException(409,'移除后至少应保留两名参赛者。')
+            db.execute('UPDATE members SET removed_at=? WHERE room_id=? AND user_id=?',
+                       (utcnow(),room_id,user_id))
+            log_event(db,room_id,room['current_round'],'member_removed','管理员',f'移除参赛者 {member["alias"]}；历史回答保留')
+            rnd=current_round(db,room)
+            finished=False
+            if rnd['status']=='collecting':
+                finished=is_complete(db,rnd,room_id)
+                if finished:
+                    log_event(db,room_id,rnd['number'],'round_revealed','系统','当前在场参赛者已全部提交，统一公开')
+        await app.state.hub.notify(room_id,'round_revealed' if finished else 'member_removed')
+        return {'ok':True,'revealed':finished}
+
     @app.post('/api/rooms/{room_id}/next')
     async def next_round(room_id:int,request:Request):
         with connection(immediate=True) as db:
@@ -970,6 +1086,7 @@ def create_app(db_path=None):
                        (room_id,next_num,utcnow()))
             db.execute('UPDATE rooms SET current_round=? WHERE id=?',(next_num,room_id))
             log_event(db,room_id,next_num,'new_round','管理员','进入下一轮')
+        app.state.hub.typing.pop(room_id,None)
         await app.state.hub.notify(room_id,'new_round')
         return {'number':next_num}
 
@@ -982,6 +1099,38 @@ def create_app(db_path=None):
             content=round_markdown(db,room,number,u,mine)
         return PlainTextResponse(content,media_type='text/markdown; charset=utf-8',headers={
             'Content-Disposition':f'attachment; filename="room-{room_id}-round-{number}.md"',
+            'Cache-Control':'no-store'})
+
+    @app.get('/api/rooms/{room_id}/log')
+    def full_match_log(room_id:int,request:Request):
+        with connection() as db:
+            u=caller(request,db)
+            room,mine=permission(db,room_id,u)
+            if room['status']!='finished':
+                raise HTTPException(409,'比赛尚未结束，不能下载整场日志。')
+            data=public_room(db,room,u,mine)
+            lines=[f'# {room["title"]} · 整场比赛 Log', '',
+                   f'轮次：{room["current_round"]} · 结束时间：{room["revealed_at"]}',
+                   '']
+            for num in range(1,room['current_round']+1):
+                lines.append(round_markdown(db,room,num,u,mine))
+            if data['is_judge']:
+                lines.extend(['## 我的独立裁判判决', ''])
+                verdict=data['my_verdict']
+                if verdict:
+                    lines.extend([f'{a}：{v}' for a,v in sorted(verdict['predictions'].items())])
+                    lines += ['',f'判断依据：{verdict.get("evidence", "")}', '']
+                lines.append('本文件仅为匿名裁判私人记录，不含真人昵称及其他裁判判决。')
+            else:
+                lines += ['## 最终裁判判决', '']
+                for v in data['verdicts']:
+                    lines += [f'### {v["judge"]}',
+                        *[f'- {a}: {guess}' for a,guess in sorted(v.get('predictions',{}).items())],
+                        f'- 判断依据：{v.get("evidence", "")}',
+                        f'- 置信度：{v.get("confidence", "?")}', '']
+            content='\n'.join(lines)+'\n'
+        return PlainTextResponse(content,media_type='text/markdown; charset=utf-8',headers={
+            'Content-Disposition':f'attachment; filename="room-{room_id}-full-log.md"',
             'Cache-Control':'no-store'})
 
     @app.post('/api/rooms/{room_id}/packets')
@@ -1155,12 +1304,42 @@ def create_app(db_path=None):
         try:
             await websocket.send_json({'type':'connected','room_id':room_id})
             while True:
-                # 客户端不允许修改状态；只接受 ping，所有变更走有权限检查的 HTTP API。
-                await websocket.receive_text()
+                raw=await websocket.receive_text()
+                if len(raw)>512:
+                    continue
+                try:
+                    msg=json.loads(raw)
+                except (json.JSONDecodeError,TypeError):
+                    continue
+                if not isinstance(msg,dict) or msg.get('type')!='typing' or type(msg.get('active')) is not bool:
+                    continue
+                try:
+                    with connection() as db:
+                        user=auth(db,websocket.cookies.get(COOKIE))
+                        room,mine=permission(db,room_id,user)
+                        rnd=current_round(db,room)
+                        valid=bool(mine) and room['status']=='open' and rnd['status']=='collecting' and (
+                            msg.get('round')==rnd['number']) and not db.execute(
+                            'SELECT 1 FROM answers WHERE round_id=? AND alias=?',(rnd['id'],mine)).fetchone()
+                    existing=app.state.hub.typing.get(room_id,{}).get(websocket)
+                    if valid and ((bool(existing) and msg['active']) or (not existing and not msg['active'])):
+                        continue
+                    if not valid:
+                        app.state.hub.typing.get(room_id,{}).pop(websocket,None)
+                    elif msg['active']:
+                        app.state.hub.typing.setdefault(room_id,{})[websocket]=mine
+                    else:
+                        app.state.hub.typing.get(room_id,{}).pop(websocket,None)
+                    await app.state.hub.typing_status(room_id)
+                except HTTPException:
+                    await websocket.close(code=1008)
+                    break
         except WebSocketDisconnect:
             pass
         finally:
             clients.discard(websocket)
+            app.state.hub.typing.get(room_id,{}).pop(websocket,None)
+            await app.state.hub.typing_status(room_id)
 
     return app
 
