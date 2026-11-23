@@ -156,8 +156,17 @@ def legacy_database(path):
 
 
 def snapshot(db):
-    tables = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
-    return {name: [dict(r) for r in db.execute(f'SELECT * FROM "{name}" ORDER BY rowid')] for name in tables}
+    # Compare pre-existing application data, excluding v1.6-only schema additions.
+    tables = [r[0] for r in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name!='model_profiles'")]
+    result = {}
+    for name in tables:
+        rows = [dict(r) for r in db.execute(f'SELECT * FROM "{name}" ORDER BY rowid')]
+        if name in ('ai_players', 'ai_judges'):
+            for row in rows:
+                row.pop('model_profile_id', None)
+        result[name] = rows
+    return result
 
 
 def test_legacy_migration_preserves_all_records_backup_and_passwords(tmp_path):
