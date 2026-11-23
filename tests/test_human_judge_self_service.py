@@ -291,3 +291,85 @@ def test_join_and_restart_race_cannot_create_two_active_judge_rooms(env):
             WHERE j.user_id=? AND r.status<>'finished' ORDER BY j.room_id''',
             (int(uid[2:]),)).fetchall()
         assert len(active) == 1
+
+
+def test_assign_conflict_details_are_visible_only_to_authorized_room_viewers(env):
+    _, app, _ = env
+    judge, uid = register(app, '跨房间绑定目标')
+
+    authorized_manager, _ = register(app, '同时管理两个房间')
+    visible_room = post(authorized_manager, '/api/rooms', {'title': '房主有权查看的冲突房间'})
+    authorized_target = post(authorized_manager, '/api/rooms', {'title': '授权绑定目标房间'})
+    post(judge, '/api/join', {'code': visible_room['code'], 'role': 'judge'})
+
+    visible_error = request(
+        authorized_manager, 'POST',
+        f'/api/rooms/{authorized_target["room_id"]}/judges/assign',
+        {'uid': uid, 'label': '重复绑定'}, 409
+    )
+    assert '房主有权查看的冲突房间' in visible_error['detail']
+    assert f'ROOM {visible_room["room_id"]}' in visible_error['detail']
+
+    unrelated_manager, _ = register(app, '无权查看冲突房间')
+    unrelated_target = post(unrelated_manager, '/api/rooms', {'title': '无关房间绑定目标'})
+    hidden_error = request(
+        unrelated_manager, 'POST',
+        f'/api/rooms/{unrelated_target["room_id"]}/judges/assign',
+        {'uid': uid, 'label': '重复绑定'}, 409
+    )
+    assert hidden_error['detail'] == '该裁判正在其他未完赛房间任职，请先完成当前房间的比赛。'
+    assert '房主有权查看的冲突房间' not in hidden_error['detail']
+    assert f'ROOM {visible_room["room_id"]}' not in hidden_error['detail']
+
+
+def test_restart_conflict_details_are_visible_only_to_authorized_room_viewers(env):
+    path, app, _ = env
+
+    # A manager who owns both rooms is allowed to see the conflicting room details.
+    authorized_manager, _ = register(app, '可查看重开冲突')
+    judge, uid = register(app, '重开冲突裁判')
+    visible_finished = post(authorized_manager, '/api/rooms', {'title': '可查看的重开历史房间'})
+    visible_active = post(authorized_manager, '/api/rooms', {'title': '可查看的重开冲突房间'})
+    post(judge, '/api/join', {'code': visible_active['code'], 'role': 'judge'})
+    with db_open(path) as db:
+        db.execute("UPDATE rooms SET status='finished' WHERE id=?", (visible_finished['room_id'],))
+        db.execute('INSERT INTO room_judges(room_id,user_id,label,created_at) VALUES(?,?,?,?)',
+                   (visible_finished['room_id'], int(uid[2:]), '保留裁判', '2026-11-23T00:00:00+00:00'))
+    visible_error = request(
+        authorized_manager, 'POST',
+        f'/api/rooms/{visible_finished["room_id"]}/restart',
+        {'match_number': 1, 'confirm': True}, 409
+    )
+    assert '可查看的重开冲突房间' in visible_error['detail']
+    assert f'ROOM {visible_active["room_id"]}' in visible_error['detail']
+
+    # An unrelated room owner gets the same conflict result without cross-room metadata.
+    hidden_owner, _ = register(app, '无权查看重开冲突')
+    hidden_judge, hidden_uid = register(app, '隐藏重开冲突裁判')
+    hidden_finished = post(hidden_owner, '/api/rooms', {'title': '无权查看的重开历史房间'})
+    other_owner, _ = register(app, '另一房间房主')
+    hidden_active = post(other_owner, '/api/rooms', {'title': '不得泄露的活动房间标题'})
+    post(hidden_judge, '/api/join', {'code': hidden_active['code'], 'role': 'judge'})
+    with db_open(path) as db:
+        db.execute("UPDATE rooms SET status='finished' WHERE id=?", (hidden_finished['room_id'],))
+        db.execute('INSERT INTO room_judges(room_id,user_id,label,created_at) VALUES(?,?,?,?)',
+                   (hidden_finished['room_id'], int(hidden_uid[2:]), '保留裁判', '2026-11-23T00:00:01+00:00'))
+        db.execute('''INSERT INTO events(room_id,round_number,kind,actor,text,created_at)
+            VALUES(?,1,'privacy_marker','系统','重开冲突时必须保留的记录','2026-11-23T00:00:02+00:00')''',
+            (hidden_finished['room_id'],))
+
+    hidden_error = request(
+        hidden_owner, 'POST',
+        f'/api/rooms/{hidden_finished["room_id"]}/restart',
+        {'match_number': 1, 'confirm': True}, 409
+    )
+    assert hidden_error['detail'] == (
+        '无法重新开赛：有保留裁判仍在其他未完赛房间任职。请先完成其他房间的比赛。'
+    )
+    assert '不得泄露的活动房间标题' not in hidden_error['detail']
+    assert f'ROOM {hidden_active["room_id"]}' not in hidden_error['detail']
+    with db_open(path) as db:
+        assert db.execute('SELECT status FROM rooms WHERE id=?',
+                          (hidden_finished['room_id'],)).fetchone()['status'] == 'finished'
+        assert db.execute('SELECT COUNT(*) FROM events WHERE room_id=? AND kind=?',
+                          (hidden_finished['room_id'], 'privacy_marker')).fetchone()[0] == 1
