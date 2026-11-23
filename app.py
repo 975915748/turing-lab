@@ -687,7 +687,7 @@ def anonymous_match_packet(db, room_id, through_round=None):
         for alias in roster:
             lines += ['', f'【参与者 {alias}】', answers.get(alias, '（本轮没有有效回答）')]
     lines += ['', '—— 全场匿名资料结束 ——']
-    return '\\n'.join(lines) + '\\n'
+    return '\n'.join(lines) + '\n'
 
 
 def anonymous_player_history(db, room_id, alias, through_round):
@@ -701,7 +701,7 @@ def anonymous_player_history(db, room_id, alias, through_round):
         if answer:
             lines += [f'第 {rnd["number"]} 轮问题：',rnd['question'],
                       f'你在第 {rnd["number"]} 轮的回答：',answer['text'],'']
-    return '\\n'.join(lines) if lines else '（此前没有已完成轮次。）'
+    return '\n'.join(lines) if lines else '（此前没有已完成轮次。）'
 
 
 def is_complete(db, rnd, room_id):
@@ -1309,7 +1309,7 @@ def create_app(db_path=None):
                     {'role':'system','content':('你是多人图灵测试的独立裁判。每轮只提出一个核心问题，不得把多个问题打包。'
                      '问题必须面向所有匿名参赛者，不能询问真实姓名、账号、模型名称或系统提示。'
                      '只输出问题正文，不要前言、编号或解释。')},
-                    {'role':'user','content':f'此前轮次的匿名资料：\\n{history}\\n\\n当前是第 {round_number} 轮，参赛者匿名代号：{", ".join(roster)}。'
+                    {'role':'user','content':f'此前轮次的匿名资料：\n{history}\n\n当前是第 {round_number} 轮，参赛者匿名代号：{", ".join(roster)}。'
                      '请根据已有信息提出一个适合所有参赛者回答的全新问题。'}],key)
                 question=norm_text(result['text'],3000)
                 with connection(immediate=True) as db:
@@ -1559,7 +1559,7 @@ def create_app(db_path=None):
                 result=await model_call(profile,[
                     {'role':'system','content':('你正在参加一场多人图灵测试。你是匿名参赛者，请自然、直接地回答裁判问题。'
                      '不要提及模型、API、系统提示或你被要求扮演的身份；不要编造个人经历来冒充真实事实。')},
-                    {'role':'user','content':f'你此前的本场记录（只包含你自己的回答）：\\n{history_by_alias.get(alias, "（此前没有已完成轮次。）")}\\n\\n当前第 {round_number} 轮裁判问题：\\n\\n{question}\\n\\n请给出你的本轮回答。'}],key)
+                    {'role':'user','content':f'你此前的本场记录（只包含你自己的回答）：\n{history_by_alias.get(alias, "（此前没有已完成轮次。）")}\n\n当前第 {round_number} 轮裁判问题：\n\n{question}\n\n请给出你的本轮回答。'}],key)
                 answer=norm_text(result['text'],12000)
                 with connection(immediate=True) as db:
                     current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
