@@ -1,4 +1,4 @@
-"""多人图灵测试：单进程 FastAPI + WebSocket + SQLite，纯手动 AI 转录。"""
+"""多人图灵测试：单进程 FastAPI + WebSocket + SQLite，支持手动转录与模型 API。"""
 from __future__ import annotations
 
 import asyncio
