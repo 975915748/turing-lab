@@ -70,12 +70,18 @@ def init_db(path):
                 "SELECT name FROM sqlite_master WHERE type='table'")}
             if 'users' in old_tables and (
                 'room_judges' not in old_tables or 'ai_judges' not in old_tables or
+                'legacy_username' not in {x['name'] for x in old.execute('PRAGMA table_info(users)')} or
                 ('members' in old_tables and 'removed_at' not in {
                     x['name'] for x in old.execute('PRAGMA table_info(members)')}) or
                 ('answers' in old_tables and 'edited_at' not in {
                     x['name'] for x in old.execute('PRAGMA table_info(answers)')})):
                 stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
-                backup_tag = 'v1_3' if 'ai_judges' in old_tables else ('v1_1' if 'room_judges' not in old_tables else 'v1_2')
+                backup_tag = ('v1_1' if 'room_judges' not in old_tables else
+                              'v1_2' if 'ai_judges' not in old_tables else
+                              'v1_3' if ('members' in old_tables and 'removed_at' not in {
+                                  x['name'] for x in old.execute('PRAGMA table_info(members)')}) or
+                                  ('answers' in old_tables and 'edited_at' not in {
+                                      x['name'] for x in old.execute('PRAGMA table_info(answers)')}) else 'v1_4')
                 backup_path = path.with_name(path.stem + f'.pre-{backup_tag}-{stamp}-{secrets.token_hex(2)}.sqlite3')
                 with sqlite3.connect(str(backup_path)) as backup:
                     old.backup(backup)
@@ -84,7 +90,8 @@ def init_db(path):
         db.execute('PRAGMA journal_mode=WAL')
         db.executescript('''
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL COLLATE NOCASE,
+            legacy_username TEXT UNIQUE COLLATE NOCASE,
             display_name TEXT NOT NULL, pw_hash TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS sessions (
@@ -171,6 +178,54 @@ def init_db(path):
             db.execute('ALTER TABLE members ADD COLUMN removed_at TEXT')
         if 'edited_at' not in {x['name'] for x in db.execute('PRAGMA table_info(answers)')}:
             db.execute('ALTER TABLE answers ADD COLUMN edited_at TEXT')
+        if 'legacy_username' not in {x['name'] for x in db.execute('PRAGMA table_info(users)')}:
+            migrate_user_accounts(db)
+
+
+def migrate_user_accounts(db):
+    """在同一个事务中移除用户名唯一约束，保留主键和所有外键引用。"""
+    db.commit()
+    # SQLite 必须在事务外关闭此连接的外键，才能安全替换被引用的 users 表。
+    db.execute('PRAGMA foreign_keys=OFF')
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        db.execute('''CREATE TABLE users_uid_upgrade (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL COLLATE NOCASE,
+            legacy_username TEXT UNIQUE COLLATE NOCASE,
+            display_name TEXT NOT NULL, pw_hash TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL)''')
+        db.execute('''INSERT INTO users_uid_upgrade
+            (id,username,legacy_username,display_name,pw_hash,is_admin,created_at)
+            SELECT id,username,username,display_name,pw_hash,is_admin,created_at FROM users''')
+        db.execute('DROP TABLE users')
+        db.execute('ALTER TABLE users_uid_upgrade RENAME TO users')
+        if db.execute('PRAGMA foreign_key_check').fetchone():
+            raise sqlite3.IntegrityError('账号升级未通过外键检查，已停止迁移。')
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.execute('PRAGMA foreign_keys=ON')
+
+
+def user_uid(user_id):
+    return f'TL{user_id:08d}'
+
+
+def lookup_account(db, uid=None, username=None):
+    """显式区分 UID 与旧登录名，避免旧用户名形似 UID 时选错账号。"""
+    if (uid is None) == (username is None):
+        raise HTTPException(422, '请提供 UID 或旧登录名中的一项。')
+    if uid is not None:
+        value = uid.strip().upper()
+        if not re.fullmatch(r'TL[0-9]{8,19}', value):
+            return None
+        user_id = int(value[2:])
+        if not 1 <= user_id <= 9223372036854775807 or user_uid(user_id) != value:
+            return None
+        return db.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
+    return db.execute('SELECT * FROM users WHERE legacy_username=?', (username.strip(),)).fetchone()
 
 
 def seed_admin(path, username, display, password):
@@ -181,19 +236,22 @@ def seed_admin(path, username, display, password):
             return False
         if not re.fullmatch(r'[A-Za-z0-9_]{3,30}', username):
             raise ValueError('管理员登录名须为 3–30 位英文、数字或下划线。')
-        db.execute('INSERT INTO users (username,display_name,pw_hash,is_admin,created_at) VALUES (?,?,?,?,?)',
-                   (username, display, hash_password(password), 1, utcnow()))
+        db.execute('INSERT INTO users (username,legacy_username,display_name,pw_hash,is_admin,created_at) VALUES (?,?,?,?,?,?)',
+                   (username, username, display, hash_password(password), 1, utcnow()))
         return True
 
 
 class LoginData(BaseModel):
-    username: str = Field(min_length=3, max_length=30)
+    uid: Optional[str] = Field(default=None, min_length=1, max_length=40)
+    username: Optional[str] = Field(default=None, min_length=3, max_length=30)
     password: str = Field(min_length=1, max_length=200)
 
 
-class RegisterData(LoginData):
-    display_name: str = Field(min_length=1, max_length=40)
-    code: str = Field(min_length=6, max_length=20)
+class RegisterData(BaseModel, extra='forbid'):
+    username: str = Field(min_length=1, max_length=40)
+    password: str = Field(min_length=1, max_length=200)
+    display_name: Optional[str] = Field(default=None, min_length=1, max_length=40)
+    code: Optional[str] = Field(default=None, min_length=6, max_length=20)
 
 
 class CodeData(BaseModel):
@@ -210,13 +268,14 @@ class AIData(BaseModel):
 
 
 class JudgeAccountData(BaseModel):
-    username: str = Field(min_length=3, max_length=30)
+    username: str = Field(min_length=1, max_length=40)
     display_name: str = Field(min_length=1, max_length=40)
     password: str = Field(min_length=8, max_length=200)
 
 
 class ExistingJudgeData(BaseModel):
-    username: str = Field(min_length=3, max_length=30)
+    uid: Optional[str] = Field(default=None, min_length=1, max_length=40)
+    username: Optional[str] = Field(default=None, min_length=3, max_length=30)
     label: str = Field(min_length=1, max_length=40)
 
 
@@ -251,7 +310,7 @@ def auth(db, token):
                      (hashlib.sha256(token.encode()).hexdigest(), utcnow())).fetchone()
     if not row:
         raise HTTPException(401, '登录已过期，请重新登录。')
-    return dict(row)
+    return dict(row, uid=user_uid(row['id']))
 
 
 def require_admin(u):
@@ -447,10 +506,12 @@ def public_room(db, room, user, mine):
             'revealed_at':room['revealed_at'],'verdict':verdict,'verdicts':verdicts,
             'mine':mine,'is_admin':is_admin,'is_judge':False,
             'invite_code':room['code'] if is_admin else None,
-            'humans':[{'alias':r['alias'],'user_id':r['user_id'],'name':r['display_name'], 'username':r['username']} for r in humans],
+            'humans':[{'alias':r['alias'],'user_id':r['user_id'],'uid':user_uid(r['user_id']),
+                       'name':r['display_name'], 'username':r['username']} for r in humans],
             'ais':[{'alias':r['alias'],'name':r['name']} for r in ais],
             'judges': [{'id':r['id'],'kind':r['kind'],'user_id':r['user_id'],
                         'label':r['label'],'username':r['username'],
+                        'uid':user_uid(r['user_id']) if r['kind']=='human' else None,
                         'locked':bool(r['locked'])} for r in judges] if is_admin else
                       [{'kind':r['kind'],'label':r['label'],'locked':bool(r['locked'])} for r in judges],
             'rounds':body,'suggestions':[dict(s) for s in suggestions],
@@ -514,14 +575,14 @@ def round_markdown(db, room, number, user, mine):
         a = h['alias']
         answer = r['answers'].get(a)
         # 未公开时只显示提交状态，自己可以看到自己的回答。
-        lines += [f'### {a} · 人类 · {h["name"]} (@{h["username"]})',
+        lines += [f'### {a} · 人类 · {h["name"]} (@{h["username"]}) · UID {h["uid"]}',
                   f'提交时间：{answer["submitted_at"]}' if answer else '',
                   answer['text'] if answer else '（已提交，待统一揭晓）' if a in r['submitted'] else '（未提交）', '']
-    for departed in db.execute('''SELECT m.alias,u.display_name,u.username,m.removed_at FROM members m
+    for departed in db.execute('''SELECT m.alias,u.id AS user_id,u.display_name,u.username,m.removed_at FROM members m
         JOIN users u ON m.user_id=u.id WHERE m.room_id=? AND m.removed_at IS NOT NULL ORDER BY m.alias''',(room['id'],)):
         a=departed['alias']
         answer=r['answers'].get(a)
-        lines += [f'### {a} · 已移出的原人类参赛者 · {departed["display_name"]} (@{departed["username"]})',
+        lines += [f'### {a} · 已移出的原人类参赛者 · {departed["display_name"]} (@{departed["username"]}) · UID {user_uid(departed["user_id"])}',
                   answer['text'] if answer else '（本轮未提交）', '']
     for ai in data['ais']:
         a = ai['alias']
@@ -649,7 +710,10 @@ def create_app(db_path=None):
     @app.post('/api/login')
     def login(body:LoginData, request:Request, response:Response):
         require_origin(request.headers)
-        identity=(request.client.host if request.client else 'unknown')+':'+body.username.strip().lower()
+        if (body.uid is None) == (body.username is None):
+            raise HTTPException(422, '请提供 UID 或旧登录名中的一项。')
+        login_key = 'uid:' + body.uid.strip().upper() if body.uid is not None else 'legacy:' + body.username.strip().lower()
+        identity=(request.client.host if request.client else 'unknown')+':'+login_key
         now=datetime.now(timezone.utc)
         blocked=False
         invalid=False
@@ -663,7 +727,7 @@ def create_app(db_path=None):
             if attempt and attempt['failure_count']>=8:
                 blocked=True
             else:
-                row=db.execute('SELECT * FROM users WHERE username=?',(body.username.strip(),)).fetchone()
+                row=lookup_account(db, body.uid, body.username)
                 if not row or not verify_password(body.password,row['pw_hash']):
                     invalid=True
                     if attempt:
@@ -678,36 +742,37 @@ def create_app(db_path=None):
             raise HTTPException(429,'登录失败次数太多，请 15 分钟后重试。')
         if invalid:
             raise HTTPException(401,'账号或密码错误。')
-        return {'ok':True}
+        return {'ok':True,'uid':user_uid(row['id'])}
 
     @app.post('/api/register')
     async def register(body:RegisterData, request:Request, response:Response):
         require_origin(request.headers)
         with connection(immediate=True) as db:
-            room=db.execute('SELECT * FROM rooms WHERE code=?',(body.code.strip().upper(),)).fetchone()
-            if not room:
-                raise HTTPException(404,'邀请码无效。')
-            ensure_roster_unlocked(db,room)
-            username=body.username.strip()
-            if not re.fullmatch(r'[A-Za-z0-9_]{3,30}', username):
-                raise HTTPException(422,'账号只能使用 3–30 位英文、数字或下划线。')
-            if db.execute('SELECT 1 FROM users WHERE username=?',(username,)).fetchone():
-                raise HTTPException(409,'账号已被使用，请登录后加入房间。')
+            room=None
+            if body.code is not None:
+                room=db.execute('SELECT * FROM rooms WHERE code=?',(body.code.strip().upper(),)).fetchone()
+                if not room:
+                    raise HTTPException(404,'邀请码无效。')
+                ensure_roster_unlocked(db,room)
+            username=norm_text(body.username,40)
             try:
                 pw_hash=hash_password(body.password)
             except ValueError as exc:
                 raise HTTPException(422,str(exc))
             cur=db.execute('INSERT INTO users(username,display_name,pw_hash,is_admin,created_at) VALUES(?,?,?,?,?)',
-                           (username,norm_text(body.display_name,40),pw_hash,0,utcnow()))
+                           (username,norm_text(body.display_name,40) if body.display_name is not None else username,pw_hash,0,utcnow()))
             uid=cur.lastrowid
-            alias=new_alias(db,room['id'])
-            db.execute('INSERT INTO members(room_id,user_id,alias,joined_at) VALUES(?,?,?,?)',
-                       (room['id'],uid,alias,utcnow()))
-            log_event(db,room['id'],1,'joined',alias,'加入比赛')
+            if room:
+                alias=new_alias(db,room['id'])
+                db.execute('INSERT INTO members(room_id,user_id,alias,joined_at) VALUES(?,?,?,?)',
+                           (room['id'],uid,alias,utcnow()))
+                log_event(db,room['id'],1,'joined',alias,'加入比赛')
             set_session(response,db,uid)
-            room_id=room['id']
-        await app.state.hub.notify(room_id, 'joined')
-        return {'ok':True,'room_id':room_id}
+        result={'ok':True,'uid':user_uid(uid)}
+        if room:
+            await app.state.hub.notify(room['id'], 'joined')
+            result['room_id']=room['id']
+        return result
 
     @app.post('/api/logout')
     def logout(request:Request, response:Response):
@@ -768,11 +833,7 @@ def create_app(db_path=None):
             u=caller(request,db,mutate=True)
             require_admin(u)
             room,_=permission(db,room_id,u)
-            username=body.username.strip()
-            if not re.fullmatch(r'[A-Za-z0-9_]{3,30}',username):
-                raise HTTPException(422,'裁判账号应为 3～30 位英文、数字或下划线。')
-            if db.execute('SELECT 1 FROM users WHERE username=?',(username,)).fetchone():
-                raise HTTPException(409,'账号已存在；请使用“绑定已有账号”功能。')
+            username=norm_text(body.username,40)
             check_judge_registration(db,room,-1)
             try:
                 pw_hash=hash_password(body.password)
@@ -783,9 +844,10 @@ def create_app(db_path=None):
                            (username,label,pw_hash,0,utcnow()))
             db.execute('INSERT INTO room_judges(room_id,user_id,label,created_at) VALUES(?,?,?,?)',
                        (room_id,cur.lastrowid,label,utcnow()))
+            uid=user_uid(cur.lastrowid)
             log_event(db,room_id,room['current_round'],'judge_added','管理员','已添加独立裁判')
         await app.state.hub.notify(room_id,'judge_added')
-        return {'ok':True,'username':username,'label':label}
+        return {'ok':True,'uid':uid,'username':username,'label':label}
 
     @app.post('/api/rooms/{room_id}/judges/assign')
     async def assign_judge(room_id:int,body:ExistingJudgeData,request:Request):
@@ -793,7 +855,7 @@ def create_app(db_path=None):
             u=caller(request,db,mutate=True)
             require_admin(u)
             room,_=permission(db,room_id,u)
-            target=db.execute('SELECT id,is_admin FROM users WHERE username=?',(body.username.strip(),)).fetchone()
+            target=lookup_account(db, body.uid, body.username)
             if not target or target['is_admin']:
                 raise HTTPException(404,'用户不存在或不可作为独立裁判。')
             if is_judge(db,room_id,{'id':target['id']}):
@@ -1345,3 +1407,4 @@ def create_app(db_path=None):
 
 
 app=create_app()
+

@@ -94,6 +94,8 @@ def test_full_round_security_and_reveal(env):
     assert '真人姓名_2' not in content
     assert 'ModelZ' not in content
     assert 'player_1' not in content
+    for human in admin.get(base).json()['humans']:
+        assert human['uid'] not in content
     assert 'Human' not in content and 'AI ·' not in content
     assert p1.get(base+f'/packets/{packet["packet_id"]}').status_code==403
     post(admin,base+f'/packets/{packet["packet_id"]}/sent')
@@ -107,8 +109,8 @@ def test_full_round_security_and_reveal(env):
     post(admin,base+'/ai/C/answer',{'text':'回复3'})
     packet2=post(admin,base+'/packets',{})
     text2=admin.get(base+f'/packets/{packet2["packet_id"]}').json()['content']
-    assert '第 1 轮' in text2 and '第 2 轮' in text2
-    assert '秘密回答_ALPHA' in text2 and '回复2' in text2
+    assert '范围：仅第 2 轮' in text2
+    assert '秘密回答_ALPHA' not in text2 and '回复2' in text2
     post(admin,base+'/verdict',{'predictions':{'A':'Human','B':'AI','C':'AI'},'confidence':80,'evidence':'判断依据'},200)
     before=p1.get(base).json()
     assert before['verdict_locked'] is True
@@ -157,3 +159,4 @@ def test_invalid_invite_and_admin_setup(tmp_path):
     with sqlite3.connect(path) as db:
         row=db.execute('SELECT pw_hash FROM users WHERE is_admin=1').fetchone()[0]
         assert row.startswith('pbkdf2_sha256$') and 'supersecret' not in row
+

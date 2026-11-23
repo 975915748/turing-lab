@@ -1,5 +1,6 @@
 """v1.2 真人+AI混合裁判：转录、盲测、锁定、迁移以及权限隔离。"""
 import json
+import re
 import sqlite3
 from pathlib import Path
 from fastapi.testclient import TestClient
@@ -31,11 +32,11 @@ def test_mixed_judges_secrets_and_reveal(tmp_path):
         call(c, '/api/register', {'username': f'player_1{i}', 'display_name': f'本人_{i}',
               'password': 'password1234', 'code': room['code']})
     call(admin, base+'/ai', {'name':'participant_ai'})
-    call(admin, base+'/judges', {'username': 'judge001', 'display_name':'真人裁判一号',
-         'password':'password1234'})
+    human_uid=call(admin, base+'/judges', {'username': 'judge001', 'display_name':'真人裁判一号',
+         'password':'password1234'})['uid']
     aj1 = call(admin, base+'/ai-judges', {'name':'AI 裁判甲'})['id']
     aj2 = call(admin, base+'/ai-judges', {'name':'AI 裁判乙'})['id']
-    call(human_judge, '/api/login', {'username':'judge001', 'password':'password1234'})
+    call(human_judge, '/api/login', {'uid':human_uid, 'password':'password1234'})
     info = admin.get(base).json()
     assert len(info['judges']) == 3
     assert [j['kind'] for j in info['judges']].count('ai') == 2
@@ -131,7 +132,11 @@ def test_ui_static_assets_versioned(tmp_path):
     c=TestClient(app)
     homepage=c.get('/')
     assert homepage.status_code == 200 and homepage.headers['Cache-Control'] == 'no-store'
-    assert 'app.js?v=1.2' in homepage.text
-    js=c.get('/static/app.js?v=1.2').text
+    script=re.search(r'src="(/static/app\.js\?v=[^"]+)"', homepage.text)
+    assert script is not None
+    response=c.get(script.group(1))
+    assert response.status_code == 200
+    js=response.text
     for field in ('add-ai-judge','ai-judge-question','ai-judge-verdict','真人 / AI 裁判管理'):
         assert field in js
+
