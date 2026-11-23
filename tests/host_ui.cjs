@@ -25,7 +25,9 @@ async function screenshot(page, name) {
   await page.screenshot({ path: path.join(artifacts, name), fullPage: true, animations: 'disabled' });
 }
 (async () => {
-  const browserOptions = { headless: true };\n  if (process.env.PLAYWRIGHT_CHANNEL !== 'default') browserOptions.channel = process.env.PLAYWRIGHT_CHANNEL || 'msedge';\n  const browser = await chromium.launch(browserOptions);
+  const browserOptions = { headless: true };
+  if (process.env.PLAYWRIGHT_CHANNEL !== 'default') browserOptions.channel = process.env.PLAYWRIGHT_CHANNEL || 'msedge';
+  const browser = await chromium.launch(browserOptions);
   const hostContext = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const page = await hostContext.newPage();
   page.setDefaultTimeout(10000);
