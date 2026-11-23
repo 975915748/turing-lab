@@ -252,3 +252,36 @@ def test_existing_twelve_judge_limit_still_applies_to_self_service(env):
     judge, _ = register(app, '第十三位裁判')
     post(judge, '/api/join', {'code': room['code'], 'role': 'judge'}, 409)
     assert len(admin.get(base).json()['judges']) == 12
+
+
+def test_join_and_restart_race_cannot_create_two_active_judge_rooms(env):
+    path, app, admin = env
+    judge, uid = register(app, '重开入房并发裁判')
+    finished = post(admin, '/api/rooms', {'title': '并发重开旧房间'})
+    target = post(admin, '/api/rooms', {'title': '并发加入新房间'})
+    with db_open(path) as db:
+        db.execute("UPDATE rooms SET status='finished' WHERE id=?", (finished['room_id'],))
+        db.execute('INSERT INTO room_judges(room_id,user_id,label,created_at) VALUES(?,?,?,?)',
+                   (finished['room_id'], int(uid[2:]), '保留裁判', '2026-11-23T00:00:00+00:00'))
+
+    def join_target():
+        me = judge.get('/api/me').json()
+        response = judge.post('/api/join', json={'code': target['code'], 'role': 'judge'},
+                              headers={'X-CSRF-Token': me['user']['csrf']})
+        return response.status_code, response.text
+
+    def restart_finished():
+        me = admin.get('/api/me').json()
+        response = admin.post(f'/api/rooms/{finished["room_id"]}/restart',
+                              json={'match_number': 1, 'confirm': True},
+                              headers={'X-CSRF-Token': me['user']['csrf']})
+        return response.status_code, response.text
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda fn: fn(), (join_target, restart_finished)))
+    assert sorted(code for code, _ in results) == [200, 409], results
+    with db_open(path) as db:
+        active = db.execute('''SELECT j.room_id FROM room_judges j JOIN rooms r ON r.id=j.room_id
+            WHERE j.user_id=? AND r.status<>'finished' ORDER BY j.room_id''',
+            (int(uid[2:]),)).fetchall()
+        assert len(active) == 1
