@@ -1,6 +1,6 @@
-# 图灵实验室 v1.2 — Railway 云部署版
+# 图灵实验室 v1.6.0 — Railway 云部署版
 
-保留原本 v1.2 网站全部核心功能。增加 `railway_start.py`，**首次启动时仅从 Railway 私密环境变量创建管理员**；若没设置符合要求的管理员密码，则拒绝启动，避免暴露没有管理员的空网站。SQLite 数据库放在挂载卷 `/app/data`，单进程运行 WebSocket。
+在 v1.5.1 网站基础上增加 OpenAI 兼容模型 API 接入。保留原有账号、房间、比赛和 WebSocket 机制。`railway_start.py`，**首次启动时仅从 Railway 私密环境变量创建管理员**；若没设置符合要求的管理员密码，则拒绝启动，避免暴露没有管理员的空网站。SQLite 数据库放在挂载卷 `/app/data`，单进程运行 WebSocket。
 
 ## 1. 源码
 
@@ -16,6 +16,7 @@
 - Volume: 挂载到 **`/app/data`**（必需，必须先挂卷再首次正式部署）
 - `DB_PATH=/app/data/game.sqlite3`
 - `COOKIE_SECURE=1`（公网 HTTPS 登录 cookie）
+- `MODEL_CREDENTIAL_KEY=`（v1.6.0 模型 API 功能需要；使用下方命令生成并长期保存。未设置时，原有手动 AI 转录模式仍可使用）
 - `BOOTSTRAP_ADMIN_USERNAME=` 你的管理员登录名（3–30 位英文/数字/下划线）
 - `BOOTSTRAP_ADMIN_PASSWORD=` **随机生成并安全保存的强密码**，至少 12 个字符
 - `BOOTSTRAP_ADMIN_DISPLAY=主持人`（可选）
@@ -40,3 +41,12 @@ Railway 服务器通常不在中国大陆，**大陆直连速度和稳定性不�
 Railway 云资源和卷可能产生费用，请在 Railway 控制台核实计划、费用/预算提醒。公共互联网访问前确认邀请码仅给受邀者，管理员使用强密码，定期备份数据库。
 
 本项目适用于可信玩家的小型比赛；正式长期运行仍建议补做安全审计、注册速率限制、备份和监控。
+## 6. v1.6.0 模型 API 加密密钥
+
+首次使用模型 API 前，在本地运行：
+
+```powershell
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+将输出的密钥设置为 Railway 服务变量 `MODEL_CREDENTIAL_KEY`。该值必须长期固定，不能随每次部署重新生成，也不要提交到 GitHub。更换或丢失密钥会导致数据库中已保存的 API Key 无法解密。模型配置与使用步骤见 `UPGRADE_v1.6.0.md`。
