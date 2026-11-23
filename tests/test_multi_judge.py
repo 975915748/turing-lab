@@ -28,11 +28,12 @@ def test_two_judges_questions_verdicts_and_privacy(tmp_path):
         post(client,'/api/register',{'username':f'human_{i}', 'password':'human_pass123',
                                     'display_name':f'真人昵称_{i}','code':room['code']})
     post(admin,base+'/ai',{'name':'my_secret_ai_model'})
+    judge_uids=[]
     for label in ('judge_01','judge_02'):
-        post(admin,base+'/judges',{'username':label,'display_name':f'裁判 {label}',
-                                  'password':f'{label}-password'})
-    post(j1,'/api/login',{'username':'judge_01','password':'judge_01-password'})
-    post(j2,'/api/login',{'username':'judge_02','password':'judge_02-password'})
+        judge_uids.append(post(admin,base+'/judges',{'username':label,'display_name':f'裁判 {label}',
+                                  'password':f'{label}-password'})['uid'])
+    post(j1,'/api/login',{'uid':judge_uids[0],'password':'judge_01-password'})
+    post(j2,'/api/login',{'uid':judge_uids[1],'password':'judge_02-password'})
     assert j1.get('/api/me').json()['rooms'][0]['role']=='judge'
     judge_view=j1.get(base).json()
     assert judge_view['aliases']==['A','B','C']
@@ -42,7 +43,7 @@ def test_two_judges_questions_verdicts_and_privacy(tmp_path):
     assert 'my_secret_ai_model' not in json.dumps(judge_view,ensure_ascii=False)
     assert p1.get(base).json()['humans'][0]['username']=='human_1'
     post(j1,'/api/join',{'code':room['code']},409)
-    post(admin,base+'/judges/assign',{'username':'human_1','label':'闯入裁判'},409)
+    post(admin,base+'/judges/assign',{'uid':p1.get('/api/me').json()['user']['uid'],'label':'闯入裁判'},409)
     post(p1,base+'/judge-questions',{'text':'违规'},403)
     post(j1,base+'/ai',{'name':'违规'},403)
     post(j1,base+'/question',{'text':'违规'},403)
@@ -116,7 +117,7 @@ def test_existing_user_can_be_judge_for_another_room(tmp_path):
     first=post(admin,'/api/rooms',{'title':'A房间'})
     post(other,'/api/register',{'username':'multi_user','display_name':'X','password':'12345678','code':first['code']})
     second=post(admin,'/api/rooms',{'title':'B房间'})
-    post(admin,f'/api/rooms/{second["room_id"]}/judges/assign',{'username':'multi_user','label':'匿名裁判'})
+    post(admin,f'/api/rooms/{second["room_id"]}/judges/assign',{'uid':other.get('/api/me').json()['user']['uid'],'label':'匿名裁判'})
     judge_view=other.get(f'/api/rooms/{second["room_id"]}').json()
     assert judge_view['is_judge']
     assert other.get(f'/api/rooms/{first["room_id"]}').json()['mine']=='A'
@@ -159,3 +160,4 @@ def test_legacy_database_auto_migrates_and_old_room_retained(tmp_path):
     assert view['judges']==[]
     post(newer,'/api/rooms/1/judges',{'username':'new_judge','display_name':'新裁判','password':'strongpass'},200)
     assert len(newer.get('/api/rooms/1').json()['judges'])==1
+
