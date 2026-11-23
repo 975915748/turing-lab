@@ -68,11 +68,14 @@ def init_db(path):
         with db_open(path) as old:
             old_tables = {row['name'] for row in old.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
+            room_sql = old.execute("SELECT sql FROM sqlite_master WHERE name='rooms'").fetchone()
+            needs_room_ids = bool(room_sql) and 'AUTOINCREMENT' not in room_sql['sql'].upper()
             if 'users' in old_tables and (
                 'room_judges' not in old_tables or 'ai_judges' not in old_tables or
                 'legacy_username' not in {x['name'] for x in old.execute('PRAGMA table_info(users)')} or
                 'owner_id' not in {x['name'] for x in old.execute('PRAGMA table_info(rooms)')} or
                 'deleted_at' not in {x['name'] for x in old.execute('PRAGMA table_info(users)')} or
+                needs_room_ids or
                 ('members' in old_tables and 'removed_at' not in {
                     x['name'] for x in old.execute('PRAGMA table_info(members)')}) or
                 ('answers' in old_tables and 'edited_at' not in {
@@ -85,7 +88,10 @@ def init_db(path):
                                   ('answers' in old_tables and 'edited_at' not in {
                                       x['name'] for x in old.execute('PRAGMA table_info(answers)')}) else
                               'v1_4' if 'legacy_username' not in {
-                                  x['name'] for x in old.execute('PRAGMA table_info(users)')} else 'v1_5')
+                                  x['name'] for x in old.execute('PRAGMA table_info(users)')} else
+                              'v1_5' if 'deleted_at' not in {
+                                  x['name'] for x in old.execute('PRAGMA table_info(users)')} or 'owner_id' not in {
+                                  x['name'] for x in old.execute('PRAGMA table_info(rooms)')} else 'v1_5_1')
                 backup_path = path.with_name(path.stem + f'.pre-{backup_tag}-{stamp}-{secrets.token_hex(2)}.sqlite3')
                 with sqlite3.connect(str(backup_path)) as backup:
                     old.backup(backup)
@@ -105,7 +111,7 @@ def init_db(path):
             identity TEXT PRIMARY KEY, failure_count INTEGER NOT NULL,
             first_failed_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS rooms (
-            id INTEGER PRIMARY KEY, title TEXT NOT NULL, code TEXT NOT NULL UNIQUE,
+            id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, code TEXT NOT NULL UNIQUE,
             judge TEXT NOT NULL DEFAULT '裁判', status TEXT NOT NULL DEFAULT 'open',
             current_round INTEGER NOT NULL DEFAULT 1,
             verdict_json TEXT, verdict_locked_at TEXT, revealed_at TEXT,
@@ -193,6 +199,32 @@ def init_db(path):
             db.execute('ALTER TABLE rooms ADD COLUMN records_deleted INTEGER NOT NULL DEFAULT 0')
         if 'deleted_at' not in {x['name'] for x in db.execute('PRAGMA table_info(users)')}:
             db.execute('ALTER TABLE users ADD COLUMN deleted_at TEXT')
+        room_sql = db.execute("SELECT sql FROM sqlite_master WHERE name='rooms'").fetchone()['sql']
+        if 'AUTOINCREMENT' not in room_sql.upper():
+            migrate_room_ids(db,room_sql)
+
+
+def migrate_room_ids(db, definition):
+    """保留原房间和所有子表，使删除的房间编号不再被新房间复用。"""
+    db.commit()
+    db.execute('PRAGMA foreign_keys=OFF')
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        schema = 'CREATE TABLE rooms_id_upgrade ' + definition[definition.index('('):]
+        schema = re.sub(r'\bid INTEGER PRIMARY KEY\b', 'id INTEGER PRIMARY KEY AUTOINCREMENT',
+                        schema, count=1, flags=re.IGNORECASE)
+        db.execute(schema)
+        db.execute('INSERT INTO rooms_id_upgrade SELECT * FROM rooms')
+        db.execute('DROP TABLE rooms')
+        db.execute('ALTER TABLE rooms_id_upgrade RENAME TO rooms')
+        if db.execute('PRAGMA foreign_key_check').fetchone():
+            raise sqlite3.IntegrityError('房间编号升级未通过外键检查，已停止迁移。')
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.execute('PRAGMA foreign_keys=ON')
 
 
 def migrate_user_accounts(db):
@@ -689,7 +721,7 @@ class Hub:
             except Exception:
                 self.groups.get(room_id, set()).discard(ws)
                 try:
-                    await ws.close(code=1008)
+                    await ws.close(code=1008,reason='房间已删除' if reason=='room_deleted' else '')
                 except Exception:
                     pass
 
@@ -779,7 +811,7 @@ def create_app(db_path=None):
     def me(request:Request):
         with connection() as db:
             u=caller(request,db)
-            rooms = db.execute('''SELECT DISTINCT r.id,r.title,r.status,r.current_round,r.created_at,
+            rooms = db.execute('''SELECT DISTINCT r.id,r.title,r.status,r.current_round,r.created_at,r.match_number,
                 CASE WHEN ?=1 THEN 'admin'
                      WHEN r.owner_id=? THEN 'owner'
                      WHEN EXISTS(SELECT 1 FROM room_judges j WHERE j.room_id=r.id AND j.user_id=?) THEN 'judge'
@@ -789,8 +821,8 @@ def create_app(db_path=None):
                 WHERE (m.user_id=? AND m.removed_at IS NULL) OR j.user_id=? OR r.owner_id=? OR ?=1 ORDER BY r.id DESC''',
                 (u['is_admin'],u['id'],u['id'],u['id'],u['id'],u['id'],u['is_admin'])).fetchall()
             finished = db.execute('''SELECT id,title,match_number,records_deleted FROM rooms
-                WHERE status='finished' ORDER BY id DESC''').fetchall()
-            return {'user':u, 'rooms':[dict(x) for x in rooms],
+                WHERE status='finished' AND records_deleted=0 ORDER BY id DESC''').fetchall()
+            return {'user':u, 'rooms':[dict(x,can_manage=x['role'] in ('owner','admin')) for x in rooms],
                     'finished_rooms':[dict(x) for x in finished]}
 
     @app.post('/api/login')
@@ -968,6 +1000,17 @@ def create_app(db_path=None):
             u=caller(request,db)
             room,mine=permission(db,room_id,u)
             return public_room(db,room,u,mine)
+
+    @app.delete('/api/rooms/{room_id}')
+    async def delete_room(room_id:int,body:MatchActionData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            check_match_number(room,body.match_number)
+            db.execute('DELETE FROM rooms WHERE id=?',(room_id,))
+        app.state.hub.typing.pop(room_id,None)
+        await app.state.hub.notify(room_id,'room_deleted')
+        return {'ok':True}
 
     @app.delete('/api/rooms/{room_id}/records')
     async def delete_records(room_id:int,body:MatchActionData,request:Request):

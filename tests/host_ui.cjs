@@ -93,8 +93,9 @@ async function screenshot(page, name) {
     assert.equal((await (await hostContext.request.get(site + base)).json()).records_deleted, false);
     stranger.once('dialog', dialog => dialog.accept());
     await erase.click();
-    await stranger.getByText('记录已清空', { exact: true }).waitFor();
-    await page.getByRole('heading', { name: '比赛记录已清空', exact: true }).waitFor();
+    await stranger.locator(`[data-action="delete-records"][data-id="${rid}"]`).waitFor({state:'detached'});
+    assert.equal(await stranger.getByText('记录已清空', {exact:false}).count(),0);
+    await page.getByRole('heading', { name: '开始下一场比赛', exact: true }).waitFor();
     assert.equal(await page.getByText('第二场人类回答', { exact: true }).count(), 0);
     await screenshot(page, 'host-records-cleared.png');
     await page.locator('[data-action="restart-match"]').click();
