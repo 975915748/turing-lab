@@ -168,6 +168,11 @@ def test_legacy_migration_preserves_all_records_backup_and_passwords(tmp_path):
         after = snapshot(db)
         for row in after['users']:
             assert row.pop('legacy_username') == row['username']
+            assert row.pop('deleted_at') is None
+        for row in after['rooms']:
+            assert row.pop('owner_id') == 7
+            assert row.pop('match_number') == 1
+            assert row.pop('records_deleted') == 0
         assert after == before
         assert db.execute('PRAGMA foreign_key_check').fetchall() == []
     backups = list(tmp_path.glob('legacy.pre-v1_4-*.sqlite3'))
