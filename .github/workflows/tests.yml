@@ -39,3 +39,8 @@ jobs:
           node --check tests/room_delete_ui.cjs
       - name: Run regression tests
         run: python -m pytest -q
+      - name: Build production Docker image
+        run: docker build --pull -t turing-lab:ci .
+      - name: Verify runtime imports inside Docker image
+        run: |
+          docker run --rm --entrypoint python turing-lab:ci -c "import app, model_api, railway_start; print('Docker runtime imports passed')"
