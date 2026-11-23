@@ -831,9 +831,11 @@ def create_app(db_path=None):
     app = FastAPI(title='图灵测试多人主持台', docs_url=None, redoc_url=None)
     app.state.path = path
     app.state.hub = Hub(path)
-    app.state.model_semaphore = asyncio.Semaphore(4)
-
     async def model_call(profile, messages, api_key):
+        loop = asyncio.get_running_loop()
+        if getattr(app.state, 'model_semaphore_loop', None) is not loop:
+            app.state.model_semaphore = asyncio.Semaphore(4)
+            app.state.model_semaphore_loop = loop
         async with app.state.model_semaphore:
             return await chat_completion(profile, messages, api_key)
 
