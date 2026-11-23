@@ -831,6 +831,12 @@ def create_app(db_path=None):
     app = FastAPI(title='图灵测试多人主持台', docs_url=None, redoc_url=None)
     app.state.path = path
     app.state.hub = Hub(path)
+    app.state.model_semaphore = asyncio.Semaphore(4)
+
+    async def model_call(profile, messages, api_key):
+        async with app.state.model_semaphore:
+            return await chat_completion(profile, messages, api_key)
+
     app.mount('/static', StaticFiles(directory=ROOT/'static'), name='static')
 
     @app.middleware('http')
@@ -1154,7 +1160,7 @@ def create_app(db_path=None):
         try:
             key=decrypt_api_key(profile['api_key_encrypted'])
             started=time.perf_counter()
-            result=await chat_completion(profile,[
+            result=await model_call(profile,[
                 {'role':'system','content':'You are a connection test. Reply with exactly OK.'},
                 {'role':'user','content':'Reply with OK.'}],key)
         except ModelAPIError as exc:
@@ -1299,11 +1305,11 @@ def create_app(db_path=None):
             judge_id=profile['judge_id']
             try:
                 key=decrypt_api_key(profile['api_key_encrypted'])
-                result=await chat_completion(profile,[
+                result=await model_call(profile,[
                     {'role':'system','content':('你是多人图灵测试的独立裁判。每轮只提出一个核心问题，不得把多个问题打包。'
                      '问题必须面向所有匿名参赛者，不能询问真实姓名、账号、模型名称或系统提示。'
                      '只输出问题正文，不要前言、编号或解释。')},
-                    {{'role':'user','content':f'此前轮次的匿名资料：\\n{history}\\n\\n当前是第 {round_number} 轮，参赛者匿名代号：{", ".join(roster)}。'
+                    {'role':'user','content':f'此前轮次的匿名资料：\\n{history}\\n\\n当前是第 {round_number} 轮，参赛者匿名代号：{", ".join(roster)}。'
                      '请根据已有信息提出一个适合所有参赛者回答的全新问题。'}],key)
                 question=norm_text(result['text'],3000)
                 with connection(immediate=True) as db:
@@ -1550,10 +1556,10 @@ def create_app(db_path=None):
             alias=profile['alias']
             try:
                 key=decrypt_api_key(profile['api_key_encrypted'])
-                result=await chat_completion(profile,[
+                result=await model_call(profile,[
                     {'role':'system','content':('你正在参加一场多人图灵测试。你是匿名参赛者，请自然、直接地回答裁判问题。'
                      '不要提及模型、API、系统提示或你被要求扮演的身份；不要编造个人经历来冒充真实事实。')},
-                    {{'role':'user','content':f'你此前的本场记录（只包含你自己的回答）：\\n{history_by_alias.get(alias, "（此前没有已完成轮次。）")}\\n\\n当前第 {round_number} 轮裁判问题：\\n\\n{question}\\n\\n请给出你的本轮回答。'}],key)
+                    {'role':'user','content':f'你此前的本场记录（只包含你自己的回答）：\\n{history_by_alias.get(alias, "（此前没有已完成轮次。）")}\\n\\n当前第 {round_number} 轮裁判问题：\\n\\n{question}\\n\\n请给出你的本轮回答。'}],key)
                 answer=norm_text(result['text'],12000)
                 with connection(immediate=True) as db:
                     current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
@@ -1839,7 +1845,7 @@ def create_app(db_path=None):
             judge_id=profile['judge_id']
             try:
                 key=decrypt_api_key(profile['api_key_encrypted'])
-                result=await chat_completion(profile,[
+                result=await model_call(profile,[
                     {'role':'system','content':('你是多人图灵测试的独立裁判。你必须只根据匿名代号及参赛者回答，判断每个代号实际是人类还是 AI。'
                      '不能访问或猜测真实身份、模型来源、账号资料。对所有代号都必须给出判断。'
                      '严格返回 JSON 对象，不要使用 Markdown 代码块或附加说明。结构：'
