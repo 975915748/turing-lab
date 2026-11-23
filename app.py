@@ -637,7 +637,7 @@ def public_room(db, room, user, mine):
     ai_edits = {}
     model_profiles = []
     if manager:
-        model_profiles = [dict(row, has_api_key=bool(row['api_key_encrypted'])) for row in db.execute(
+        model_profiles = [dict(row) for row in db.execute(
             '''SELECT id,name,base_url,model,temperature,max_tokens,timeout_seconds,
                       CASE WHEN api_key_encrypted<>'' THEN 1 ELSE 0 END AS has_api_key
                FROM model_profiles WHERE room_id=? ORDER BY id''', (room['id'],))]
