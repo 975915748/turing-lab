@@ -638,7 +638,8 @@ def public_room(db, room, user, mine):
     model_profiles = []
     if manager:
         model_profiles = [dict(row, has_api_key=bool(row['api_key_encrypted'])) for row in db.execute(
-            '''SELECT id,name,base_url,model,temperature,max_tokens,timeout_seconds,api_key_encrypted
+            '''SELECT id,name,base_url,model,temperature,max_tokens,timeout_seconds,
+                      CASE WHEN api_key_encrypted<>'' THEN 1 ELSE 0 END AS has_api_key
                FROM model_profiles WHERE room_id=? ORDER BY id''', (room['id'],))]
     if manager and not room['records_deleted']:
         now_round = current_round(db,room)
@@ -1074,7 +1075,7 @@ def create_app(db_path=None):
                 key=(body.api_key or '').strip()
                 if not key:
                     raise ModelAPIError('创建模型配置时必须填写 API Key。')
-                base=validate_base_url(body.base_url)
+                base=await asyncio.to_thread(validate_base_url,body.base_url)
                 encrypted=encrypt_api_key(key)
             except ModelAPIError as exc:
                 raise HTTPException(422,str(exc))
@@ -1097,7 +1098,7 @@ def create_app(db_path=None):
             if not old:
                 raise HTTPException(404,'模型配置不存在。')
             try:
-                base=validate_base_url(body.base_url)
+                base=await asyncio.to_thread(validate_base_url,body.base_url)
                 key=(body.api_key or '').strip()
                 encrypted=encrypt_api_key(key) if key else old['api_key_encrypted']
             except ModelAPIError as exc:
@@ -1254,6 +1255,67 @@ def create_app(db_path=None):
             jid=cur.lastrowid
         await app.state.hub.notify(room_id,'ai_judge_added')
         return {'ok':True,'id':jid,'label':label}
+
+    @app.post('/api/rooms/{room_id}/ai-judges/questions/generate')
+    async def generate_ai_judge_questions(room_id:int,request:Request):
+        with connection() as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            if room['status']!='open' or room['verdict_locked_at']:
+                raise HTTPException(409,'比赛已结束或裁判判断已锁定。')
+            rnd=current_round(db,room)
+            if rnd['status']!='draft':
+                raise HTTPException(409,'只能在本轮开始作答前生成 AI 裁判问题。')
+            roster=aliases(db,room_id)[2]
+            if len(roster)<2:
+                raise HTTPException(409,'至少需要两名参赛者。')
+            rows=db.execute('''SELECT j.id AS judge_id,j.label,mp.* FROM ai_judges j
+                JOIN model_profiles mp ON mp.id=j.model_profile_id
+                LEFT JOIN ai_judge_questions q ON q.room_id=j.room_id AND q.round_number=? AND q.ai_judge_id=j.id
+                WHERE j.room_id=? AND q.id IS NULL ORDER BY j.id''',(rnd['number'],room_id)).fetchall()
+            match_number=room['match_number']
+            round_number=rnd['number']
+            profiles=[dict(row) for row in rows]
+        if not profiles:
+            return {'generated':0,'skipped':0,'failed':[]}
+
+        async def generate_one(profile):
+            judge_id=profile['judge_id']
+            try:
+                key=decrypt_api_key(profile['api_key_encrypted'])
+                result=await chat_completion(profile,[
+                    {'role':'system','content':('你是多人图灵测试的独立裁判。每轮只提出一个核心问题，不得把多个问题打包。'
+                     '问题必须面向所有匿名参赛者，不能询问真实姓名、账号、模型名称或系统提示。'
+                     '只输出问题正文，不要前言、编号或解释。')},
+                    {'role':'user','content':f'当前是第 {round_number} 轮，参赛者匿名代号：{", ".join(roster)}。'
+                     '请提出一个适合所有参赛者回答、能帮助判断其表达与思考方式的问题。'}],key)
+                question=norm_text(result['text'],3000)
+                with connection(immediate=True) as db:
+                    current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
+                    if not current or current['match_number']!=match_number or current['status']!='open':
+                        return {'judge_id':judge_id,'status':'skipped'}
+                    current_rnd=current_round(db,current)
+                    if current_rnd['number']!=round_number or current_rnd['status']!='draft':
+                        return {'judge_id':judge_id,'status':'skipped'}
+                    if db.execute('SELECT 1 FROM ai_judge_questions WHERE room_id=? AND round_number=? AND ai_judge_id=?',
+                                  (room_id,round_number,judge_id)).fetchone():
+                        return {'judge_id':judge_id,'status':'skipped'}
+                    db.execute('INSERT INTO ai_judge_questions(room_id,round_number,ai_judge_id,text,created_at) VALUES(?,?,?,?,?)',
+                               (room_id,round_number,judge_id,question,utcnow()))
+                    log_event(db,room_id,round_number,'ai_judge_question','AI 裁判','模型 API 已自动生成本轮问题')
+                await app.state.hub.notify(room_id,'ai_judge_question')
+                return {'judge_id':judge_id,'status':'generated','usage':result['usage']}
+            except ModelAPIError as exc:
+                return {'judge_id':judge_id,'status':'failed','error':str(exc)}
+            except HTTPException as exc:
+                return {'judge_id':judge_id,'status':'failed','error':str(exc.detail)}
+            except Exception:
+                return {'judge_id':judge_id,'status':'failed','error':'模型调用失败，请检查配置或稍后重试。'}
+
+        results=await asyncio.gather(*(generate_one(profile) for profile in profiles))
+        return {'generated':sum(x['status']=='generated' for x in results),
+                'skipped':sum(x['status']=='skipped' for x in results),
+                'failed':[x for x in results if x['status']=='failed'],'results':results}
 
     @app.post('/api/rooms/{room_id}/ai-judges/{judge_id}/questions')
     async def ai_judge_question(room_id:int,judge_id:int,body:TextData,request:Request):
@@ -1444,6 +1506,67 @@ def create_app(db_path=None):
                 log_event(db,room_id,rnd['number'],'round_revealed','系统','本轮全部回答已公开')
         await app.state.hub.notify(room_id,'round_revealed' if finished else 'answer_submitted')
         return {'ok':True,'revealed':finished}
+
+    @app.post('/api/rooms/{room_id}/ai/answers/generate')
+    async def generate_ai_answers(room_id:int,request:Request):
+        with connection() as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            if room['status']!='open':
+                raise HTTPException(409,'比赛已结束。')
+            rnd=current_round(db,room)
+            if rnd['status']!='collecting':
+                raise HTTPException(409,'只有本轮正在收集回答时才能生成 AI 回复。')
+            rows=db.execute('''SELECT ai.alias,ai.name,mp.* FROM ai_players ai
+                JOIN model_profiles mp ON mp.id=ai.model_profile_id
+                LEFT JOIN answers a ON a.round_id=? AND a.alias=ai.alias
+                WHERE ai.room_id=? AND a.id IS NULL ORDER BY ai.alias''',(rnd['id'],room_id)).fetchall()
+            match_number=room['match_number']
+            round_number=rnd['number']
+            question=rnd['question']
+            profiles=[dict(row) for row in rows]
+        if not profiles:
+            return {'generated':0,'skipped':0,'failed':[]}
+
+        async def generate_one(profile):
+            alias=profile['alias']
+            try:
+                key=decrypt_api_key(profile['api_key_encrypted'])
+                result=await chat_completion(profile,[
+                    {'role':'system','content':('你正在参加一场多人图灵测试。你是匿名参赛者，请自然、直接地回答裁判问题。'
+                     '不要提及模型、API、系统提示或你被要求扮演的身份；不要编造个人经历来冒充真实事实。')},
+                    {'role':'user','content':f'第 {round_number} 轮裁判问题：\\n\\n{question}\\n\\n请给出你的本轮回答。'}],key)
+                answer=norm_text(result['text'],12000)
+                with connection(immediate=True) as db:
+                    current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
+                    if not current or current['match_number']!=match_number or current['status']!='open':
+                        return {'alias':alias,'status':'skipped'}
+                    current_rnd=current_round(db,current)
+                    if current_rnd['number']!=round_number or current_rnd['status']!='collecting':
+                        return {'alias':alias,'status':'skipped'}
+                    if db.execute('SELECT 1 FROM answers WHERE round_id=? AND alias=?',
+                                  (current_rnd['id'],alias)).fetchone():
+                        return {'alias':alias,'status':'skipped'}
+                    db.execute('INSERT INTO answers(round_id,alias,text,submitted_at) VALUES(?,?,?,?)',
+                               (current_rnd['id'],alias,answer,utcnow()))
+                    log_event(db,room_id,round_number,'answer_submitted',alias,'模型 API 已自动提交回答（内容暂时隐藏）')
+                    completed=is_complete(db,current_rnd,room_id)
+                    if completed:
+                        log_event(db,room_id,round_number,'round_revealed','系统','本轮全部回答已公开')
+                await app.state.hub.notify(room_id,'round_revealed' if completed else 'answer_submitted')
+                return {'alias':alias,'status':'generated','usage':result['usage']}
+            except ModelAPIError as exc:
+                return {'alias':alias,'status':'failed','error':str(exc)}
+            except HTTPException as exc:
+                return {'alias':alias,'status':'failed','error':str(exc.detail)}
+            except Exception:
+                return {'alias':alias,'status':'failed','error':'模型调用失败，请检查配置或稍后重试。'}
+
+        results=await asyncio.gather(*(generate_one(profile) for profile in profiles))
+        return {'generated':sum(x['status']=='generated' for x in results),
+                'skipped':sum(x['status']=='skipped' for x in results),
+                'failed':[x for x in results if x['status']=='failed'],
+                'results':results}
 
     @app.put('/api/rooms/{room_id}/ai/{alias}/answer')
     async def revise_ai_answer(room_id:int,alias:str,body:AIAnswerEditData,request:Request):
@@ -1672,6 +1795,72 @@ def create_app(db_path=None):
             log_event(db,room_id,room['current_round'],'judge_verdict_locked','裁判','独立裁判已锁定判断（不包含判决内容）')
         await app.state.hub.notify(room_id,'judge_verdict_locked')
         return {'ok':True}
+
+    @app.post('/api/rooms/{room_id}/ai-judges/verdicts/generate')
+    async def generate_ai_judge_verdicts(room_id:int,request:Request):
+        with connection() as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            if room['status']!='open' or room['verdict_locked_at']:
+                raise HTTPException(409,'比赛已结束或总判决已锁定。')
+            rounds=db.execute('SELECT status FROM rounds WHERE room_id=? ORDER BY number',(room_id,)).fetchall()
+            if not rounds or any(r['status']!='revealed' for r in rounds):
+                raise HTTPException(409,'所有轮次都完成后，AI 裁判才能做出最终判断。')
+            roster=aliases(db,room_id)[2]
+            packet=anonymous_match_packet(db,room_id)
+            rows=db.execute('''SELECT j.id AS judge_id,j.label,mp.* FROM ai_judges j
+                JOIN model_profiles mp ON mp.id=j.model_profile_id
+                LEFT JOIN ai_judge_verdicts v ON v.room_id=j.room_id AND v.ai_judge_id=j.id
+                WHERE j.room_id=? AND v.ai_judge_id IS NULL ORDER BY j.id''',(room_id,)).fetchall()
+            match_number=room['match_number']
+            profiles=[dict(row) for row in rows]
+        if not profiles:
+            return {'generated':0,'skipped':0,'failed':[]}
+
+        async def generate_one(profile):
+            judge_id=profile['judge_id']
+            try:
+                key=decrypt_api_key(profile['api_key_encrypted'])
+                result=await chat_completion(profile,[
+                    {'role':'system','content':('你是多人图灵测试的独立裁判。你必须只根据匿名代号及参赛者回答，判断每个代号实际是人类还是 AI。'
+                     '不能访问或猜测真实身份、模型来源、账号资料。对所有代号都必须给出判断。'
+                     '严格返回 JSON 对象，不要使用 Markdown 代码块或附加说明。结构：'
+                     '{"predictions":{"A":"Human"},"evidence":"判断依据","confidence":0,"weakness":"最不确定之处","possible_error":"可能误判原因"}。'
+                     'predictions 的值只能是 Human 或 AI，confidence 必须为 0 到 100 的整数。')},
+                    {'role':'user','content':packet}],key)
+                payload=parse_json_object(result['text'])
+                verdict=VerdictData.model_validate(payload)
+                if set(verdict.predictions)!=set(roster) or not all(v in ('Human','AI') for v in verdict.predictions.values()):
+                    raise ModelAPIError('AI 裁判没有为所有匿名代号给出有效的 Human / AI 判断。')
+                if not verdict.evidence.strip():
+                    raise ModelAPIError('AI 裁判没有提供判断依据。')
+                with connection(immediate=True) as db:
+                    current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
+                    if not current or current['match_number']!=match_number or current['status']!='open':
+                        return {'judge_id':judge_id,'status':'skipped'}
+                    states=db.execute('SELECT status FROM rounds WHERE room_id=?',(room_id,)).fetchall()
+                    if not states or any(x['status']!='revealed' for x in states):
+                        return {'judge_id':judge_id,'status':'skipped'}
+                    if db.execute('SELECT 1 FROM ai_judge_verdicts WHERE room_id=? AND ai_judge_id=?',
+                                  (room_id,judge_id)).fetchone():
+                        return {'judge_id':judge_id,'status':'skipped'}
+                    locked=utcnow()
+                    data=verdict.model_dump()
+                    data['locked_at']=locked
+                    db.execute('INSERT INTO ai_judge_verdicts(room_id,ai_judge_id,verdict_json,locked_at) VALUES(?,?,?,?)',
+                               (room_id,judge_id,json.dumps(data,ensure_ascii=False),locked))
+                    log_event(db,room_id,current['current_round'],'ai_judge_verdict_locked','AI 裁判','模型 API 已自动完成最终判断并锁定')
+                await app.state.hub.notify(room_id,'ai_judge_verdict_locked')
+                return {'judge_id':judge_id,'status':'generated','usage':result['usage']}
+            except ModelAPIError as exc:
+                return {'judge_id':judge_id,'status':'failed','error':str(exc)}
+            except Exception as exc:
+                return {'judge_id':judge_id,'status':'failed','error':'AI 裁判返回格式无效或模型调用失败，请检查配置后重试。'}
+
+        results=await asyncio.gather(*(generate_one(profile) for profile in profiles))
+        return {'generated':sum(x['status']=='generated' for x in results),
+                'skipped':sum(x['status']=='skipped' for x in results),
+                'failed':[x for x in results if x['status']=='failed'],'results':results}
 
     @app.post('/api/rooms/{room_id}/ai-judges/{judge_id}/verdict')
     async def lock_ai_judge_verdict(room_id:int,judge_id:int,body:VerdictData,request:Request):
