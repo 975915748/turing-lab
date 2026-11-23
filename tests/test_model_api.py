@@ -89,6 +89,7 @@ def test_model_profile_key_is_encrypted_and_never_returned_to_browser(model_lab)
     assert tested['ok'] is True
     assert tested['preview'] == 'OK'
     assert tested['usage']['total_tokens'] == 5
+    post(admin, base + '/ai', {'name': 'API AI', 'model_profile_id': model_lab['profile_id']})
     player_info = model_lab['p1'].get(base).json()
     assert player_info['model_profiles'] == []
     assert player_info['ais'][0]['model_profile_id'] is None
