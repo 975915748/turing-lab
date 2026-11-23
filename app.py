@@ -1,6 +1,7 @@
 """多人图灵测试：单进程 FastAPI + WebSocket + SQLite，纯手动 AI 转录。"""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -8,6 +9,7 @@ import os
 import re
 import secrets
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -18,6 +20,9 @@ from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSoc
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from starlette.staticfiles import StaticFiles
+
+from model_api import (ModelAPIError, chat_completion, decrypt_api_key,
+                       encrypt_api_key, parse_json_object, validate_base_url)
 
 ROOT = Path(__file__).resolve().parent
 DATABASE = ROOT / 'data' / 'game.sqlite3'
@@ -71,6 +76,11 @@ def init_db(path):
             room_sql = old.execute("SELECT sql FROM sqlite_master WHERE name='rooms'").fetchone()
             needs_room_ids = bool(room_sql) and 'AUTOINCREMENT' not in room_sql['sql'].upper()
             if 'users' in old_tables and (
+                'model_profiles' not in old_tables or
+                ('ai_players' in old_tables and 'model_profile_id' not in {
+                    x['name'] for x in old.execute('PRAGMA table_info(ai_players)')}) or
+                ('ai_judges' in old_tables and 'model_profile_id' not in {
+                    x['name'] for x in old.execute('PRAGMA table_info(ai_judges)')}) or
                 'room_judges' not in old_tables or 'ai_judges' not in old_tables or
                 'legacy_username' not in {x['name'] for x in old.execute('PRAGMA table_info(users)')} or
                 'owner_id' not in {x['name'] for x in old.execute('PRAGMA table_info(rooms)')} or
@@ -81,7 +91,12 @@ def init_db(path):
                 ('answers' in old_tables and 'edited_at' not in {
                     x['name'] for x in old.execute('PRAGMA table_info(answers)')})):
                 stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
-                backup_tag = ('v1_1' if 'room_judges' not in old_tables else
+                backup_tag = ('v1_6' if ('model_profiles' not in old_tables or
+                                   ('ai_players' in old_tables and 'model_profile_id' not in {
+                                       x['name'] for x in old.execute('PRAGMA table_info(ai_players)')}) or
+                                   ('ai_judges' in old_tables and 'model_profile_id' not in {
+                                       x['name'] for x in old.execute('PRAGMA table_info(ai_judges)')})) else
+                              'v1_1' if 'room_judges' not in old_tables else
                               'v1_2' if 'ai_judges' not in old_tables else
                               'v1_3' if ('members' in old_tables and 'removed_at' not in {
                                   x['name'] for x in old.execute('PRAGMA table_info(members)')}) or
@@ -162,6 +177,13 @@ def init_db(path):
             id INTEGER PRIMARY KEY,
             room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
             label TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS model_profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            name TEXT NOT NULL, base_url TEXT NOT NULL, model TEXT NOT NULL,
+            api_key_encrypted TEXT NOT NULL, temperature REAL NOT NULL DEFAULT 0.7,
+            max_tokens INTEGER NOT NULL DEFAULT 2048, timeout_seconds INTEGER NOT NULL DEFAULT 60,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS ai_judge_questions (
             id INTEGER PRIMARY KEY,
             room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
@@ -184,6 +206,10 @@ def init_db(path):
             sha256 TEXT NOT NULL, created_at TEXT NOT NULL, sent_at TEXT,
             UNIQUE(room_id,through_round,version));
         ''')
+        if 'model_profile_id' not in {x['name'] for x in db.execute('PRAGMA table_info(ai_players)')}:
+            db.execute('ALTER TABLE ai_players ADD COLUMN model_profile_id INTEGER REFERENCES model_profiles(id) ON DELETE SET NULL')
+        if 'model_profile_id' not in {x['name'] for x in db.execute('PRAGMA table_info(ai_judges)')}:
+            db.execute('ALTER TABLE ai_judges ADD COLUMN model_profile_id INTEGER REFERENCES model_profiles(id) ON DELETE SET NULL')
         if 'removed_at' not in {x['name'] for x in db.execute('PRAGMA table_info(members)')}:
             db.execute('ALTER TABLE members ADD COLUMN removed_at TEXT')
         if 'edited_at' not in {x['name'] for x in db.execute('PRAGMA table_info(answers)')}:
@@ -323,6 +349,17 @@ class RoomData(BaseModel):
 
 class AIData(BaseModel):
     name: str = Field(min_length=1, max_length=60)
+    model_profile_id: Optional[int] = Field(default=None, ge=1)
+
+
+class ModelProfileData(BaseModel, extra='forbid'):
+    name: str = Field(min_length=1, max_length=60)
+    base_url: str = Field(min_length=8, max_length=500)
+    model: str = Field(min_length=1, max_length=120)
+    api_key: Optional[str] = Field(default=None, max_length=2000)
+    temperature: float = Field(default=0.7, ge=0, le=2)
+    max_tokens: int = Field(default=2048, ge=64, le=8192)
+    timeout_seconds: int = Field(default=60, ge=10, le=120)
 
 
 class JudgeAccountData(BaseModel):
@@ -442,7 +479,7 @@ def judge_records(db, room_id):
         FROM room_judges j JOIN users u ON u.id=j.user_id
         WHERE j.room_id=? AND (u.deleted_at IS NULL OR EXISTS(
             SELECT 1 FROM judge_verdicts v WHERE v.room_id=j.room_id AND v.judge_user_id=j.user_id))""", (room_id,)).fetchall()
-    ai = db.execute("""SELECT j.id,j.label,j.created_at,
+    ai = db.execute("""SELECT j.id,j.label,j.created_at,j.model_profile_id,
         EXISTS(SELECT 1 FROM ai_judge_verdicts v WHERE v.room_id=j.room_id AND v.ai_judge_id=j.id) AS locked
         FROM ai_judges j WHERE j.room_id=?""", (room_id,)).fetchall()
     data = [dict(r, id=r['user_id'], kind='human') for r in people]
@@ -466,7 +503,7 @@ def check_judge_registration(db, room, user_id):
 def aliases(db, room_id):
     humans = db.execute('''SELECT m.alias,m.user_id,u.display_name,u.username FROM members m
         JOIN users u ON u.id=m.user_id WHERE m.room_id=? AND m.removed_at IS NULL ORDER BY m.alias''', (room_id,)).fetchall()
-    ais = db.execute('SELECT alias,name FROM ai_players WHERE room_id=? ORDER BY alias', (room_id,)).fetchall()
+    ais = db.execute('SELECT alias,name,model_profile_id FROM ai_players WHERE room_id=? ORDER BY alias', (room_id,)).fetchall()
     all_aliases = sorted([r['alias'] for r in humans] + [r['alias'] for r in ais])
     return humans, ais, all_aliases
 
@@ -598,6 +635,11 @@ def public_room(db, room, user, mine):
         LEFT JOIN members m ON m.room_id=s.room_id AND m.user_id=s.sender_id
         WHERE s.room_id=? ORDER BY s.id''', (room['id'],)).fetchall()
     ai_edits = {}
+    model_profiles = []
+    if manager:
+        model_profiles = [dict(row, has_api_key=bool(row['api_key_encrypted'])) for row in db.execute(
+            '''SELECT id,name,base_url,model,temperature,max_tokens,timeout_seconds,api_key_encrypted
+               FROM model_profiles WHERE room_id=? ORDER BY id''', (room['id'],))]
     if manager and not room['records_deleted']:
         now_round = current_round(db,room)
         ai_edits = {row['alias']:row['text'] for row in db.execute('''SELECT a.alias,a.text FROM answers a
@@ -614,14 +656,36 @@ def public_room(db, room, user, mine):
             'invite_code':room['code'] if manager else None,
             'humans':[{'alias':r['alias'],'user_id':r['user_id'],'uid':user_uid(r['user_id']),
                        'name':r['display_name'], 'username':r['username']} for r in humans],
-            'ais':[{'alias':r['alias'],'name':r['name']} for r in ais],
+            'ais':[{'alias':r['alias'],'name':r['name'],
+                    'model_profile_id':r['model_profile_id'] if manager else None} for r in ais],
             'judges': [{'id':r['id'],'kind':r['kind'],'user_id':r['user_id'],
                         'label':r['label'],'username':r['username'],
+                        'model_profile_id':r['model_profile_id'] if manager and r['kind']=='ai' else None,
                         'uid':user_uid(r['user_id']) if r['kind']=='human' else None,
                         'locked':bool(r['locked'])} for r in judges] if manager else
                       [{'kind':r['kind'],'label':r['label'],'locked':bool(r['locked'])} for r in judges],
             'rounds':body,'suggestions':[dict(s) for s in suggestions],
-            'ai_edits':ai_edits,'packets':[dict(p) for p in pkts]}
+            'ai_edits':ai_edits,'packets':[dict(p) for p in pkts],
+            'model_profiles':model_profiles,'model_api_enabled':bool(os.getenv('MODEL_CREDENTIAL_KEY'))}
+
+
+def anonymous_match_packet(db, room_id):
+    """Build a full-match judging packet containing aliases and text only."""
+    _, _, roster = aliases(db, room_id)
+    lines = ['多人图灵测试 · 全场匿名裁判资料',
+             '只包含匿名代号、每轮裁判问题和参赛者原始回答；不包含真实身份或模型来源。']
+    rounds = db.execute('SELECT number,question FROM rounds WHERE room_id=? ORDER BY number',
+                        (room_id,)).fetchall()
+    for rnd in rounds:
+        lines += ['', f'===== 第 {rnd["number"]} 轮 =====', '', '【裁判问题】', rnd['question']]
+        answers = {row['alias']: row['text'] for row in db.execute(
+            '''SELECT alias,text FROM answers WHERE round_id=(
+                   SELECT id FROM rounds WHERE room_id=? AND number=?)''',
+            (room_id, rnd['number']))}
+        for alias in roster:
+            lines += ['', f'【参与者 {alias}】', answers.get(alias, '（本轮没有有效回答）')]
+    lines += ['', '—— 全场匿名资料结束 ——']
+    return '\\n'.join(lines) + '\\n'
 
 
 def is_complete(db, rnd, room_id):
@@ -1001,6 +1065,87 @@ def create_app(db_path=None):
             room,mine=permission(db,room_id,u)
             return public_room(db,room,u,mine)
 
+    @app.post('/api/rooms/{room_id}/models')
+    async def create_model_profile(room_id:int,body:ModelProfileData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            try:
+                key=(body.api_key or '').strip()
+                if not key:
+                    raise ModelAPIError('创建模型配置时必须填写 API Key。')
+                base=validate_base_url(body.base_url)
+                encrypted=encrypt_api_key(key)
+            except ModelAPIError as exc:
+                raise HTTPException(422,str(exc))
+            now=utcnow()
+            cur=db.execute('''INSERT INTO model_profiles(room_id,name,base_url,model,api_key_encrypted,
+                temperature,max_tokens,timeout_seconds,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)''',
+                (room_id,norm_text(body.name,60),base,norm_text(body.model,120),encrypted,
+                 body.temperature,body.max_tokens,body.timeout_seconds,now,now))
+            log_event(db,room_id,room['current_round'],'model_profile_created','房主','新增模型 API 配置')
+            profile_id=cur.lastrowid
+        await app.state.hub.notify(room_id,'model_profile_changed')
+        return {'ok':True,'id':profile_id}
+
+    @app.put('/api/rooms/{room_id}/models/{profile_id}')
+    async def update_model_profile(room_id:int,profile_id:int,body:ModelProfileData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            old=db.execute('SELECT * FROM model_profiles WHERE id=? AND room_id=?',(profile_id,room_id)).fetchone()
+            if not old:
+                raise HTTPException(404,'模型配置不存在。')
+            try:
+                base=validate_base_url(body.base_url)
+                key=(body.api_key or '').strip()
+                encrypted=encrypt_api_key(key) if key else old['api_key_encrypted']
+            except ModelAPIError as exc:
+                raise HTTPException(422,str(exc))
+            db.execute('''UPDATE model_profiles SET name=?,base_url=?,model=?,api_key_encrypted=?,
+                temperature=?,max_tokens=?,timeout_seconds=?,updated_at=? WHERE id=? AND room_id=?''',
+                (norm_text(body.name,60),base,norm_text(body.model,120),encrypted,
+                 body.temperature,body.max_tokens,body.timeout_seconds,utcnow(),profile_id,room_id))
+            log_event(db,room_id,room['current_round'],'model_profile_updated','房主','更新模型 API 配置')
+        await app.state.hub.notify(room_id,'model_profile_changed')
+        return {'ok':True}
+
+    @app.delete('/api/rooms/{room_id}/models/{profile_id}')
+    async def delete_model_profile(room_id:int,profile_id:int,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            if not db.execute('SELECT 1 FROM model_profiles WHERE id=? AND room_id=?',(profile_id,room_id)).fetchone():
+                raise HTTPException(404,'模型配置不存在。')
+            db.execute('UPDATE ai_players SET model_profile_id=NULL WHERE room_id=? AND model_profile_id=?',
+                       (room_id,profile_id))
+            db.execute('UPDATE ai_judges SET model_profile_id=NULL WHERE room_id=? AND model_profile_id=?',
+                       (room_id,profile_id))
+            db.execute('DELETE FROM model_profiles WHERE id=? AND room_id=?',(profile_id,room_id))
+            log_event(db,room_id,room['current_round'],'model_profile_deleted','房主','删除模型 API 配置，关联席位改为手动转录')
+        await app.state.hub.notify(room_id,'model_profile_changed')
+        return {'ok':True}
+
+    @app.post('/api/rooms/{room_id}/models/{profile_id}/test')
+    async def test_model_profile(room_id:int,profile_id:int,request:Request):
+        with connection() as db:
+            u=caller(request,db,mutate=True)
+            require_room_manager(db,room_id,u)
+            profile=db.execute('SELECT * FROM model_profiles WHERE id=? AND room_id=?',(profile_id,room_id)).fetchone()
+            if not profile:
+                raise HTTPException(404,'模型配置不存在。')
+            profile=dict(profile)
+        try:
+            key=decrypt_api_key(profile['api_key_encrypted'])
+            started=time.perf_counter()
+            result=await chat_completion(profile,[
+                {'role':'system','content':'You are a connection test. Reply with exactly OK.'},
+                {'role':'user','content':'Reply with OK.'}],key)
+        except ModelAPIError as exc:
+            raise HTTPException(502,str(exc))
+        return {'ok':True,'model':profile['model'],'preview':result['text'][:120],
+                'latency_ms':round((time.perf_counter()-started)*1000), 'usage':result['usage']}
+
     @app.delete('/api/rooms/{room_id}')
     async def delete_room(room_id:int,body:MatchActionData,request:Request):
         with connection(immediate=True) as db:
@@ -1094,8 +1239,17 @@ def create_app(db_path=None):
             room,_=require_room_manager(db,room_id,u)
             check_judge_registration(db,room,-1)
             label=norm_text(body.name,60)
-            cur=db.execute('INSERT INTO ai_judges(room_id,label,created_at) VALUES(?,?,?)',
-                           (room_id,label,utcnow()))
+            if body.model_profile_id is not None:
+                profile=db.execute('SELECT api_key_encrypted FROM model_profiles WHERE id=? AND room_id=?',
+                                   (body.model_profile_id,room_id)).fetchone()
+                if not profile:
+                    raise HTTPException(404,'模型配置不存在。')
+                try:
+                    decrypt_api_key(profile['api_key_encrypted'])
+                except ModelAPIError as exc:
+                    raise HTTPException(503,str(exc))
+            cur=db.execute('INSERT INTO ai_judges(room_id,label,model_profile_id,created_at) VALUES(?,?,?,?)',
+                           (room_id,label,body.model_profile_id,utcnow()))
             log_event(db,room_id,room['current_round'],'ai_judge_added','管理员','已添加 AI 裁判席')
             jid=cur.lastrowid
         await app.state.hub.notify(room_id,'ai_judge_added')
@@ -1190,11 +1344,20 @@ def create_app(db_path=None):
             room,_=require_room_manager(db,room_id,u)
             ensure_roster_unlocked(db,room)
             alias=new_alias(db,room_id)
-            db.execute('INSERT INTO ai_players(room_id,alias,name) VALUES(?,?,?)',
-                       (room_id,alias,norm_text(body.name,60)))
+            if body.model_profile_id is not None:
+                profile=db.execute('SELECT api_key_encrypted FROM model_profiles WHERE id=? AND room_id=?',
+                                   (body.model_profile_id,room_id)).fetchone()
+                if not profile:
+                    raise HTTPException(404,'模型配置不存在。')
+                try:
+                    decrypt_api_key(profile['api_key_encrypted'])
+                except ModelAPIError as exc:
+                    raise HTTPException(503,str(exc))
+            db.execute('INSERT INTO ai_players(room_id,alias,name,model_profile_id) VALUES(?,?,?,?)',
+                       (room_id,alias,norm_text(body.name,60),body.model_profile_id))
             log_event(db,room_id,1,'ai_joined',alias,'AI 参赛位已添加')
         await app.state.hub.notify(room_id,'ai_joined')
-        return {'alias':alias}
+        return {'alias':alias,'automated':body.model_profile_id is not None}
 
     @app.post('/api/rooms/{room_id}/question')
     async def set_question(room_id:int,body:TextData,request:Request):
