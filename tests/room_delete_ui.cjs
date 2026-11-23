@@ -13,7 +13,9 @@ async function shot(page, name) {
   await page.screenshot({ path:path.resolve(__dirname, '../artifacts', name), fullPage:true, animations:'disabled' });
 }
 (async () => {
-  const browser = await chromium.launch({ channel:'msedge', headless:true });
+  const browserOptions = { headless: true };
+  if (process.env.PLAYWRIGHT_CHANNEL !== 'default') browserOptions.channel = process.env.PLAYWRIGHT_CHANNEL || 'msedge';
+  const browser = await chromium.launch(browserOptions);
   try {
     const host = await browser.newContext({ viewport:{width:1440,height:1000} });
     const player = await browser.newContext();

@@ -28,7 +28,9 @@ async function logout(page) {
 }
 
 (async () => {
-  const browser = await chromium.launch({ channel: 'msedge', headless: true });
+  const browserOptions = { headless: true };
+  if (process.env.PLAYWRIGHT_CHANNEL !== 'default') browserOptions.channel = process.env.PLAYWRIGHT_CHANNEL || 'msedge';
+  const browser = await chromium.launch(browserOptions);
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 },
     permissions: ['clipboard-read', 'clipboard-write'] });
   const page = await context.newPage();
