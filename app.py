@@ -500,11 +500,11 @@ def check_no_other_active_judge_room(db, user_id, room_id):
 
 def check_restart_judge_conflicts(db, room_id):
     conflicts = db.execute('''SELECT DISTINCT u.id,u.display_name,r.id AS other_room_id,r.title
-        FROM room_judges current
-        JOIN users u ON u.id=current.user_id AND u.deleted_at IS NULL
-        JOIN room_judges other ON other.user_id=current.user_id AND other.room_id<>current.room_id
+        FROM room_judges target_judge
+        JOIN users u ON u.id=target_judge.user_id AND u.deleted_at IS NULL
+        JOIN room_judges other ON other.user_id=target_judge.user_id AND other.room_id<>target_judge.room_id
         JOIN rooms r ON r.id=other.room_id
-        WHERE current.room_id=? AND r.status<>'finished'
+        WHERE target_judge.room_id=? AND r.status<>'finished'
         ORDER BY u.id,r.id''', (room_id,)).fetchall()
     if conflicts:
         details = '；'.join(
@@ -1114,6 +1114,8 @@ def create_app(db_path=None):
                 log_event(db,room_id,room['current_round'],'judge_joined','裁判','真人裁判通过邀请码加入')
                 role='judge'
             else:
+                if is_judge(db,room_id,u):
+                    raise HTTPException(409,'本房间裁判不能作为参赛者加入。')
                 old=db.execute('SELECT alias FROM members WHERE room_id=? AND user_id=? AND removed_at IS NULL',
                                (room_id,u['id'])).fetchone()
                 if old:
@@ -1122,8 +1124,6 @@ def create_app(db_path=None):
                               (room_id,u['id'])).fetchone():
                     raise HTTPException(403,'你已被主持人移出这个房间，不能重新加入。')
                 ensure_roster_unlocked(db,room)
-                if is_judge(db,room_id,u):
-                    raise HTTPException(409,'本房间裁判不能作为参赛者加入。')
                 alias=new_alias(db,room_id)
                 db.execute('INSERT INTO members(room_id,user_id,alias,joined_at) VALUES(?,?,?,?)',
                            (room_id,u['id'],alias,utcnow()))
