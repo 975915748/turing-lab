@@ -135,7 +135,8 @@ def test_join_and_cross_room_privacy(env):
     assert p1.get(f'/api/rooms/{oid}').status_code==200
     assert p1.get(f'/api/rooms/{rid}').status_code==200
     assert p1.get('/api/me').json()['user']['is_admin']==0
-    post(p1,'/api/rooms',{'title':'not allowed'},403)
+    owned=post(p1,'/api/rooms',{'title':'自己的房间'})
+    assert p1.get(f'/api/rooms/{owned["room_id"]}').json()['can_manage']
     post(p1,f'/api/rooms/{rid}/question',{'text':'not allowed'},403)
     # Only another domain's Origin is rejected for state mutations
     token=p1.get('/api/me').json()['user']['csrf']
