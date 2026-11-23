@@ -1087,17 +1087,22 @@ def create_app(db_path=None):
 
     @app.post('/api/rooms/{room_id}/models')
     async def create_model_profile(room_id:int,body:ModelProfileData,request:Request):
+        # Authenticate first, then release SQLite before any DNS/network-adjacent wait.
+        with connection() as db:
+            u=caller(request,db,mutate=True)
+            require_room_manager(db,room_id,u)
+        try:
+            key=(body.api_key or '').strip()
+            if not key:
+                raise ModelAPIError('创建模型配置时必须填写 API Key。')
+            base=await asyncio.to_thread(validate_base_url,body.base_url)
+            encrypted=encrypt_api_key(key)
+        except ModelAPIError as exc:
+            raise HTTPException(422,str(exc))
+        # Re-check authorization after the await, then keep the write transaction short.
         with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
-            try:
-                key=(body.api_key or '').strip()
-                if not key:
-                    raise ModelAPIError('创建模型配置时必须填写 API Key。')
-                base=await asyncio.to_thread(validate_base_url,body.base_url)
-                encrypted=encrypt_api_key(key)
-            except ModelAPIError as exc:
-                raise HTTPException(422,str(exc))
             now=utcnow()
             cur=db.execute('''INSERT INTO model_profiles(room_id,name,base_url,model,api_key_encrypted,
                 temperature,max_tokens,timeout_seconds,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)''',
@@ -1110,18 +1115,25 @@ def create_app(db_path=None):
 
     @app.put('/api/rooms/{room_id}/models/{profile_id}')
     async def update_model_profile(room_id:int,profile_id:int,body:ModelProfileData,request:Request):
+        with connection() as db:
+            u=caller(request,db,mutate=True)
+            require_room_manager(db,room_id,u)
+            if not db.execute('SELECT 1 FROM model_profiles WHERE id=? AND room_id=?',
+                              (profile_id,room_id)).fetchone():
+                raise HTTPException(404,'模型配置不存在。')
+        try:
+            base=await asyncio.to_thread(validate_base_url,body.base_url)
+            key=(body.api_key or '').strip()
+            new_encrypted=encrypt_api_key(key) if key else None
+        except ModelAPIError as exc:
+            raise HTTPException(422,str(exc))
         with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
             old=db.execute('SELECT * FROM model_profiles WHERE id=? AND room_id=?',(profile_id,room_id)).fetchone()
             if not old:
                 raise HTTPException(404,'模型配置不存在。')
-            try:
-                base=await asyncio.to_thread(validate_base_url,body.base_url)
-                key=(body.api_key or '').strip()
-                encrypted=encrypt_api_key(key) if key else old['api_key_encrypted']
-            except ModelAPIError as exc:
-                raise HTTPException(422,str(exc))
+            encrypted=new_encrypted or old['api_key_encrypted']
             db.execute('''UPDATE model_profiles SET name=?,base_url=?,model=?,api_key_encrypted=?,
                 temperature=?,max_tokens=?,timeout_seconds=?,updated_at=? WHERE id=? AND room_id=?''',
                 (norm_text(body.name,60),base,norm_text(body.model,120),encrypted,
@@ -1830,6 +1842,7 @@ def create_app(db_path=None):
                 raise HTTPException(409,'所有轮次都完成后，AI 裁判才能做出最终判断。')
             roster=aliases(db,room_id)[2]
             packet=anonymous_match_packet(db,room_id)
+            evidence_revision=hashlib.sha256(packet.encode('utf-8')).hexdigest()
             rows=db.execute('''SELECT j.id AS judge_id,j.label,mp.* FROM ai_judges j
                 JOIN model_profiles mp ON mp.id=j.model_profile_id
                 LEFT JOIN ai_judge_verdicts v ON v.room_id=j.room_id AND v.ai_judge_id=j.id
@@ -1862,7 +1875,13 @@ def create_app(db_path=None):
                         return {'judge_id':judge_id,'status':'skipped'}
                     states=db.execute('SELECT status FROM rounds WHERE room_id=?',(room_id,)).fetchall()
                     if not states or any(x['status']!='revealed' for x in states):
-                        return {'judge_id':judge_id,'status':'skipped'}
+                        return {'judge_id':judge_id,'status':'failed',
+                                'error':'比赛资料在模型判断期间发生变化，已废弃旧判决，请重新生成。'}
+                    current_packet=anonymous_match_packet(db,room_id)
+                    current_revision=hashlib.sha256(current_packet.encode('utf-8')).hexdigest()
+                    if current_revision!=evidence_revision:
+                        return {'judge_id':judge_id,'status':'failed',
+                                'error':'比赛资料在模型判断期间发生变化，已废弃旧判决，请重新生成。'}
                     if db.execute('SELECT 1 FROM ai_judge_verdicts WHERE room_id=? AND ai_judge_id=?',
                                   (room_id,judge_id)).fetchone():
                         return {'judge_id':judge_id,'status':'skipped'}
