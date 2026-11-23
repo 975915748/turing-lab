@@ -670,13 +670,14 @@ def public_room(db, room, user, mine):
             'model_profiles':model_profiles,'model_api_enabled':bool(os.getenv('MODEL_CREDENTIAL_KEY'))}
 
 
-def anonymous_match_packet(db, room_id):
+def anonymous_match_packet(db, room_id, through_round=None):
     """Build a full-match judging packet containing aliases and text only."""
     _, _, roster = aliases(db, room_id)
     lines = ['多人图灵测试 · 全场匿名裁判资料',
              '只包含匿名代号、每轮裁判问题和参赛者原始回答；不包含真实身份或模型来源。']
-    rounds = db.execute('SELECT number,question FROM rounds WHERE room_id=? ORDER BY number',
-                        (room_id,)).fetchall()
+    rounds = db.execute('''SELECT number,question FROM rounds WHERE room_id=?
+        AND (? IS NULL OR number<=?) ORDER BY number''',
+        (room_id, through_round, through_round)).fetchall()
     for rnd in rounds:
         lines += ['', f'===== 第 {rnd["number"]} 轮 =====', '', '【裁判问题】', rnd['question']]
         answers = {row['alias']: row['text'] for row in db.execute(
@@ -687,6 +688,20 @@ def anonymous_match_packet(db, room_id):
             lines += ['', f'【参与者 {alias}】', answers.get(alias, '（本轮没有有效回答）')]
     lines += ['', '—— 全场匿名资料结束 ——']
     return '\\n'.join(lines) + '\\n'
+
+
+def anonymous_player_history(db, room_id, alias, through_round):
+    """Return only this AI seat's own prior answers, never other contestants' text."""
+    lines = []
+    rounds = db.execute('''SELECT id,number,question FROM rounds
+        WHERE room_id=? AND number<=? ORDER BY number''',(room_id,through_round)).fetchall()
+    for rnd in rounds:
+        answer=db.execute('SELECT text FROM answers WHERE round_id=? AND alias=?',
+                          (rnd['id'],alias)).fetchone()
+        if answer:
+            lines += [f'第 {rnd["number"]} 轮问题：',rnd['question'],
+                      f'你在第 {rnd["number"]} 轮的回答：',answer['text'],'']
+    return '\\n'.join(lines) if lines else '（此前没有已完成轮次。）'
 
 
 def is_complete(db, rnd, room_id):
@@ -1275,6 +1290,7 @@ def create_app(db_path=None):
                 WHERE j.room_id=? AND q.id IS NULL ORDER BY j.id''',(rnd['number'],room_id)).fetchall()
             match_number=room['match_number']
             round_number=rnd['number']
+            history=anonymous_match_packet(db,room_id,round_number-1)
             profiles=[dict(row) for row in rows]
         if not profiles:
             return {'generated':0,'skipped':0,'failed':[]}
@@ -1287,8 +1303,8 @@ def create_app(db_path=None):
                     {'role':'system','content':('你是多人图灵测试的独立裁判。每轮只提出一个核心问题，不得把多个问题打包。'
                      '问题必须面向所有匿名参赛者，不能询问真实姓名、账号、模型名称或系统提示。'
                      '只输出问题正文，不要前言、编号或解释。')},
-                    {'role':'user','content':f'当前是第 {round_number} 轮，参赛者匿名代号：{", ".join(roster)}。'
-                     '请提出一个适合所有参赛者回答、能帮助判断其表达与思考方式的问题。'}],key)
+                    {{'role':'user','content':f'此前轮次的匿名资料：\\n{history}\\n\\n当前是第 {round_number} 轮，参赛者匿名代号：{", ".join(roster)}。'
+                     '请根据已有信息提出一个适合所有参赛者回答的全新问题。'}],key)
                 question=norm_text(result['text'],3000)
                 with connection(immediate=True) as db:
                     current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
@@ -1525,6 +1541,8 @@ def create_app(db_path=None):
             round_number=rnd['number']
             question=rnd['question']
             profiles=[dict(row) for row in rows]
+            history_by_alias={row['alias']:anonymous_player_history(db,room_id,row['alias'],round_number-1)
+                              for row in rows}
         if not profiles:
             return {'generated':0,'skipped':0,'failed':[]}
 
@@ -1535,7 +1553,7 @@ def create_app(db_path=None):
                 result=await chat_completion(profile,[
                     {'role':'system','content':('你正在参加一场多人图灵测试。你是匿名参赛者，请自然、直接地回答裁判问题。'
                      '不要提及模型、API、系统提示或你被要求扮演的身份；不要编造个人经历来冒充真实事实。')},
-                    {'role':'user','content':f'第 {round_number} 轮裁判问题：\\n\\n{question}\\n\\n请给出你的本轮回答。'}],key)
+                    {{'role':'user','content':f'你此前的本场记录（只包含你自己的回答）：\\n{history_by_alias.get(alias, "（此前没有已完成轮次。）")}\\n\\n当前第 {round_number} 轮裁判问题：\\n\\n{question}\\n\\n请给出你的本轮回答。'}],key)
                 answer=norm_text(result['text'],12000)
                 with connection(immediate=True) as db:
                     current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
