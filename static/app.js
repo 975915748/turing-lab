@@ -347,8 +347,14 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
    return;
   }
   const id=state.roomId;
-  if(type==='add-ai'){await api(`/api/rooms/${id}/ai`,{method:'POST',body:data});await refreshRoom();toast('AI 参赛位已创建')}
-  if(type==='add-ai-judge'){await api(`/api/rooms/${id}/ai-judges`,{method:'POST',body:{name:data.name}});await refreshRoom();toast('AI 裁判席已添加；此裁判无需登录')}
+  if(type==='model-profile'||type==='edit-model-profile'){
+   const payload={name:data.name,base_url:data.base_url,model:data.model,api_key:data.api_key||'',temperature:Number(data.temperature),max_tokens:Number(data.max_tokens),timeout_seconds:Number(data.timeout_seconds)};
+   if(type==='model-profile')await api(`/api/rooms/${id}/models`,{method:'POST',body:payload});
+   else await api(`/api/rooms/${id}/models/${Number(form.dataset.id)}`,{method:'PUT',body:payload});
+   await refreshRoom();state.roomView='models';renderRoom();toast(type==='model-profile'?'模型配置已保存':'模型配置已更新');return;
+  }
+  if(type==='add-ai'){const profileId=data.model_profile_id?Number(data.model_profile_id):null;await api(`/api/rooms/${id}/ai`,{method:'POST',body:{name:data.name,model_profile_id:profileId}});await refreshRoom();toast('AI 参赛位已创建')}
+  if(type==='add-ai-judge'){const profileId=data.model_profile_id?Number(data.model_profile_id):null;await api(`/api/rooms/${id}/ai-judges`,{method:'POST',body:{name:data.name,model_profile_id:profileId}});await refreshRoom();toast(profileId?'已添加模型 AI 裁判':'已添加手动 AI 裁判')}
   if(type==='ai-judge-question'){await api(`/api/rooms/${id}/ai-judges/${Number(data.judge_id)}/questions`,{method:'POST',body:{text:data.text}});delete state.drafts[`${id}:${state.room?.match_number}:${state.selectedRound}:ai-judge-question`];await refreshRoom();toast('AI 裁判问题已实时同步')}
   if(type==='ai-judge-verdict'){const predictions={};for(const p of [...state.room.humans,...state.room.ais])predictions[p.alias]=data[`pred-${p.alias}`];if(!Object.values(predictions).every(Boolean))throw new Error('请填写所有匿名参赛者的判断');if(confirm('确认已从对应 AI 裁判获取判决？锁定后不可修改。')){await api(`/api/rooms/${id}/ai-judges/${Number(data.judge_id)}/verdict`,{method:'POST',body:{predictions,evidence:data.evidence,confidence:Number(data.confidence),weakness:data.weakness||'',possible_error:data.possible_error||''}});await refreshRoom();toast('AI 裁判独立判断已锁定')}}
   if(type==='add-judge'){const result=await api(`/api/rooms/${id}/judges`,{method:'POST',body:data});await refreshRoom();toast(`裁判已创建，UID：${result.uid}。请安全告知裁判 UID 和初始密码`)}
