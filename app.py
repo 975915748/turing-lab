@@ -91,12 +91,7 @@ def init_db(path):
                 ('answers' in old_tables and 'edited_at' not in {
                     x['name'] for x in old.execute('PRAGMA table_info(answers)')})):
                 stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
-                backup_tag = ('v1_6' if ('model_profiles' not in old_tables or
-                                   ('ai_players' in old_tables and 'model_profile_id' not in {
-                                       x['name'] for x in old.execute('PRAGMA table_info(ai_players)')}) or
-                                   ('ai_judges' in old_tables and 'model_profile_id' not in {
-                                       x['name'] for x in old.execute('PRAGMA table_info(ai_judges)')})) else
-                              'v1_1' if 'room_judges' not in old_tables else
+                backup_tag = ('v1_1' if 'room_judges' not in old_tables else
                               'v1_2' if 'ai_judges' not in old_tables else
                               'v1_3' if ('members' in old_tables and 'removed_at' not in {
                                   x['name'] for x in old.execute('PRAGMA table_info(members)')}) or
@@ -106,7 +101,8 @@ def init_db(path):
                                   x['name'] for x in old.execute('PRAGMA table_info(users)')} else
                               'v1_5' if 'deleted_at' not in {
                                   x['name'] for x in old.execute('PRAGMA table_info(users)')} or 'owner_id' not in {
-                                  x['name'] for x in old.execute('PRAGMA table_info(rooms)')} else 'v1_5_1')
+                                  x['name'] for x in old.execute('PRAGMA table_info(rooms)')} else
+                              'v1_5_1' if needs_room_ids else 'v1_6')
                 backup_path = path.with_name(path.stem + f'.pre-{backup_tag}-{stamp}-{secrets.token_hex(2)}.sqlite3')
                 with sqlite3.connect(str(backup_path)) as backup:
                     old.backup(backup)
