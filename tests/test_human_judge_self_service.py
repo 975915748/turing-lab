@@ -68,6 +68,8 @@ def test_self_service_judges_repeat_join_and_legacy_player_flows(env):
     base = f'/api/rooms/{room["room_id"]}'
 
     player_a, _ = register(app, '同名参赛者')
+    csrfless = player_a.post('/api/join', json={'code': room['code'], 'role': 'judge'})
+    assert csrfless.status_code == 403
     post(player_a, '/api/join', {'code': room['code']})  # 旧请求不带 role，仍是参赛者
     player_b = TestClient(app)
     post(player_b, '/api/register', {
@@ -99,9 +101,11 @@ def test_self_service_judges_repeat_join_and_legacy_player_flows(env):
     # Same display/login name does not merge distinct UIDs; multiple judges per room remain supported.
     judge_b, uid_b = register(app, '同名裁判', '真人裁判乙')
     post(judge_b, '/api/join', {'code': room['code'], 'role': 'judge'})
+    spoof, spoof_uid = register(app, '客户端指定他人UID')
+    post(spoof, '/api/join', {'code': room['code'], 'role': 'judge', 'uid': uid_a, 'user_id': 1})
     host_view = admin.get(base).json()
     human_judges = [j for j in host_view['judges'] if j['kind'] == 'human']
-    assert {j['uid'] for j in human_judges} == {uid_a, uid_b}
+    assert {j['uid'] for j in human_judges} == {uid_a, uid_b, spoof_uid}
 
     post(judge_a, '/api/join', {'code': room['code']}, 409)  # 裁判不能再以玩家身份加入
     post(player_a, '/api/join', {'code': room['code'], 'role': 'judge'}, 409)  # 玩家不能兼任本房间裁判
@@ -162,6 +166,8 @@ def test_completed_room_releases_judge_and_restart_checks_before_clearing_histor
     complete_match(admin, player_a, player_b, judge, room_a)
     base_a = f'/api/rooms/{room_a["room_id"]}'
     assert admin.get(base_a).json()['status'] == 'finished'
+    late_judge, _ = register(app, '完赛后不能加入')
+    post(late_judge, '/api/join', {'code': room_a['code'], 'role': 'judge'}, 409)
 
     room_b = post(admin, '/api/rooms', {'title': '第二个未完赛房间'})
     post(player_a, '/api/join', {'code': room_b['code']})
