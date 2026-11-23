@@ -461,6 +461,21 @@ def require_room_manager(db, room_id, user):
     return room, mine
 
 
+def can_view_room(db, room_id, user):
+    if not user:
+        return False
+    if user['is_admin']:
+        return True
+    room = db.execute('SELECT owner_id FROM rooms WHERE id=?', (room_id,)).fetchone()
+    if not room:
+        return False
+    if room['owner_id'] == user['id']:
+        return True
+    return bool(db.execute('''SELECT 1 FROM members WHERE room_id=? AND user_id=? AND removed_at IS NULL
+        UNION ALL SELECT 1 FROM room_judges WHERE room_id=? AND user_id=? LIMIT 1''',
+        (room_id,user['id'],room_id,user['id'])).fetchone())
+
+
 def require_judge(db, room_id, user):
     # 管理员、普通参赛者不能冒充裁判（即使拥有其他房间的裁判资格）。
     record = is_judge(db, room_id, user)
@@ -484,7 +499,7 @@ def judge_records(db, room_id):
     return sorted(data, key=lambda r: (r['created_at'], r['kind'], r['id']))
 
 
-def check_no_other_active_judge_room(db, user_id, room_id):
+def check_no_other_active_judge_room(db, user_id, room_id, viewer=None):
     conflict = db.execute('''SELECT r.id,r.title FROM room_judges j
         JOIN rooms r ON r.id=j.room_id
         JOIN users u ON u.id=j.user_id
@@ -492,13 +507,14 @@ def check_no_other_active_judge_room(db, user_id, room_id):
           AND u.deleted_at IS NULL
         ORDER BY r.id LIMIT 1''', (user_id, room_id)).fetchone()
     if conflict:
-        raise HTTPException(
-            409,
-            f'你已在未完赛房间「{conflict["title"]}」（ROOM {conflict["id"]}）担任真人裁判，请先完成当前房间的比赛。'
-        )
+        if can_view_room(db, conflict['id'], viewer):
+            detail = f'你已在未完赛房间「{conflict["title"]}」（ROOM {conflict["id"]}）担任真人裁判，请先完成当前房间的比赛。'
+        else:
+            detail = '该裁判正在其他未完赛房间任职，请先完成当前房间的比赛。'
+        raise HTTPException(409, detail)
 
 
-def check_restart_judge_conflicts(db, room_id):
+def check_restart_judge_conflicts(db, room_id, viewer=None):
     conflicts = db.execute('''SELECT DISTINCT u.id,u.display_name,r.id AS other_room_id,r.title
         FROM room_judges target_judge
         JOIN users u ON u.id=target_judge.user_id AND u.deleted_at IS NULL
@@ -507,14 +523,19 @@ def check_restart_judge_conflicts(db, room_id):
         WHERE target_judge.room_id=? AND r.status<>'finished'
         ORDER BY u.id,r.id''', (room_id,)).fetchall()
     if conflicts:
-        details = '；'.join(
-            f'{row["display_name"]}（{user_uid(row["id"])}）仍在未完赛房间「{row["title"]}」（ROOM {row["other_room_id"]}）'
-            for row in conflicts
-        )
+        details = []
+        for row in conflicts:
+            if can_view_room(db, row['other_room_id'], viewer):
+                details.append(
+                    f'{row["display_name"]}（{user_uid(row["id"])}）仍在未完赛房间「{row["title"]}」（ROOM {row["other_room_id"]}）'
+                )
+            else:
+                details.append('有保留裁判仍在其他未完赛房间任职')
+        details = '；'.join(dict.fromkeys(details))
         raise HTTPException(409, f'无法重新开赛：{details}。请先完成其他房间的比赛。')
 
 
-def check_judge_registration(db, room, user_id):
+def check_judge_registration(db, room, user_id, viewer=None):
     if room['owner_id'] == user_id:
         raise HTTPException(409, '房主不能同时担任本房间的独立裁判。')
     if room['status'] != 'open' or room['verdict_locked_at'] or db.execute(
@@ -528,7 +549,7 @@ def check_judge_registration(db, room, user_id):
             raise HTTPException(404, '用户不存在或账号已删除。')
         if account['is_admin']:
             raise HTTPException(403, '管理员账号不能作为独立真人裁判加入。')
-        check_no_other_active_judge_room(db, user_id, room['id'])
+        check_no_other_active_judge_room(db, user_id, room['id'], viewer)
     if db.execute('SELECT 1 FROM members WHERE room_id=? AND user_id=?',(room['id'],user_id)).fetchone():
         raise HTTPException(409, '本房间的参赛者不能同时担任裁判。')
     if len(judge_records(db,room['id'])) >= MAX_JUDGES:
@@ -1107,7 +1128,7 @@ def create_app(db_path=None):
                 existing_judge=is_judge(db,room_id,u)
                 if existing_judge:
                     return {'room_id':room_id,'role':'judge','label':existing_judge['label']}
-                check_judge_registration(db,room,u['id'])
+                check_judge_registration(db,room,u['id'],viewer=u)
                 label=norm_text(u['display_name'],40)
                 db.execute('INSERT INTO room_judges(room_id,user_id,label,created_at) VALUES(?,?,?,?)',
                            (room_id,u['id'],label,utcnow()))
@@ -1268,7 +1289,7 @@ def create_app(db_path=None):
                 raise HTTPException(409,'必须先完成当前比赛才能再次开赛。')
             # Must run before clearing the previous match: a retained judge cannot be
             # reactivated while they are still judging another unfinished room.
-            check_restart_judge_conflicts(db,room_id)
+            check_restart_judge_conflicts(db,room_id,u)
             clear_match_records(db,room_id)
             db.execute('''DELETE FROM members WHERE room_id=? AND (removed_at IS NOT NULL OR
                 user_id IN (SELECT id FROM users WHERE deleted_at IS NOT NULL))''',(room_id,))
@@ -1313,7 +1334,7 @@ def create_app(db_path=None):
                 raise HTTPException(404,'用户不存在或不可作为独立裁判。')
             if is_judge(db,room_id,{'id':target['id']}):
                 return {'ok':True,'already_joined':True}
-            check_judge_registration(db,room,target['id'])
+            check_judge_registration(db,room,target['id'],viewer=u)
             label=norm_text(body.label,40)
             db.execute('INSERT INTO room_judges(room_id,user_id,label,created_at) VALUES(?,?,?,?)',
                        (room_id,target['id'],label,utcnow()))
