@@ -82,7 +82,8 @@ def validate_base_url(value: str) -> str:
 
 async def chat_completion(profile: dict, messages: list[dict], api_key: str, transport=None) -> dict:
     """Call the OpenAI-compatible /chat/completions endpoint without following redirects."""
-    import asyncio\n    base_url = await asyncio.to_thread(validate_base_url, profile["base_url"])
+    import asyncio
+    base_url = await asyncio.to_thread(validate_base_url, profile["base_url"])
     payload = {
         "model": profile["model"],
         "messages": messages,
