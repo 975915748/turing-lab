@@ -31,5 +31,11 @@ jobs:
           python -m pip install -r requirements-dev.txt
           npm install --no-save playwright
           npx playwright install chromium --with-deps
+      - name: Check JavaScript syntax
+        run: |
+          node --check static/app.js
+          node --check tests/uid_ui.cjs
+          node --check tests/host_ui.cjs
+          node --check tests/room_delete_ui.cjs
       - name: Run regression tests
         run: python -m pytest -q
