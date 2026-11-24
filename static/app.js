@@ -172,7 +172,7 @@ async function returnFromPersonalCenter(){
  if(back?.roomId){await openRoom(back.roomId,{view:back.view,round:back.round});return;}
  history.replaceState(null,'',location.pathname);state.roomId=null;state.room=null;await loadLobby();
 }
-function credentialStatusLabel(p){return ({ok:'API Key 已验证',missing:'缺少 API Key',needs_repair:'需要重新录入 API Key',key_unavailable:'服务器密钥不可用',owner_unavailable:'配置所属账号不可用'})[p.credential_status]||'状态未知';}
+function credentialStatusLabel(p){if(!state.modelApiEnabled)return '模型 API 暂不可用，请联系管理员。';return ({ok:'API Key 已验证',missing:'缺少 API Key',needs_repair:'需要重新录入 API Key',key_unavailable:'服务器密钥不可用',owner_unavailable:'配置所属账号不可用'})[p.credential_status]||'状态未知';}
 function personalModelFields(p={}){
  const status=p.credential_status||'missing',editing=!!p.id,repair=editing&&status!=='ok';
  const keyLabel=!editing?'API Key':status==='needs_repair'?'API Key（无法解密，必须重新录入）':status==='key_unavailable'?'API Key（服务器密钥不可用）':status==='missing'?'API Key（缺少密钥）':p.has_api_key?'API Key（已保存，留空保持不变）':'API Key';
@@ -184,18 +184,31 @@ function personalModelFields(p={}){
  <div class="grid2"><div><label class="field">采样温度</label><input name="temperature" type="number" min="0" max="2" step="0.1" value="${p.temperature??0.7}" required></div><div><label class="field">最大输出 Token</label><input name="max_tokens" type="number" min="64" max="8192" step="1" value="${p.max_tokens??2048}" required></div></div>
  <label class="field">请求超时（秒）</label><input name="timeout_seconds" type="number" min="10" max="120" step="1" value="${p.timeout_seconds??60}" required>`;
 }
+
+function renderPersonalModelManager(){
+ if(!state.modelApiEnabled)return '<section class="notice"><strong>模型 API 暂不可用，请联系管理员。</strong></section>';
+ let html='<p class="hint">配置归当前账号所有，可在自己管理的多个房间中复用。</p><div class="label-line"><h3>新增模型配置</h3><span class="pill">'+state.personalModels.length+' 个配置</span></div>';
+ html+='<form data-form="personal-model-create" class="model-form">'+personalModelFields()+'<div class="form-actions"><button class="primary" type="submit">保存配置</button></div></form>';
+ html+='<div class="divider"></div><h3>已有配置</h3>';
+ if(!state.personalModels.length)return html+D('尚无个人模型配置。');
+ html+=state.personalModels.map(p=>{
+  let card='<section class="personal-model-card"><div class="label-line"><strong>'+esc(p.name)+'</strong><span class="pill '+(p.credential_status==='ok'?'ok':'warn')+'">'+credentialStatusLabel(p)+'</span></div>'+
+   '<div class="tiny muted">'+esc(p.model)+' · '+esc(p.base_url)+'</div>';
+  if(p.credential_status==='needs_repair')card+='<p class="hint">此配置无法解密，请重新录入服务商 API Key 并保存。</p>';
+  if(p.credential_status==='missing')card+='<p class="hint">此配置缺少 API Key，请重新录入后保存。</p>';
+  card+='<form data-form="personal-model-edit" data-id="'+p.id+'" class="spaced">'+personalModelFields(p)+'<div class="form-actions"><button type="submit">保存修改</button></div></form>'+
+   '<div class="buttonrow spaced"><button class="small" data-action="test-personal-model" data-id="'+p.id+'" '+(p.credential_status==='ok'?'':'disabled')+'>测试连接</button><button class="small danger" data-action="delete-personal-model" data-id="'+p.id+'">删除配置</button></div></section>';
+  return card;
+ }).join('');
+ return html;
+}
 function renderPersonalCenter(){
  stopWs();const u=state.me?.user;if(!u){renderAuth();return;}
- app.innerHTML=`<div class="pagehead"><div><div class="overline">ACCOUNT / PERSONAL CENTER</div><h1>个人中心</h1><p class="muted">管理当前账号的基本资料、登录密码和个人模型 API 配置。</p></div><div class="buttonrow"><button data-action="personal-back">← 返回${state.personalReturn?.roomId?'房间':'大厅'}</button></div></div>
+ app.innerHTML=\`<div class="pagehead"><div><div class="overline">ACCOUNT / PERSONAL CENTER</div><h1>个人中心</h1><p class="muted">管理当前账号的基本资料、登录密码和个人模型 API 配置。</p></div><div class="buttonrow"><button data-action="personal-back">← 返回\${state.personalReturn?.roomId?'房间':'大厅'}</button></div></div>
  <div class="personal-layout"><div class="stack">
- <section class="card"><h2>基本资料</h2><div class="uid-row"><div><label class="field">UID（不可修改）</label><div class="code"> ${esc(u.uid)}</div></div><button class="small" data-action="copy-uid" data-uid="${esc(u.uid)}">复制 UID</button></div><form data-form="profile-name" class="spaced"><label class="field">名字</label><input name="display_name" type="text" maxlength="40" required value="${esc(u.display_name)}"><div class="form-actions"><button class="primary" type="submit">保存名字</button></div></form></section>
+ <section class="card"><h2>基本资料</h2><div class="uid-row"><div><label class="field">UID（不可修改）</label><div class="code"> \${esc(u.uid)}</div></div><button class="small" data-action="copy-uid" data-uid="\${esc(u.uid)}">复制 UID</button></div><form data-form="profile-name" class="spaced"><label class="field">名字</label><input name="display_name" type="text" maxlength="40" required value="\${esc(u.display_name)}"><div class="form-actions"><button class="primary" type="submit">保存名字</button></div></form></section>
  <section class="card"><h2>修改密码</h2><p class="hint">修改成功后，当前账号的所有登录会话都会退出，需要使用新密码重新登录。</p><form data-form="change-password"><label class="field">当前密码</label><input name="current_password" type="password" autocomplete="current-password" maxlength="200" required><label class="field">新密码（8～200 位）</label><input name="new_password" type="password" autocomplete="new-password" minlength="8" maxlength="200" required><label class="field">确认新密码</label><input name="confirm_password" type="password" autocomplete="new-password" minlength="8" maxlength="200" required><div class="form-actions"><button class="primary" type="submit">修改密码并退出登录</button></div></form></section>
- </div><div class="stack">
- <section class="card"><div class="label-line"><h2>个人模型 API</h2><span class="pill">${state.personalModels.length} 个配置</span></div><p class="hint">配置归当前账号所有，可在自己管理的多个房间中复用。</p>
- ${state.modelApiEnabled?'':`<section class="notice"><strong>模型 API 暂不可用，请联系管理员。</strong></section>`}
- <form data-form="personal-model-create" class="model-form"><h3>新增模型配置</h3>${personalModelFields()}<div class="form-actions"><button class="primary" type="submit" ${state.modelApiEnabled?'':'disabled'}>保存配置</button></div></form>
- <div class="divider"></div><h3>已有配置</h3>${state.personalModels.length?state.personalModels.map(p=>`<section class="personal-model-card"><div class="label-line"><strong>${esc(p.name)}</strong><span class="pill ${p.credential_status==='ok'?'ok':'warn'}">${credentialStatusLabel(p)}</span></div><div class="tiny muted">${esc(p.model)} · ${esc(p.base_url)}</div>${p.credential_status==='needs_repair'?'<p class="hint">此配置无法解密，请重新录入服务商 API Key 并保存。</p>':''}${p.credential_status==='missing'?'<p class="hint">此配置缺少 API Key，请重新录入后保存。</p>':''}<form data-form="personal-model-edit" data-id="${p.id}" class="spaced">${personalModelFields(p)}<div class="form-actions"><button type="submit" ${state.modelApiEnabled?'':'disabled'}>保存修改</button></div></form><div class="buttonrow spaced"><button class="small" data-action="test-personal-model" data-id="${p.id}" ${state.modelApiEnabled&&p.credential_status==='ok'?'':'disabled'}>测试连接</button><button class="small danger" data-action="delete-personal-model" data-id="${p.id}">删除配置</button></div></section>`).join(''):D('尚无个人模型配置。')}
- </section></div></div>`;
+ </div><div class="stack"><section class="card"><h2>个人模型 API</h2>\${renderPersonalModelManager()}</section></div></div>\`;
 }
 
 function modelProfileOptions(r){
@@ -207,6 +220,7 @@ function modelBindingOptions(){
  return `<option value="__unchanged__" selected>保持当前绑定</option><option value="">手动转录（不调用 API）</option>${profiles.map(p=>`<option value="${p.id}">${esc(p.name)} · ${esc(p.model)}</option>`).join('')}`;
 }
 function bindingLabel(item){
+ if(!state.modelApiEnabled&&item.model_profile_id)return '模型 API 暂不可用，请联系管理员。';
  if(!item.model_profile_id)return '手动转录';
  const p=item.model_profile;if(!p)return '配置不可用';
  return `${p.name} · ${p.model}（${p.owned_by_me?'我的配置':'其他账号的已授权配置'} · ${credentialStatusLabel(p)}）`;
