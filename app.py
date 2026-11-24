@@ -94,7 +94,7 @@ def init_db(path):
                 ('answers' in old_tables and 'edited_at' not in {
                     x['name'] for x in old.execute('PRAGMA table_info(answers)')})):
                 stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
-                backup_tag = ('v1_7' if 'model_profiles' in old_tables and 'owner_user_id' not in {
+                backup_tag = ('v1_8' if 'model_profiles' in old_tables and 'owner_user_id' not in {
                                   x['name'] for x in old.execute('PRAGMA table_info(model_profiles)')} else
                               'v1_1' if 'room_judges' not in old_tables else
                               'v1_2' if 'ai_judges' not in old_tables else

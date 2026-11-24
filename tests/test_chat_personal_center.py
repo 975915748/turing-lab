@@ -478,11 +478,11 @@ def test_migrates_room_profiles_to_original_owner_and_keeps_ai_references(lab):
         assert db.execute('SELECT content FROM packets WHERE room_id=?',(lab['room_id'],)).fetchone()[0] == '旧版匿名快照'
         assert db.execute('SELECT status FROM rooms WHERE id=?',(lab['room_id'],)).fetchone()[0] == 'finished'
         assert db.execute('PRAGMA foreign_key_check').fetchall() == []
-    backups = list(Path(path).parent.glob(path.stem + '.pre-v1_7-*.sqlite3'))
+    backups = list(Path(path).parent.glob(path.stem + '.pre-v1_8-*.sqlite3'))
     assert len(backups) == 1
     # A second initialization is idempotent and does not create another migration backup.
     create_app(path)
-    assert len(list(Path(path).parent.glob(path.stem + '.pre-v1_7-*.sqlite3'))) == 1
+    assert len(list(Path(path).parent.glob(path.stem + '.pre-v1_8-*.sqlite3'))) == 1
 
 
 def test_migration_preserves_unowned_legacy_profile_without_reassigning_it(lab):
@@ -527,7 +527,7 @@ def test_failed_profile_migration_rolls_back_and_can_be_retried_after_source_rep
         assert db.execute('SELECT model_profile_id FROM ai_players WHERE room_id=? AND alias=?',
                           (lab['room_id'],ai['alias'])).fetchone()[0] == 999999
         assert db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='model_profiles_user_upgrade'").fetchone()[0] == 0
-    assert list(Path(lab['path']).parent.glob(Path(lab['path']).stem + '.pre-v1_7-*.sqlite3'))
+    assert list(Path(lab['path']).parent.glob(Path(lab['path']).stem + '.pre-v1_8-*.sqlite3'))
 
     with db_open(lab['path']) as db:
         db.execute('UPDATE ai_players SET model_profile_id=? WHERE room_id=? AND alias=?',
