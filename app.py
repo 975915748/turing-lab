@@ -1260,6 +1260,8 @@ def create_app(db_path=None):
                 AND ownership_issue IS NULL''',(profile_id,u['id'])).fetchone()
             if not current:
                 raise HTTPException(404,'模型配置不存在或不属于当前账号。')
+            if new_encrypted is None and model_profile_credential_status(dict(current,owner_deleted_at=None))!='ok':
+                raise HTTPException(422,'此配置的 API Key 已不可用，必须重新填写后才能修复。')
             encrypted=new_encrypted if new_encrypted is not None else current['api_key_encrypted']
             db.execute('''UPDATE model_profiles SET name=?,base_url=?,model=?,api_key_encrypted=?,
                 temperature=?,max_tokens=?,timeout_seconds=?,updated_at=? WHERE id=? AND owner_user_id=?''',
@@ -1401,8 +1403,9 @@ def create_app(db_path=None):
             db.execute('UPDATE users SET pw_hash=? WHERE id=? AND deleted_at IS NULL',(new_hash,u['id']))
             db.execute('DELETE FROM sessions WHERE user_id=?',(u['id'],))
             db.execute('DELETE FROM login_attempts WHERE identity LIKE ?',('%:uid:'+user_uid(u['id']),))
-            if u['username']:
-                db.execute('DELETE FROM login_attempts WHERE identity LIKE ?',('%:legacy:'+u['username'].lower(),))
+            legacy=db.execute('SELECT legacy_username FROM users WHERE id=?',(u['id'],)).fetchone()
+            if legacy and legacy['legacy_username']:
+                db.execute('DELETE FROM login_attempts WHERE identity LIKE ?',('%:legacy:'+legacy['legacy_username'].lower(),))
         response.delete_cookie(COOKIE,path='/')
         await app.state.hub.revoke_user(u['id'])
         return {'ok':True,'signed_out':True}
@@ -1583,7 +1586,7 @@ def create_app(db_path=None):
             cur=db.execute('''INSERT INTO model_profiles(owner_user_id,legacy_room_id,name,base_url,model,
                 api_key_encrypted,temperature,max_tokens,timeout_seconds,created_at,updated_at)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?)''',
-                (u['id'],room_id,norm_text(body.name,60),base,norm_text(body.model,120),encrypted,
+                (u['id'],None,norm_text(body.name,60),base,norm_text(body.model,120),encrypted,
                  body.temperature,body.max_tokens,body.timeout_seconds,now,now))
             log_event(db,room_id,room['current_round'],'model_profile_created','房主','新增个人模型 API 配置')
             profile_id=cur.lastrowid
@@ -1619,6 +1622,8 @@ def create_app(db_path=None):
                                (profile_id,u['id'])).fetchone()
             if not current:
                 raise HTTPException(404,'模型配置不存在或不属于当前账号。')
+            if new_encrypted is None and model_profile_credential_status(dict(current,owner_deleted_at=None))!='ok':
+                raise HTTPException(422,'此配置的 API Key 已不可用，必须重新填写后才能修复。')
             encrypted=new_encrypted if new_encrypted is not None else current['api_key_encrypted']
             db.execute('''UPDATE model_profiles SET name=?,base_url=?,model=?,api_key_encrypted=?,
                 temperature=?,max_tokens=?,timeout_seconds=?,updated_at=? WHERE id=? AND owner_user_id=?''',
