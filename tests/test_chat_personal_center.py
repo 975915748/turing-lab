@@ -275,11 +275,13 @@ def test_personal_name_update_and_password_rotation_revoke_every_session(lab):
     changed = put(p1, '/api/me/profile', {'display_name': '改名后的玩家'})
     assert changed['user']['uid'] == original['uid']
     assert changed['user']['display_name'] == '改名后的玩家'
-    assert p1.get('/api/me').json()['user']['username'] == original['username']
-    assert p1.get(base).json()['humans'][0]['name'] == '改名后的玩家'
+    me_after=p1.get('/api/me').json()['user']
+    assert me_after['username'] == me_after['display_name'] == '改名后的玩家'
+    human_after=p1.get(base).json()['humans'][0]
+    assert human_after['name'] == human_after['username'] == '改名后的玩家'
     with db_open(lab['path']) as db:
         row = db.execute('SELECT username,legacy_username FROM users WHERE id=?',(lab['p1_id'],)).fetchone()
-        assert row['username'] == original['username']
+        assert row['username'] == '改名后的玩家'
         assert row['legacy_username'] == 'legacy_player_one'
     legacy_login = TestClient(lab['app'])
     post(legacy_login, '/api/login', {'username': 'legacy_player_one', 'password': 'player-password'})
