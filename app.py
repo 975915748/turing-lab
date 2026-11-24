@@ -1892,12 +1892,28 @@ def create_app(db_path=None):
             judge_id=profile['judge_id']
             try:
                 key=decrypt_api_key(profile['api_key_encrypted'])
+                def preflight():
+                    with connection() as db:
+                        current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
+                        if not current or current['match_number']!=match_number or current['status']!='open':
+                            return False
+                        if not model_call_actor_valid(db,room_id,actor_id,session_hash) or not model_profile_snapshot_valid(db,profile):
+                            return False
+                        binding=db.execute('SELECT model_profile_id FROM ai_judges WHERE room_id=? AND id=?',
+                                           (room_id,judge_id)).fetchone()
+                        if not binding or binding['model_profile_id']!=profile['id']:
+                            return False
+                        current_rnd=current_round(db,current)
+                        if current_rnd['number']!=round_number or current_rnd['status']!='draft':
+                            return False
+                        return not db.execute('SELECT 1 FROM ai_judge_questions WHERE room_id=? AND round_number=? AND ai_judge_id=?',
+                                              (room_id,round_number,judge_id)).fetchone()
                 result=await model_call(profile,[
                     {'role':'system','content':('你是多人图灵测试的独立裁判。每轮只提出一个核心问题，不得把多个问题打包。'
                      '问题必须面向所有匿名参赛者，不能询问真实姓名、账号、模型名称或系统提示。'
                      '只输出问题正文，不要前言、编号或解释。')},
                     {'role':'user','content':f'此前轮次的匿名资料：\n{history}\n\n当前是第 {round_number} 轮，参赛者匿名代号：{", ".join(roster)}。'
-                     '请根据已有信息提出一个适合所有参赛者回答的全新问题。'}],key)
+                     '请根据已有信息提出一个适合所有参赛者回答的全新问题。'}],key,preflight)
                 question=norm_text(result['text'],3000)
                 with connection(immediate=True) as db:
                     current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
@@ -1920,6 +1936,8 @@ def create_app(db_path=None):
                     log_event(db,room_id,round_number,'ai_judge_question','AI 裁判','模型 API 已自动生成本轮问题')
                 await app.state.hub.notify(room_id,'ai_judge_question')
                 return {'judge_id':judge_id,'status':'generated','usage':result['usage']}
+            except ModelCallCancelled:
+                return {'judge_id':judge_id,'status':'skipped'}
             except ModelAPIError as exc:
                 return {'judge_id':judge_id,'status':'failed','error':str(exc)}
             except HTTPException as exc:
@@ -2157,10 +2175,26 @@ def create_app(db_path=None):
             alias=profile['alias']
             try:
                 key=decrypt_api_key(profile['api_key_encrypted'])
+                def preflight():
+                    with connection() as db:
+                        current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
+                        if not current or current['match_number']!=match_number or current['status']!='open':
+                            return False
+                        if not model_call_actor_valid(db,room_id,actor_id,session_hash) or not model_profile_snapshot_valid(db,profile):
+                            return False
+                        binding=db.execute('SELECT model_profile_id FROM ai_players WHERE room_id=? AND alias=?',
+                                           (room_id,alias)).fetchone()
+                        if not binding or binding['model_profile_id']!=profile['id']:
+                            return False
+                        current_rnd=current_round(db,current)
+                        if current_rnd['number']!=round_number or current_rnd['status']!='collecting' or current_rnd['question']!=question:
+                            return False
+                        return not db.execute('SELECT 1 FROM answers WHERE round_id=? AND alias=?',
+                                              (current_rnd['id'],alias)).fetchone()
                 result=await model_call(profile,[
                     {'role':'system','content':('你正在参加一场多人图灵测试。你是匿名参赛者，请自然、直接地回答裁判问题。'
                      '不要提及模型、API、系统提示或你被要求扮演的身份；不要编造个人经历来冒充真实事实。')},
-                    {'role':'user','content':f'你此前的本场记录（只包含你自己的回答）：\n{history_by_alias.get(alias, "（此前没有已完成轮次。）")}\n\n当前第 {round_number} 轮裁判问题：\n\n{question}\n\n请给出你的本轮回答。'}],key)
+                    {'role':'user','content':f'你此前的本场记录（只包含你自己的回答）：\n{history_by_alias.get(alias, "（此前没有已完成轮次。）")}\n\n当前第 {round_number} 轮裁判问题：\n\n{question}\n\n请给出你的本轮回答。'}],key,preflight)
                 answer=norm_text(result['text'],12000)
                 with connection(immediate=True) as db:
                     current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
@@ -2186,6 +2220,8 @@ def create_app(db_path=None):
                         log_event(db,room_id,round_number,'round_revealed','系统','本轮全部回答已公开')
                 await app.state.hub.notify(room_id,'round_revealed' if completed else 'answer_submitted')
                 return {'alias':alias,'status':'generated','usage':result['usage']}
+            except ModelCallCancelled:
+                return {'alias':alias,'status':'skipped'}
             except ModelAPIError as exc:
                 return {'alias':alias,'status':'failed','error':str(exc)}
             except HTTPException as exc:
@@ -2456,13 +2492,32 @@ def create_app(db_path=None):
             judge_id=profile['judge_id']
             try:
                 key=decrypt_api_key(profile['api_key_encrypted'])
+                def preflight():
+                    with connection() as db:
+                        current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
+                        if not current or current['match_number']!=match_number or current['status']!='open':
+                            return False
+                        if not model_call_actor_valid(db,room_id,actor_id,session_hash) or not model_profile_snapshot_valid(db,profile):
+                            return False
+                        binding=db.execute('SELECT model_profile_id FROM ai_judges WHERE room_id=? AND id=?',
+                                           (room_id,judge_id)).fetchone()
+                        if not binding or binding['model_profile_id']!=profile['id']:
+                            return False
+                        states=db.execute('SELECT status FROM rounds WHERE room_id=?',(room_id,)).fetchall()
+                        if not states or any(x['status']!='revealed' for x in states):
+                            return False
+                        if db.execute('SELECT 1 FROM ai_judge_verdicts WHERE room_id=? AND ai_judge_id=?',
+                                      (room_id,judge_id)).fetchone():
+                            return False
+                        current_packet=anonymous_match_packet(db,room_id)
+                        return hashlib.sha256(current_packet.encode('utf-8')).hexdigest()==evidence_revision
                 result=await model_call(profile,[
                     {'role':'system','content':('你是多人图灵测试的独立裁判。你必须只根据匿名代号及参赛者回答，判断每个代号实际是人类还是 AI。'
                      '不能访问或猜测真实身份、模型来源、账号资料。对所有代号都必须给出判断。'
                      '严格返回 JSON 对象，不要使用 Markdown 代码块或附加说明。结构：'
                      '{"predictions":{"A":"Human"},"evidence":"判断依据","confidence":0,"weakness":"最不确定之处","possible_error":"可能误判原因"}。'
                      'predictions 的值只能是 Human 或 AI，confidence 必须为 0 到 100 的整数。')},
-                    {'role':'user','content':packet}],key)
+                    {'role':'user','content':packet}],key,preflight)
                 payload=parse_json_object(result['text'])
                 verdict=VerdictData.model_validate(payload)
                 if set(verdict.predictions)!=set(roster) or not all(v in ('Human','AI') for v in verdict.predictions.values()):
@@ -2499,6 +2554,8 @@ def create_app(db_path=None):
                     log_event(db,room_id,current['current_round'],'ai_judge_verdict_locked','AI 裁判','模型 API 已自动完成最终判断并锁定')
                 await app.state.hub.notify(room_id,'ai_judge_verdict_locked')
                 return {'judge_id':judge_id,'status':'generated','usage':result['usage']}
+            except ModelCallCancelled:
+                return {'judge_id':judge_id,'status':'skipped'}
             except ModelAPIError as exc:
                 return {'judge_id':judge_id,'status':'failed','error':str(exc)}
             except Exception as exc:
