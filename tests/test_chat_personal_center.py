@@ -353,6 +353,11 @@ def test_personal_model_ownership_room_binding_and_cross_room_reuse(lab):
     assert [x['id'] for x in p1.get('/api/me/models').json()['models']] == [profile_a['id']]
     assert {x['id'] for x in admin2.get('/api/me/models').json()['models']} == {profile_admin['id'], unused['id']}
     assert p2.get('/api/me/models').json()['models'] == []
+    foreign_update={'name':'管理员越权修改','base_url':'https://api.example.com/v1',
+        'model':'test-model','api_key':'','temperature':0.7,'max_tokens':2048,'timeout_seconds':60}
+    assert put(admin2,f"/api/me/models/{profile_a['id']}",foreign_update,404) == {}
+    assert delete(admin2,f"/api/me/models/{profile_a['id']}",{},404) == {}
+    assert post(admin2,f"/api/me/models/{profile_a['id']}/test",{},404) == {}
     assert put(p1, f"/api/me/models/{profile_admin['id']}", {
         'name': '越权修改', 'base_url': 'https://api.example.com/v1',
         'model': 'test-model', 'api_key': '', 'temperature': 0.7,
@@ -363,6 +368,7 @@ def test_personal_model_ownership_room_binding_and_cross_room_reuse(lab):
 
     # A room owner can use only their own profile; a global admin can use their own profile in that room.
     assert post(p1, base_a + '/ai', {'name': '拒绝外部配置', 'model_profile_id': profile_admin['id']}, 404) == {}
+    assert post(admin2, base_a + '/ai', {'name': '管理员不能借用房主配置', 'model_profile_id': profile_a['id']}, 404) == {}
     ai_admin = post(admin2, base_a + '/ai', {'name': '管理员配置 AI', 'model_profile_id': profile_admin['id']})
     ai_owner = post(p1, base_a + '/ai', {'name': '房主配置 AI', 'model_profile_id': profile_a['id']})
     post(p1, base_b + '/ai', {'name': '跨房间复用', 'model_profile_id': profile_a['id']})
