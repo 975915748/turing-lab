@@ -564,12 +564,14 @@ def test_queued_model_answer_is_revalidated_before_provider_call(tmp_path, monke
     app = create_app(path)
 
     started = 0
+    started_aliases = []
     four_started = asyncio.Event()
     release = asyncio.Event()
 
     async def blocked_chat(profile, messages, api_key):
         nonlocal started
         started += 1
+        started_aliases.append(profile.get('alias'))
         if started == 4:
             four_started.set()
         await release.wait()
@@ -656,8 +658,9 @@ def test_queued_model_answer_is_revalidated_before_provider_call(tmp_path, monke
                     headers={'X-CSRF-Token': me['csrf']},
                 )
             else:
+                queued_alias = next(alias for alias in ai_aliases if alias not in started_aliases)
                 changed = await mutator.put(
-                    base + f"/ai/{ai_aliases[-1]}/model",
+                    base + f"/ai/{queued_alias}/model",
                     json={'model_profile_id': None},
                     headers={'X-CSRF-Token': me['csrf']},
                 )
