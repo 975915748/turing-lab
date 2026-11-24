@@ -486,12 +486,12 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
   }
   const id=state.roomId;
   if(type==='chat'){
-   const requestRoomId=id,requestMatch=state.room?.match_number,requestUid=state.me?.user?.uid,requestDraft=state.chatDraft;
+   const requestRoomId=id,requestMatch=state.room?.match_number,requestUid=state.me?.user?.uid,requestCsrf=state.me?.user?.csrf,requestDraft=state.chatDraft;
    await api(`/api/rooms/${requestRoomId}/chat`,{method:'POST',body:{match_number:requestMatch,text:data.text}});
-   if(state.roomId!==requestRoomId||state.room?.id!==requestRoomId||state.room?.match_number!==requestMatch||state.room?.status!=='open'||state.me?.user?.uid!==requestUid)return;
+   if(state.roomId!==requestRoomId||state.room?.id!==requestRoomId||state.room?.match_number!==requestMatch||state.room?.status!=='open'||state.me?.user?.uid!==requestUid||state.me?.user?.csrf!==requestCsrf)return;
    const clearSentDraft=state.chatDraft===requestDraft;
    await refreshRoom();
-   if(state.roomId!==requestRoomId||state.room?.id!==requestRoomId||state.room?.match_number!==requestMatch||state.me?.user?.uid!==requestUid)return;
+   if(state.roomId!==requestRoomId||state.room?.id!==requestRoomId||state.room?.match_number!==requestMatch||state.me?.user?.uid!==requestUid||state.me?.user?.csrf!==requestCsrf)return;
    if(state.room?.status==='open'&&clearSentDraft){state.chatDraft='';const chatInput=$('[data-form="chat"] [name="text"]');if(chatInput)chatInput.value='';}
    toast('消息已发送');return;
   }
