@@ -299,32 +299,11 @@ function renderMultiResults(r,roster){
  return `<section class="card"><div class="overline">MULTI-JUDGE / RESULTS</div><h2>多裁判独立判决结果</h2><p class="hint">比赛结束后向人类参与者展示全部裁判判决及评分；各裁判登录时仍只能读取自己的判断。</p>${r.verdicts.map(v=>{const count=roster.filter(p=>v.predictions?.[p.alias]===(p.role==='AI'?'AI':'Human')).length;return `<div class="answer-card"><div class="label-line"><h3>${esc(v.judge)} <span class="tiny muted">${v.kind==='ai'?'AI 裁判':v.kind==='human'?'真人裁判':''}</span></h3><span class="pill ok">${count} / ${roster.length} 正确</span></div><div class="hint">置信度 ${v.confidence}%</div>${roster.map(p=>`<div class="hint">${esc(p.alias)} · ${p.role} · 判断：${v.predictions?.[p.alias]==='Human'?'人类':'AI'} ${v.predictions?.[p.alias]===(p.role==='AI'?'AI':'Human')?'✓':'✗'}</div>`).join('')}<div class="question spaced">${esc(v.evidence)}</div><p class="hint">最弱环节：${esc(v.weakness||'未填写')}</p><p class="hint">可能误判：${esc(v.possible_error||'未填写')}</p></div>`}).join('')}</section>`;
 }
 function renderAdminRoomNav(r,finished){
- return `<nav class="card flat room-view-menu" aria-label="房间页面导航"><div class="overline">房间导航 / NAVIGATION</div><h2>操作页面</h2>
- ${[['match','比赛现场','查看本轮问题与回答'],['judges','真人 / AI 裁判管理','管理裁判与自主判断'],['admin','房主管理台','管理参赛者与比赛'],['models','模型 API 接入','配置模型和 API Key']].map(([view,title,desc])=>`<button type="button" class="room-view-link ${state.roomView===view?'active':''}" data-action="room-view" data-view="${view}" ${state.roomView===view?'aria-current="page"':''}><strong>${title}</strong><span>${desc}</span></button>`).join('')}
- <div class="room-view-hint">第 ${r.current_round} 轮 · ${finished?'比赛已结束':'比赛进行中'}</div></nav>`;
-}
-
-function renderModelRoom(r){
- const profiles=r.model_profiles||[];
- const formFields=(p={})=>{
-  const status=p.credential_status||'missing';
-  const needsNewKey=!!p.id&&status!=='ok';
-  const keyLabel=!p.id?'':status==='needs_repair'?'（无法解密，必须重新录入）':status==='key_unavailable'?'（服务器密钥不可用）':status==='missing'?'（缺少 API Key）':p.has_api_key?'（已保存，留空保持不变）':'';
-  const keyPlaceholder=!p.id?'填写 API Key':needsNewKey?'请重新填写 API Key':p.has_api_key?'已加密保存；不修改时留空':'填写 API Key';
-  const keyRequired=!p.id||needsNewKey||!p.has_api_key;
-  return `<label class="field">配置名称</label><input name="name" maxlength="60" required value="${esc(p.name||'')}" placeholder="例如 DeepSeek 主力">
- <label class="field">Base URL</label><input name="base_url" maxlength="500" required value="${esc(p.base_url||'https://api.openai.com/v1')}" placeholder="https://api.openai.com/v1">
- <label class="field">模型名称</label><input name="model" maxlength="120" required value="${esc(p.model||'')}" placeholder="例如 gpt-4.1-mini">
- <label class="field">API Key ${keyLabel}</label><input name="api_key" type="password" maxlength="2000" autocomplete="new-password" ${keyRequired?'required':''} placeholder="${keyPlaceholder}">
- <div class="grid2"><div><label class="field">采样温度</label><input name="temperature" type="number" min="0" max="2" step="0.1" value="${p.temperature??0.7}" required></div><div><label class="field">最大输出 Token</label><input name="max_tokens" type="number" min="64" max="8192" step="1" value="${p.max_tokens??2048}" required></div></div>
- <label class="field">请求超时（秒）</label><input name="timeout_seconds" type="number" min="10" max="120" step="1" value="${p.timeout_seconds??60}" required>`;
- };
- app.innerHTML=`<div class="pagehead"><div><div class="overline">MODEL API / ROOM ${r.id}</div><h1>模型 API 接入</h1><p class="muted">为本房间配置 OpenAI 兼容接口，并将配置分配给 AI 参赛者或 AI 裁判。</p></div><button data-action="room-view" data-view="match">← 返回比赛现场</button></div>
- ${r.model_api_enabled?'':`<section class="notice"><strong>模型 API 暂不可用，请联系管理员。</strong></section>`}
- <section class="card"><h2>新增模型配置</h2><p class="hint">支持标准 OpenAI Chat Completions 接口。</p><form data-form="model-profile">${formFields()}<div class="form-actions"><button class="primary" type="submit" ${r.model_api_enabled?'':'disabled'}>保存模型配置</button></div></form></section>
- <section class="spaced"><div class="label-line"><h2>已有配置</h2><span class="pill">${profiles.length} 个</span></div>
- ${profiles.length?profiles.map(p=>`<section class="card flat"><div class="label-line"><strong>${esc(p.name)}</strong><span class="pill">${p.credential_status==='needs_repair'?'需要重新录入 API Key':p.credential_status==='key_unavailable'?'服务器密钥不可用':p.credential_status==='missing'?'缺少 API Key':'API Key 已验证'}</span></div>${p.credential_status==='needs_repair'?'<p class="hint">当前密钥无法解密此配置。请重新填写服务商 API Key 并保存；房间和比赛记录不会受到影响。</p>':''}<form data-form="edit-model-profile" data-id="${p.id}">${formFields(p)}<div class="form-actions"><button type="submit" ${r.model_api_enabled?"":"disabled"}>保存修改</button></div></form><div class="buttonrow spaced"><button class="small" data-action="test-model" data-id="${p.id}">测试连接</button><button class="small danger" data-action="delete-model" data-id="${p.id}">删除配置</button></div></section>`).join(''):D('还没有模型配置。添加配置后，就能在 AI 参赛位和 AI 裁判中选择它。')}
- </section>${r.model_api_enabled?`<section class="notice spaced"><strong>密钥与连接安全</strong><p class="hint">API Key 在服务器端使用 Fernet 加密后写入 SQLite；浏览器只会收到“是否已保存”的状态，不会收到密钥或密文。仅本房间房主和全站管理员可以管理配置。当前仅允许 HTTPS 公网 Base URL，拒绝本机和局域网地址。</p></section>`:""}`;
+ const views=[['match','比赛现场','查看本轮问题与回答'],['human-judges','真人裁判管理','查看真人裁判名单'],['ai-judges','AI 裁判管理','配置 AI 裁判席位'],['admin','房主管理台','管理参赛者与比赛']];
+ return '<nav class="card flat room-view-menu" aria-label="房间页面导航"><div class="overline">房间导航 / NAVIGATION</div><h2>操作页面</h2>'+
+ views.map(([view,title,desc])=>'<button type="button" class="room-view-link '+(state.roomView===view?'active':'')+'" data-action="room-view" data-view="'+view+'" '+(state.roomView===view?'aria-current="page"':'')+'><strong>'+title+'</strong><span>'+desc+'</span></button>').join('')+
+ '<button class="room-view-link" type="button" data-action="personal-center"><strong>个人中心</strong><span>管理名字、密码和个人模型 API</span></button>'+
+ '<div class="room-view-hint">第 '+r.current_round+' 轮 · '+(finished?'比赛已结束':'比赛进行中')+'</div></nav>';
 }
 function renderRoom(){
  const editing=document.activeElement;
