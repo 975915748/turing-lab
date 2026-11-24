@@ -1,5 +1,7 @@
 # v1.4.0：自由注册与唯一 UID
 
+> **历史版本文档（v1.4.0）**：本文记录旧版 UID 迁移与账号管理方案。文中“创建真人裁判账号”“绑定已有账号”的操作入口已不适用于当前 v1.7；真人裁判现在自行注册、使用 UID 登录，再凭房间邀请码选择“真人裁判”身份加入。请以 [README.md](README.md) 为准。
+
 注册时填写用户名和密码即可，不再需要邀请码。用户名支持 1～40 个字符，可以重名；平台自动分配唯一 UID，例如 `TL00000001`。注册后进入比赛大厅，UID 会持续显示，并可一键复制。
 
 ## 登录和加入比赛
@@ -50,7 +52,24 @@ npm ci --ignore-scripts
 node --check static/app.js
 ```
 
-浏览器测试使用本机 Microsoft Edge 的独立无界面临时配置，不操作日常浏览器，不下载浏览器。无 Edge 的环境可执行 `python -m pytest --ignore=tests/test_uid_ui.py` 运行后端测试，浏览器验收需另在有 Edge 的环境执行。截图保存至本地 `artifacts/`，数据库、虚拟环境和截图不会提交到仓库。
+浏览器验收测试包括 `tests/test_uid_ui.py` 和 `tests/test_host_ui.py`，两者都会通过 Playwright 启动浏览器。只排除 UID UI 测试并不能保证无 Edge 环境只运行后端测试。
+
+无 Microsoft Edge、也不准备运行浏览器验收时，必须同时排除这两个测试文件：
+
+```powershell
+python -m pytest -q --ignore=tests/test_uid_ui.py --ignore=tests/test_host_ui.py
+```
+
+本机使用 Playwright Chromium 时，可安装浏览器并切换测试通道：
+
+```powershell
+npm install --no-save playwright
+npx playwright install chromium
+$env:PLAYWRIGHT_CHANNEL = "default"
+python -m pytest -q
+```
+
+GitHub Actions 的 `.github/workflows/tests.yml` 已配置 Chromium：安装 Playwright、执行 `npx playwright install chromium --with-deps`，设置 `PLAYWRIGHT_CHANNEL=default` 后运行完整的 `python -m pytest -q`。因此 CI 不依赖 Microsoft Edge。截图保存至本地 `artifacts/`，数据库、虚拟环境和截图不会提交到仓库。
 
 ## 主持人统一消息模块的定位结果
 
