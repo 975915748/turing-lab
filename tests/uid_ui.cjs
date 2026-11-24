@@ -108,6 +108,8 @@ async function logout(page) {
       await join.locator('[name="role"]').selectOption('judge');
       await clickSubmit(judgePage, 'join');
       await judgePage.locator('.pagehead .pill').filter({ hasText: '独立裁判' }).waitFor();
+      assert.equal(await judgePage.locator('.chat-card').count(), 0);
+      assert.equal(await judgePage.getByText('公共聊天', { exact: true }).count(), 0);
       const blind = await (await judgeContext.request.get(site + base)).json();
       assert.equal(blind.is_judge, true);
       assert.equal(Object.hasOwn(blind, 'humans'), false);
