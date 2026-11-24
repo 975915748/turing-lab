@@ -119,7 +119,7 @@ async function logout(page) {
       // Host sees the roster update; the self-service account is not exposed to judges.
       await page.reload();
       await page.locator('[data-action="room-view"][data-view="human-judges"]').click();
-      await page.getByText('真人裁判 · TL00000002', { exact: true }).waitFor();
+      await page.getByText('UID：TL00000002', { exact: true }).waitFor();
       assert.equal(await page.locator('form[data-form="add-judge"]').count(), 0);
       assert.equal(await page.locator('form[data-form="assign-judge"]').count(), 0);
       await page.locator('[data-action="room-view"][data-view="ai-judges"]').click();

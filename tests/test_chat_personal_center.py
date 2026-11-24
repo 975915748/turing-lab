@@ -387,7 +387,7 @@ def test_personal_model_ownership_room_binding_and_cross_room_reuse(lab):
     assert next(a for a in state['ais'] if a['alias'] == original_alias)['model_profile_id'] == profile_a['id']
 
     # Deleting one room never deletes personal profiles or their bindings in another room.
-    delete(p1, base_a, {'match_number': 1})
+    delete(p1, base_a, {'confirm': True, 'match_number': 1})
     assert {x['id'] for x in p1.get('/api/me/models').json()['models']} == {profile_a['id']}
     room_b_state = p1.get(base_b).json()
     assert any(a['name'] == '跨房间复用' and a['model_profile_id'] == profile_a['id'] for a in room_b_state['ais'])
