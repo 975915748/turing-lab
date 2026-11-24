@@ -1319,12 +1319,21 @@ def create_app(db_path=None):
         with connection() as db:
             u=caller(request,db,mutate=True)
             profile=require_owned_model_profile(db,profile_id,u['id'])
+        actor_id=u['id']
+        session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
+        def preflight():
+            with connection() as db:
+                return (model_actor_session_valid(db,actor_id,session_hash)
+                        and model_profile_snapshot_valid(db,profile)
+                        and profile['owner_user_id']==actor_id)
         try:
             key=decrypt_api_key(profile['api_key_encrypted'])
             started=time.perf_counter()
             result=await model_call(profile,[
                 {'role':'system','content':'You are a connection test. Reply with exactly OK.'},
-                {'role':'user','content':'Reply with OK.'}],key)
+                {'role':'user','content':'Reply with OK.'}],key,preflight)
+        except ModelCallCancelled:
+            raise HTTPException(409,'测试排队期间模型配置或账号状态已变化，请重试。')
         except ModelAPIError as exc:
             raise HTTPException(502,str(exc))
         with connection() as db:
@@ -1694,12 +1703,21 @@ def create_app(db_path=None):
             u=caller(request,db,mutate=True)
             require_room_manager(db,room_id,u)
             profile=require_owned_model_profile(db,profile_id,u['id'])
+        actor_id=u['id']
+        session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
+        def preflight():
+            with connection() as db:
+                return (model_call_actor_valid(db,room_id,actor_id,session_hash)
+                        and model_profile_snapshot_valid(db,profile)
+                        and profile['owner_user_id']==actor_id)
         try:
             key=decrypt_api_key(profile['api_key_encrypted'])
             started=time.perf_counter()
             result=await model_call(profile,[
                 {'role':'system','content':'You are a connection test. Reply with exactly OK.'},
-                {'role':'user','content':'Reply with OK.'}],key)
+                {'role':'user','content':'Reply with OK.'}],key,preflight)
+        except ModelCallCancelled:
+            raise HTTPException(409,'测试排队期间房间权限、模型配置或账号状态已变化，请重试。')
         except ModelAPIError as exc:
             raise HTTPException(502,str(exc))
         with connection() as db:
