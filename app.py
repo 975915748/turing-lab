@@ -1694,8 +1694,10 @@ def create_app(db_path=None):
             if room['status']!='finished':
                 raise HTTPException(409,'只能删除已经完成比赛的记录。')
             clear_match_records(db,room_id)
+            cleared_match=room['match_number']
         app.state.hub.typing.pop(room_id,None)
         await app.state.hub.notify(room_id,'records_deleted')
+        await app.state.hub.clear_chat(room_id,cleared_match)
         return {'ok':True}
 
     @app.post('/api/rooms/{room_id}/restart')
@@ -1717,9 +1719,11 @@ def create_app(db_path=None):
             db.execute('''UPDATE rooms SET status='open',current_round=1,records_deleted=0,
                 match_number=match_number+1 WHERE id=?''',(room_id,))
             db.execute('INSERT INTO rounds(room_id,number,created_at) VALUES(?,?,?)',(room_id,1,utcnow()))
+            new_match_number=room['match_number']+1
             log_event(db,room_id,1,'match_restarted','主持人','重新开赛，上一场比赛记录已清空')
         app.state.hub.typing.pop(room_id,None)
         await app.state.hub.notify(room_id,'match_restarted')
+        await app.state.hub.clear_chat(room_id,new_match_number)
         return {'ok':True,'match_number':room['match_number']+1}
 
     @app.post('/api/rooms/{room_id}/judges')
@@ -1967,6 +1971,27 @@ def create_app(db_path=None):
             log_event(db,room_id,1,'ai_joined',alias,'AI 参赛位已添加')
         await app.state.hub.notify(room_id,'ai_joined')
         return {'alias':alias,'automated':body.model_profile_id is not None}
+
+    @app.put('/api/rooms/{room_id}/ai/{alias}/model')
+    async def bind_ai_player_model(room_id:int,alias:str,body:ModelBindingData,request:Request):
+        alias=alias.upper()
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            if not db.execute('SELECT 1 FROM ai_players WHERE room_id=? AND alias=?',(room_id,alias)).fetchone():
+                raise HTTPException(404,'AI 参赛席不存在。')
+            if body.keep_existing:
+                return {'ok':True,'unchanged':True}
+            if room['status']!='open' or room['verdict_locked_at'] or db.execute(
+                'SELECT 1 FROM judge_verdicts WHERE room_id=? LIMIT 1',(room_id,)).fetchone() or db.execute(
+                'SELECT 1 FROM ai_judge_verdicts WHERE room_id=? LIMIT 1',(room_id,)).fetchone():
+                raise HTTPException(409,'比赛结束或裁判已锁定判断，不能更换模型绑定。')
+            if body.model_profile_id is not None:
+                require_owned_model_profile(db,body.model_profile_id,u['id'])
+            db.execute('UPDATE ai_players SET model_profile_id=? WHERE room_id=? AND alias=?',
+                       (body.model_profile_id,room_id,alias))
+        await app.state.hub.notify(room_id,'model_profile_changed')
+        return {'ok':True}
 
     @app.post('/api/rooms/{room_id}/question')
     async def set_question(room_id:int,body:TextData,request:Request):
@@ -2471,8 +2496,11 @@ def create_app(db_path=None):
             if r['status']!='revealed':
                 raise HTTPException(409,'本轮未完成。')
             db.execute('UPDATE rooms SET status=?,revealed_at=? WHERE id=?',('finished',utcnow(),room_id))
+            clear_room_chat(db,room_id,room['match_number'])
+            finished_match=room['match_number']
             log_event(db,room_id,room['current_round'],'identity_revealed','管理员','已揭晓真实身份与裁判得分')
         await app.state.hub.notify(room_id,'identity_revealed')
+        await app.state.hub.clear_chat(room_id,finished_match)
         return {'ok':True}
 
     @app.websocket('/ws/rooms/{room_id}')
