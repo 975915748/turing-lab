@@ -1,15 +1,41 @@
-"""Start web server after safely creating the first admin account (once)."""
+"""Start web server after validating persisted secrets and the first admin account."""
 import os
 import re
 import sys
 from pathlib import Path
 
 from app import db_open, init_db, seed_admin
+from model_api import ModelAPIError, decrypt_api_key, validate_credential_key
+
+
+def validate_stored_model_credentials(path):
+    """Fail closed if saved model credentials cannot be decrypted with this deployment key."""
+    validate_credential_key()
+    with db_open(path) as db:
+        tokens = [
+            row['api_key_encrypted']
+            for row in db.execute(
+                "SELECT api_key_encrypted FROM model_profiles WHERE api_key_encrypted<>''"
+            )
+        ]
+    if not tokens:
+        return
+    validate_credential_key(required=True)
+    for token in tokens:
+        decrypt_api_key(token)
 
 
 def main():
     path = Path(os.environ.get('DB_PATH', '/app/data/game.sqlite3'))
     init_db(path)
+    try:
+        validate_stored_model_credentials(path)
+    except ModelAPIError as exc:
+        print(
+            f'MODEL CREDENTIAL CONFIGURATION ERROR: {exc} Refusing to start.',
+            file=sys.stderr,
+        )
+        raise SystemExit(5) from None
     with db_open(path) as db:
         exists = db.execute('SELECT 1 FROM users WHERE is_admin=1').fetchone() is not None
     if not exists:
