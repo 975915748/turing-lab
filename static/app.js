@@ -488,7 +488,7 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
   if(type==='chat'){
    const requestRoomId=id,requestMatch=state.room?.match_number,requestUid=state.me?.user?.uid,requestDraft=state.chatDraft;
    await api(`/api/rooms/${requestRoomId}/chat`,{method:'POST',body:{match_number:requestMatch,text:data.text}});
-   if(state.roomId!==requestRoomId||state.room?.id!==requestRoomId||state.room?.match_number!==requestMatch||state.me?.user?.uid!==requestUid)return;
+   if(state.roomId!==requestRoomId||state.room?.id!==requestRoomId||state.room?.match_number!==requestMatch||state.room?.status!=='open'||state.me?.user?.uid!==requestUid)return;
    const clearSentDraft=state.chatDraft===requestDraft;
    await refreshRoom();
    if(state.roomId!==requestRoomId||state.room?.id!==requestRoomId||state.room?.match_number!==requestMatch||state.me?.user?.uid!==requestUid)return;
