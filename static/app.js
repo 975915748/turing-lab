@@ -73,7 +73,7 @@ async function loadAccounts(){
  const data=await api('/api/admin/users');state.accounts=data.users;stopWs();state.roomId=null;state.room=null;history.replaceState(null,'',location.pathname);setConnection('用户管理',false);renderAccounts();
 }
 function renderAccounts(){
- app.innerHTML=`<div class="pagehead"><div><div class="overline">ADMIN / ACCOUNTS</div><h1>用户管理</h1><p class="muted">按唯一 UID 管理账号；修改密码后，该账号的所有登录会话立即失效。</p></div><button data-action="back">← 返回大厅</button></div>
+ app.innerHTML=`<div class="pagehead"><div><div class="overline">ADMIN / ACCOUNTS</div><h1>用户管理</h1><p class="muted">按唯一 UID 管理账号；修改密码后，该账号的所有登录会话立即失效。</p></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button data-action="back">← 返回大厅</button></div></div>
  <div class="roomcards">${state.accounts.map(u=>`<section class="card flat" data-account-uid="${esc(u.uid)}"><div class="label-line"><h2>${esc(u.display_name)}</h2><span class="pill">${u.is_admin?'管理员':'用户'}</span></div><div class="code">${esc(u.uid)}</div><p class="hint">用户名：${esc(u.username)}</p><div class="buttonrow"><button class="small" data-action="toggle-password-reset" data-uid="${esc(u.uid)}">修改密码</button><button class="small danger" data-action="delete-account" data-uid="${esc(u.uid)}">删除账号</button></div>
  <form data-form="reset-password" data-uid="${esc(u.uid)}" class="hide spaced"><label class="field" for="password-${u.id}">新密码（至少 8 位）</label><input id="password-${u.id}" type="password" name="password" required minlength="8" maxlength="200" autocomplete="new-password"><div class="form-actions"><button type="submit">确认修改密码</button></div></form></section>`).join('')}</div>`;
 }
@@ -431,7 +431,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
   if(action==='view-packet'){const pack=await api(`/api/rooms/${state.roomId}/packets/${b.dataset.id}`);const win=window.open('','_blank');if(win){win.document.title='裁判匿名消息包';const pre=win.document.createElement('pre');pre.style.cssText='white-space:pre-wrap;overflow-wrap:anywhere;font:15px/1.7 sans-serif;padding:24px';pre.textContent=pack.content;win.document.body.appendChild(pre);}else{await navigator.clipboard.writeText(pack.content);toast('弹窗被阻止，已复制裁判包');}}
   if(action==='mark-sent'){if(confirm('确认已亲自发送此版本到裁判窗口？标记并不代表系统已自动发送。')){await api(`/api/rooms/${state.roomId}/packets/${b.dataset.id}/sent`,{method:'POST'});await refreshRoom();toast('已记录手动发送时间')}}
   if(action==='reveal'){if(confirm('裁判结论锁定后将向全部玩家公开身份和计分。确定结束比赛并揭晓？')){await api(`/api/rooms/${state.roomId}/reveal`,{method:'POST'});await refreshRoom();toast('已结束并揭晓比赛')}}
- }catch(err){toast(err.message)}
+ }catch(err){if(action==='test-personal-model'&&b){b.disabled=false;b.textContent='测试连接';}toast(err.message)}
 });
 app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-form]');if(!form)return;e.preventDefault();const type=form.dataset.form;const data=Object.fromEntries(new FormData(form));const btn=form.querySelector('[type=submit]');if(btn)btn.disabled=true;
  try{
@@ -466,7 +466,7 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
   const id=state.roomId;
   if(type==='chat'){
    const result=await api(`/api/rooms/${id}/chat`,{method:'POST',body:{match_number:state.room.match_number,text:data.text}});
-   state.chatDraft='';form.reset();addChatMessage(result.message);toast('消息已发送');return;
+   state.chatDraft='';const chatInput=form.querySelector('[name="text"]');if(chatInput)chatInput.value='';addChatMessage(result.message);toast('消息已发送');return;
   }
   if(type==='bind-ai-player-model'||type==='bind-ai-judge-model'){
    const keep=data.model_profile_id==='__unchanged__';
