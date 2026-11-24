@@ -555,7 +555,7 @@ def test_ai_judge_discards_verdict_if_match_evidence_changes(tmp_path, monkeypat
 
     asyncio.run(scenario())
 
-@pytest.mark.parametrize('mutation', ['profile_deleted', 'owner_deleted'])
+@pytest.mark.parametrize('mutation', ['profile_deleted', 'owner_deleted', 'session_revoked', 'seat_rebound'])
 def test_queued_model_answer_is_revalidated_before_provider_call(tmp_path, monkeypatch, mutation):
     monkeypatch.setenv('MODEL_CREDENTIAL_KEY', Fernet.generate_key().decode('ascii'))
     monkeypatch.setattr(app_module, 'validate_base_url', lambda value: value.strip().rstrip('/'))
@@ -605,11 +605,13 @@ def test_queued_model_answer_is_revalidated_before_provider_call(tmp_path, monke
             })
             assert profile_response.status_code == 200, profile_response.text
             profile_id = profile_response.json()['id']
+            ai_aliases = []
             for index in range(5):
                 response = await async_post(admin, base + '/ai', {
                     'name': f'排队 AI {index + 1}', 'model_profile_id': profile_id,
                 })
                 assert response.status_code == 200, response.text
+                ai_aliases.append(response.json()['alias'])
             question = await async_post(admin, base + '/question', {'text': '排队校验问题'})
             assert question.status_code == 200, question.text
 
@@ -632,16 +634,31 @@ def test_queued_model_answer_is_revalidated_before_provider_call(tmp_path, monke
             await asyncio.wait_for(four_started.wait(), 3)
             assert started == 4
 
+            me = (await mutator.get('/api/me')).json()['user']
             if mutation == 'profile_deleted':
-                me = (await mutator.get('/api/me')).json()['user']
                 changed = await mutator.request(
                     'DELETE', f'/api/me/models/{profile_id}', json={},
                     headers={'X-CSRF-Token': me['csrf']},
                 )
-            else:
-                me = (await mutator.get('/api/me')).json()['user']
+            elif mutation == 'owner_deleted':
                 changed = await mutator.request(
                     'DELETE', f"/api/admin/users/{admin_me['uid']}", json={'confirm': True},
+                    headers={'X-CSRF-Token': me['csrf']},
+                )
+            elif mutation == 'session_revoked':
+                changed = await mutator.post(
+                    '/api/me/password',
+                    json={
+                        'current_password': 'queue-admin-password',
+                        'new_password': 'queue-admin-password-new',
+                        'confirm_password': 'queue-admin-password-new',
+                    },
+                    headers={'X-CSRF-Token': me['csrf']},
+                )
+            else:
+                changed = await mutator.put(
+                    base + f"/ai/{ai_aliases[-1]}/model",
+                    json={'model_profile_id': None},
                     headers={'X-CSRF-Token': me['csrf']},
                 )
             assert changed.status_code == 200, changed.text
@@ -651,8 +668,12 @@ def test_queued_model_answer_is_revalidated_before_provider_call(tmp_path, monke
             assert generated.status_code == 200, generated.text
             payload = generated.json()
             assert started == 4, '第五个排队任务不应在状态失效后触发服务商调用'
-            assert payload['generated'] == 0
-            assert payload['skipped'] == 5
+            if mutation == 'seat_rebound':
+                assert payload['generated'] == 4
+                assert payload['skipped'] == 1
+            else:
+                assert payload['generated'] == 0
+                assert payload['skipped'] == 5
 
     asyncio.run(scenario())
 
