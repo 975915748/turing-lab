@@ -174,7 +174,9 @@ async function screenshot(page, name) {
     await screenshot(page, 'host-finished-desktop.png');
     await page.locator('[data-action="room-view"][data-view="match"]').click();
     assert(await page.getByText('第一场的回答', { exact: true }).isVisible());
+    const firstMatchNumber = await page.evaluate(() => state.room.match_number);
     await page.locator('[data-action="restart-match"]').click();
+    await page.waitForFunction(previous => state.room?.match_number === previous + 1, firstMatchNumber);
     await page.locator('[data-action="room-view"][data-view="admin"]').click();
     await page.locator('form[data-form="question"]').waitFor();
     assert.equal(await page.locator('form[data-form="question"] textarea').inputValue(), '');
@@ -207,7 +209,9 @@ async function screenshot(page, name) {
     await page.getByRole('heading', { name: '开始下一场比赛', exact: true }).waitFor();
     assert.equal(await page.getByText('第二场人类回答', { exact: true }).count(), 0);
     await screenshot(page, 'host-records-cleared.png');
+    const secondMatchNumber = await page.evaluate(() => state.room.match_number);
     await page.locator('[data-action="restart-match"]').click();
+    await page.waitForFunction(previous => state.room?.match_number === previous + 1, secondMatchNumber);
     await page.locator('[data-action="room-view"][data-view="admin"]').click();
     await page.locator('form[data-form="question"]').waitFor();
     // Retained question remains startable if its only judge account is deleted.
