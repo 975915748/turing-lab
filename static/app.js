@@ -37,7 +37,7 @@ function connectWs(roomId){stopWs();if(state.roomId!==roomId)return;
  ws.onclose=e=>{if(state.roomId!==roomId||state.ws!==ws)return;if(e.code===1008){state.roomId=null;state.room=null;state.typing={};history.replaceState(null,'',location.pathname);loadLobby().then(()=>toast(e.reason==='房间已删除'?'房间已删除':'房间访问权限已失效或你已被移出')).catch(err=>toast(err.message));return;}setConnection('重连中',false);state.reconnect=setTimeout(()=>connectWs(roomId),3000)};
  ws.onerror=()=>setConnection('连接异常',false);
 }
-async function refreshRoom(){if(!state.roomId||location.hash==='#profile')return;try{const r=await api(`/api/rooms/${state.roomId}`);if(!state.room||r.current_round!==state.room.current_round||r.match_number!==state.room.match_number){state.selectedRound=r.current_round;state.lastTyping=null;state.typing={};}
+async function refreshRoom(){if(!state.roomId||location.hash.startsWith('#profile'))return;try{const r=await api(`/api/rooms/${state.roomId}`);if(!state.room||r.current_round!==state.room.current_round||r.match_number!==state.room.match_number){state.selectedRound=r.current_round;state.lastTyping=null;state.typing={};}
  if(state.room&&(r.match_number!==state.room.match_number||(!state.room.records_deleted&&r.records_deleted))){for(const key of Object.keys(state.drafts))if(key.startsWith(`${r.id}:`))delete state.drafts[key];const dialog=$('#judgeNotice');if(dialog?.open)dialog.close();state.roomView='match';state.chat=[];state.chatDraft='';}
  state.room=r;
  if(r.is_judge||r.status==='finished'){state.chat=[];state.chatDraft='';}else await loadRoomChat().catch(()=>{});
