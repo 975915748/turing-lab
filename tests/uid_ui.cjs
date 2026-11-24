@@ -172,16 +172,20 @@ async function logout(page) {
         await page.getByText('采样温度', { exact: true }).waitFor();
       }
 
-      // Check both themes and the 390px layout in a real browser.
-      await page.screenshot({ path: path.join(artifacts, 'self-service-judges-desktop-light.png'), fullPage: true, animations: 'disabled' });
+      // Personal center visual coverage in all requested viewport/theme combinations.
       assert.equal(await page.locator('body').getAttribute('data-theme'), 'light');
-      await page.setViewportSize({ width: 390, height: 844 });
-      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-      await page.screenshot({ path: path.join(artifacts, 'self-service-judges-mobile-light.png'), fullPage: true, animations: 'disabled' });
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      await page.screenshot({ path: path.join(artifacts, 'personal-center-desktop-light.png'), fullPage: true, animations: 'disabled' });
       await page.locator('#themeBtn').click();
       assert.equal(await page.locator('body').getAttribute('data-theme'), 'dark');
+      await page.screenshot({ path: path.join(artifacts, 'personal-center-desktop-dark.png'), fullPage: true, animations: 'disabled' });
+      await page.setViewportSize({ width: 390, height: 844 });
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-      await page.screenshot({ path: path.join(artifacts, 'self-service-judges-mobile-dark.png'), fullPage: true, animations: 'disabled' });
+      await page.screenshot({ path: path.join(artifacts, 'personal-center-mobile-dark.png'), fullPage: true, animations: 'disabled' });
+      await page.locator('#themeBtn').click();
+      assert.equal(await page.locator('body').getAttribute('data-theme'), 'light');
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+      await page.screenshot({ path: path.join(artifacts, 'personal-center-mobile-light.png'), fullPage: true, animations: 'disabled' });
 
       await judgePage.locator('[data-action="back"]').click();
       await judgePage.setViewportSize({ width: 390, height: 844 });
