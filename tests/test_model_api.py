@@ -189,8 +189,12 @@ def test_decrypt_api_key_rejects_a_different_valid_fernet_key_without_leaking_pl
     assert 'sk-sensitive-value' not in str(error.value)
 
 
-@pytest.mark.parametrize('replacement', ['missing', 'different'])
-def test_railway_start_refuses_unreadable_saved_model_credentials(model_lab, monkeypatch, replacement):
+@pytest.mark.parametrize(
+    ('replacement', 'expected_status'),
+    [('missing', 'key_missing'), ('different', 'cannot_decrypt')],
+)
+def test_railway_start_keeps_website_available_when_saved_keys_need_repair(
+        model_lab, monkeypatch, capsys, replacement, expected_status):
     monkeypatch.setenv('DB_PATH', str(model_lab['path']))
     if replacement == 'missing':
         monkeypatch.delenv('MODEL_CREDENTIAL_KEY', raising=False)
@@ -199,11 +203,92 @@ def test_railway_start_refuses_unreadable_saved_model_credentials(model_lab, mon
 
     launched = []
     monkeypatch.setattr(railway_start.os, 'execv', lambda *args: launched.append(args))
-    with pytest.raises(SystemExit) as error:
-        railway_start.main()
+    railway_start.main()
 
-    assert error.value.code == 5
-    assert launched == []
+    assert len(launched) == 1
+    assert 'MODEL CREDENTIAL RECOVERY REQUIRED' in capsys.readouterr().err
+    issues = railway_start.validate_stored_model_credentials(model_lab['path'])
+    assert issues[0]['status'] == expected_status
+    assert issues[0]['profile_id'] == model_lab['profile_id']
+
+
+@pytest.mark.parametrize('key_state', ['valid', 'missing'])
+def test_empty_model_ciphertext_is_detected_without_blocking_website(
+        model_lab, monkeypatch, capsys, key_state):
+    with db_open(model_lab['path']) as db:
+        db.execute(
+            'UPDATE model_profiles SET api_key_encrypted=? WHERE id=?',
+            ('', model_lab['profile_id']),
+        )
+    monkeypatch.setenv('DB_PATH', str(model_lab['path']))
+    if key_state == 'missing':
+        monkeypatch.delenv('MODEL_CREDENTIAL_KEY', raising=False)
+
+    launched = []
+    monkeypatch.setattr(railway_start.os, 'execv', lambda *args: launched.append(args))
+    railway_start.main()
+
+    assert len(launched) == 1
+    assert 'status=empty_ciphertext' in capsys.readouterr().err
+    issues = railway_start.validate_stored_model_credentials(model_lab['path'])
+    assert issues[0]['status'] == 'empty_ciphertext'
+
+
+def test_damaged_ciphertext_is_reported_but_does_not_block_manual_site_access(
+        model_lab, monkeypatch, capsys):
+    with db_open(model_lab['path']) as db:
+        db.execute(
+            'UPDATE model_profiles SET api_key_encrypted=? WHERE id=?',
+            ('not-a-valid-fernet-token', model_lab['profile_id']),
+        )
+    monkeypatch.setenv('DB_PATH', str(model_lab['path']))
+    launched = []
+    monkeypatch.setattr(railway_start.os, 'execv', lambda *args: launched.append(args))
+
+    railway_start.main()
+
+    assert len(launched) == 1
+    assert 'status=cannot_decrypt' in capsys.readouterr().err
+
+
+def test_broken_model_profile_can_be_repaired_without_changing_match_data(model_lab):
+    admin, base, profile_id, path = (
+        model_lab['admin'], model_lab['base'], model_lab['profile_id'], model_lab['path']
+    )
+    with db_open(path) as db:
+        db.execute(
+            "UPDATE model_profiles SET api_key_encrypted='' WHERE id=?",
+            (profile_id,),
+        )
+        before = {
+            'rooms': db.execute('SELECT COUNT(*) FROM rooms').fetchone()[0],
+            'users': db.execute('SELECT COUNT(*) FROM users').fetchone()[0],
+            'members': db.execute('SELECT COUNT(*) FROM members').fetchone()[0],
+        }
+
+    state = admin.get(base).json()
+    assert state['model_profiles'][0]['credential_status'] == 'missing'
+    payload = dict(model_lab['profile_body'])
+    payload['api_key'] = 'sk-recovered-provider-key'
+    me = admin.get('/api/me').json()
+    response = admin.put(
+        base + f'/models/{profile_id}',
+        json=payload,
+        headers={'X-CSRF-Token': me['user']['csrf']},
+    )
+    assert response.status_code == 200, response.text
+
+    with db_open(path) as db:
+        row = db.execute(
+            'SELECT api_key_encrypted FROM model_profiles WHERE id=?', (profile_id,)
+        ).fetchone()
+        after = {
+            'rooms': db.execute('SELECT COUNT(*) FROM rooms').fetchone()[0],
+            'users': db.execute('SELECT COUNT(*) FROM users').fetchone()[0],
+            'members': db.execute('SELECT COUNT(*) FROM members').fetchone()[0],
+        }
+    assert model_api.decrypt_api_key(row['api_key_encrypted']) == 'sk-recovered-provider-key'
+    assert after == before
 
 
 def test_railway_start_allows_manual_mode_without_model_profiles(tmp_path, monkeypatch):

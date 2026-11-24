@@ -694,10 +694,25 @@ def public_room(db, room, user, mine):
     ai_edits = {}
     model_profiles = []
     if manager:
-        model_profiles = [dict(row, has_api_key=bool(row['has_api_key'])) for row in db.execute(
+        for row in db.execute(
             '''SELECT id,name,base_url,model,temperature,max_tokens,timeout_seconds,
-                      CASE WHEN api_key_encrypted<>'' THEN 1 ELSE 0 END AS has_api_key
-               FROM model_profiles WHERE room_id=? ORDER BY id''', (room['id'],))]
+                      api_key_encrypted
+               FROM model_profiles WHERE room_id=? ORDER BY id''', (room['id'],)
+        ):
+            profile = dict(row)
+            encrypted = profile.pop('api_key_encrypted')
+            profile['has_api_key'] = bool(encrypted)
+            if not encrypted:
+                profile['credential_status'] = 'missing'
+            elif not has_valid_credential_key():
+                profile['credential_status'] = 'key_unavailable'
+            else:
+                try:
+                    decrypt_api_key(encrypted)
+                    profile['credential_status'] = 'ok'
+                except ModelAPIError:
+                    profile['credential_status'] = 'needs_repair'
+            model_profiles.append(profile)
     if manager and not room['records_deleted']:
         now_round = current_round(db,room)
         ai_edits = {row['alias']:row['text'] for row in db.execute('''SELECT a.alias,a.text FROM answers a
