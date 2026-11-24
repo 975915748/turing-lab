@@ -448,3 +448,63 @@ def test_migrates_room_profiles_to_original_owner_and_keeps_ai_references(lab):
     # A second initialization is idempotent and does not create another migration backup.
     create_app(path)
     assert len(list(Path(path).parent.glob(path.stem + '.pre-v1_7-*.sqlite3'))) == 1
+
+
+def test_migration_preserves_unowned_legacy_profile_without_reassigning_it(lab):
+    admin, admin2 = lab['admin'], lab['admin2']
+    room = post(admin, '/api/rooms', {'title': '旧房主缺失的模型配置'})
+    base = f"/api/rooms/{room['room_id']}"
+    profile = make_profile(admin, '不可自动归属', 'sk-orphaned')
+    ai = post(admin, base + '/ai', {'name': '保留原绑定', 'model_profile_id': profile['id']})
+    with db_open(lab['path']) as db:
+        db.execute('UPDATE rooms SET owner_id=NULL WHERE id=?',(room['room_id'],))
+    downgrade_profiles_to_room_scope(lab['path'], room['room_id'])
+
+    create_app(lab['path'])
+    with db_open(lab['path']) as db:
+        row=db.execute('SELECT * FROM model_profiles WHERE id=?',(profile['id'],)).fetchone()
+        assert row['owner_user_id'] is None
+        assert row['legacy_room_id'] == room['room_id']
+        assert row['ownership_issue'] == 'legacy_owner_missing'
+        assert row['api_key_encrypted']
+        assert db.execute('SELECT model_profile_id FROM ai_players WHERE room_id=? AND alias=?',
+                          (room['room_id'],ai['alias'])).fetchone()[0] == profile['id']
+        assert db.execute('PRAGMA foreign_key_check').fetchall() == []
+    assert admin.get('/api/me/models').json()['models'] == []
+    summary=admin2.get(base).json()['model_profiles']
+    assert next(x for x in summary if x['id']==profile['id'])['credential_status']=='owner_unavailable'
+    assert post(admin2, base + '/ai', {'name':'不能接管','model_profile_id':profile['id]}, 404) == {}
+
+
+def test_failed_profile_migration_rolls_back_and_can_be_retried_after_source_repair(lab):
+    admin, base = lab['admin'], lab['base']
+    profile = make_profile(admin, '迁移失败恢复', 'sk-migration-retry')
+    ai = post(admin, base + '/ai', {'name': '迁移引用', 'model_profile_id': profile['id']})
+    downgrade_profiles_to_room_scope(lab['path'], lab['room_id'], invalid_ai_ref=True)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        create_app(lab['path'])
+    with db_open(lab['path']) as db:
+        columns={row['name'] for row in db.execute('PRAGMA table_info(model_profiles)')}
+        assert 'room_id' in columns and 'owner_user_id' not in columns
+        row=db.execute('SELECT api_key_encrypted FROM model_profiles WHERE id=?',(profile['id'],)).fetchone()
+        assert row['api_key_encrypted']
+        assert db.execute('SELECT model_profile_id FROM ai_players WHERE room_id=? AND alias=?',
+                          (lab['room_id'],ai['alias'])).fetchone()[0] == 999999
+        assert db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='model_profiles_user_upgrade'").fetchone()[0] == 0
+    assert list(Path(lab['path']).parent.glob(Path(lab['path']).stem + '.pre-v1_7-*.sqlite3'))
+
+    with db_open(lab['path']) as db:
+        db.execute('UPDATE ai_players SET model_profile_id=? WHERE room_id=? AND alias=?',
+                   (profile['id'],lab['room_id'],ai['alias']))
+    create_app(lab['path'])
+    with db_open(lab['path']) as db:
+        migrated=db.execute('SELECT owner_user_id,api_key_encrypted FROM model_profiles WHERE id=?',
+                            (profile['id'],)).fetchone()
+        assert migrated['owner_user_id'] == 1
+        assert migrated['api_key_encrypted']
+        assert db.execute('SELECT model_profile_id FROM ai_players WHERE room_id=? AND alias=?',
+                          (lab['room_id'],ai['alias'])).fetchone()[0] == profile['id']
+        assert db.execute('PRAGMA foreign_key_check').fetchall() == []
+
+
