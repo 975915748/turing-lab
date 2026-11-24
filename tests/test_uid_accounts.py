@@ -251,9 +251,17 @@ def test_same_named_judges_assign_by_uid_and_remain_anonymous(accounts):
     for text in (json.dumps(one.get(base).json()), one.get(base + '/rounds/1/log').text):
         for uid in (first['uid'], second['uid'], judge['uid']):
             assert uid not in text
-    # Player question/clarification remains real-time and visible to other players.
-    with one.websocket_connect(f'/ws/rooms/{room["room_id"]}') as ws:
-        assert ws.receive_json()['type'] == 'connected'
-        post(two, base + '/suggestions', {'text': '仍然支持玩家追问'})
-        assert ws.receive_json()['reason'] == 'suggestion'
-    assert two.get(base).json()['suggestions'][0]['text'] == '仍然支持玩家追问'
+    # Public chat is visible to room members but remains inaccessible to the human judge.
+    chat=post(two,base+'/chat',{'match_number':1,'text':'玩家公共聊天消息'})
+    assert chat['message']['sender_uid']==second['uid']
+    assert one.get(base+'/chat?match_number=1').status_code==403
+    one_me=one.get('/api/me').json()
+    assert one.post(base+'/chat',json={'match_number':1,'text':'裁判越权消息'},
+        headers={'X-CSRF-Token':one_me['user']['csrf']}).status_code==403
+    visible=two.get(base+'/chat?match_number=1').json()['messages']
+    assert len(visible)==1 and visible[0]['text']=='玩家公共聊天消息'
+    judge_state=one.get(base).json()
+    assert 'chat' not in judge_state and 'chat_messages' not in judge_state
+    assert '玩家公共聊天消息' not in json.dumps(judge_state,ensure_ascii=False)
+    # The retired suggestions write path is explicitly disabled.
+    post(two,base+'/suggestions',{'text':'旧版追问入口'},410)
