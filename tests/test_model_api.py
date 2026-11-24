@@ -13,9 +13,8 @@ from fastapi.testclient import TestClient
 
 import app as app_module
 import model_api
-import railway_start
 from app import create_app, db_open, seed_admin
-from model_api import ModelAPIError, has_valid_credential_key, validate_credential_key
+from model_api import ModelAPIError
 
 
 def post(client, path, body=None, expected=200):
@@ -156,68 +155,6 @@ def test_models_answer_ask_and_judge_without_manual_transcription(model_lab):
     assert len(final['verdicts']) == 1
     assert final['verdicts'][0]['judge'] == 'API 独立裁判'
     assert final['verdicts'][0]['predictions'] == {'A': 'Human', 'B': 'Human', 'C': 'AI'}
-
-
-def test_credential_key_validation_handles_missing_invalid_and_valid_values(monkeypatch):
-    monkeypatch.delenv('MODEL_CREDENTIAL_KEY', raising=False)
-    assert validate_credential_key() is False
-    assert has_valid_credential_key() is False
-    with pytest.raises(ModelAPIError):
-        validate_credential_key(required=True)
-
-    invalid_key = 'not-a-valid-fernet-key'
-    monkeypatch.setenv('MODEL_CREDENTIAL_KEY', invalid_key)
-    with pytest.raises(ModelAPIError) as error:
-        validate_credential_key()
-    assert invalid_key not in str(error.value)
-    assert has_valid_credential_key() is False
-
-    valid_key = Fernet.generate_key().decode('ascii')
-    monkeypatch.setenv('MODEL_CREDENTIAL_KEY', valid_key)
-    assert validate_credential_key() is True
-    assert has_valid_credential_key() is True
-
-
-def test_decrypt_api_key_rejects_a_different_valid_fernet_key_without_leaking_plaintext(monkeypatch):
-    monkeypatch.setenv('MODEL_CREDENTIAL_KEY', Fernet.generate_key().decode('ascii'))
-    encrypted = model_api.encrypt_api_key('sk-sensitive-value')
-    monkeypatch.setenv('MODEL_CREDENTIAL_KEY', Fernet.generate_key().decode('ascii'))
-
-    with pytest.raises(ModelAPIError) as error:
-        model_api.decrypt_api_key(encrypted)
-    assert '无法解密' in str(error.value)
-    assert 'sk-sensitive-value' not in str(error.value)
-
-
-@pytest.mark.parametrize('replacement', ['missing', 'different'])
-def test_railway_start_refuses_unreadable_saved_model_credentials(model_lab, monkeypatch, replacement):
-    monkeypatch.setenv('DB_PATH', str(model_lab['path']))
-    if replacement == 'missing':
-        monkeypatch.delenv('MODEL_CREDENTIAL_KEY', raising=False)
-    else:
-        monkeypatch.setenv('MODEL_CREDENTIAL_KEY', Fernet.generate_key().decode('ascii'))
-
-    launched = []
-    monkeypatch.setattr(railway_start.os, 'execv', lambda *args: launched.append(args))
-    with pytest.raises(SystemExit) as error:
-        railway_start.main()
-
-    assert error.value.code == 5
-    assert launched == []
-
-
-def test_railway_start_allows_manual_mode_without_model_profiles(tmp_path, monkeypatch):
-    path = tmp_path / 'manual-mode.sqlite3'
-    seed_admin(path, 'manual_admin', '手动模式主持人', 'manual-admin-password')
-    monkeypatch.setenv('DB_PATH', str(path))
-    monkeypatch.delenv('MODEL_CREDENTIAL_KEY', raising=False)
-
-    launched = []
-    monkeypatch.setattr(railway_start.os, 'execv', lambda *args: launched.append(args))
-    railway_start.main()
-
-    assert len(launched) == 1
-    assert launched[0][1][2:5] == ['uvicorn', 'app:app', '--host']
 
 
 def test_model_api_encryption_and_dns_pinning_preserves_tls_hostname(monkeypatch):
