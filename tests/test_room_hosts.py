@@ -200,7 +200,8 @@ def test_deleted_participants_and_pending_judges_do_not_block_active_match(env):
     post(host, base + '/next', status=409)
     post(host, base + '/verdict', {'predictions': {'B': 'AI'}, 'evidence': '退赛后判断', 'confidence': 50})
     post(host, base + '/reveal')
-    assert '保留历史追问' in host.get(base + '/log').text
+    assert '保留历史追问' not in host.get(base + '/log').text
+    assert host.get(base + '/chat?match_number=1').json()['messages'] == []
     post(host, base + '/restart', {'match_number': 1, 'confirm': True})
     info = host.get(base).json()
     assert not info['humans'] and not info['judges']
