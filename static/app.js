@@ -199,8 +199,17 @@ function renderPersonalCenter(){
 }
 
 function modelProfileOptions(r){
- const profiles=r.model_profiles||[];
+ const profiles=(state.personalModels||[]).filter(p=>p.credential_status==='ok');
  return `<option value="">手动转录（不调用 API）</option>${profiles.map(p=>`<option value="${p.id}">${esc(p.name)} · ${esc(p.model)}</option>`).join('')}`;
+}
+function modelBindingOptions(){
+ const profiles=(state.personalModels||[]).filter(p=>p.credential_status==='ok');
+ return `<option value="__unchanged__" selected>保持当前绑定</option><option value="">手动转录（不调用 API）</option>${profiles.map(p=>`<option value="${p.id}">${esc(p.name)} · ${esc(p.model)}</option>`).join('')}`;
+}
+function bindingLabel(item){
+ if(!item.model_profile_id)return '手动转录';
+ const p=item.model_profile;if(!p)return '配置不可用';
+ return `${p.name} · ${p.model}（${p.owned_by_me?'我的配置':'其他账号的已授权配置'} · ${credentialStatusLabel(p)}）`;
 }
 function judgeAdminPanel(r){
  const judges=r.judges||[];
