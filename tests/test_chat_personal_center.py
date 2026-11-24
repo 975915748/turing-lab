@@ -537,3 +537,40 @@ def test_failed_profile_migration_rolls_back_and_can_be_retried_after_source_rep
         assert db.execute('PRAGMA foreign_key_check').fetchall() == []
 
 
+def test_chat_send_and_formal_reveal_are_serialized_without_post_finish_residue(lab):
+    admin, p1, p2 = lab['admin'], lab['p1'], lab['p2']
+    room=post(admin,'/api/rooms',{'title':'发送与完赛并发'})
+    base=f"/api/rooms/{room['room_id']}"
+    post(p1,'/api/join',{'code':room['code']})
+    post(p2,'/api/join',{'code':room['code']})
+    post(admin,base+'/question',{'text':'并发验收问题'})
+    post(p1,base+'/answers',{'text':'回答 A'})
+    post(p2,base+'/answers',{'text':'回答 B'})
+    post(admin,base+'/packets',{})
+    post(admin,base+'/verdict',{'predictions':{'A':'Human','B':'Human'},'confidence':70,'evidence':'并发验收'})
+    barrier=__import__('threading').Barrier(2)
+
+    def send_chat():
+        me=p1.get('/api/me').json()
+        barrier.wait()
+        response=p1.post(base+'/chat',json={'match_number':1,'text':'与揭晓同时发送'},
+                         headers={'X-CSRF-Token':me['user']['csrf']})
+        return response.status_code
+
+    def reveal():
+        me=admin.get('/api/me').json()
+        barrier.wait()
+        response=admin.post(base+'/reveal',json={},
+                            headers={'X-CSRF-Token':me['user']['csrf']})
+        return response.status_code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        chat_status,reveal_status=list(pool.map(lambda fn:fn(),(send_chat,reveal)))
+    assert chat_status in (200,409)
+    assert reveal_status == 200
+    assert p1.get(base).json()['status']=='finished'
+    assert p1.get(base+'/chat?match_number=1').json()['messages']==[]
+    with db_open(lab['path']) as db:
+        assert db.execute('SELECT COUNT(*) FROM chat_messages WHERE room_id=?',(room['room_id'],)).fetchone()[0]==0
+
+
