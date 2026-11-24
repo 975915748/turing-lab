@@ -15,10 +15,10 @@ async function uidIs(page, uid) {
 async function clickSubmit(page, form) {
   await page.locator(`form[data-form="${form}"] button[type="submit"]`).click();
 }
-async function register(page) {
+async function register(page, username = '重复名字') {
   await page.getByRole('button', { name: '注册账号', exact: true }).click();
   assert.equal(await page.locator('form[data-form="register"] input[name="code"]').count(), 0);
-  await page.locator('[name="username"]').fill('重复名字');
+  await page.locator('[name="username"]').fill(username);
   await page.locator('[name="password"]').fill('browser-password');
   await clickSubmit(page, 'register');
 }
@@ -64,40 +64,109 @@ async function logout(page) {
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
       await page.screenshot({ path: path.join(artifacts, 'uid-register-mobile-dark.png'), fullPage: true, animations: 'disabled' });
     } else if (scenario === 'judges') {
+      // Host creates a room and retains the AI judge management workflow.
       await page.getByRole('button', { name: '使用旧登录名', exact: true }).click();
       await page.locator('[name="username"]').fill('browser_admin');
       await page.locator('[name="password"]').fill('browser-password');
       await clickSubmit(page, 'login');
       await uidIs(page, 'TL00000001');
-      await page.locator('form[data-form="room"] [name="title"]').fill('UID 浏览器验收');
+      await page.locator('form[data-form="room"] [name="title"]').fill('真人裁判自助入房验收');
       await clickSubmit(page, 'room');
+      const info = await (await context.request.get(site + '/api/me')).json();
+      const rid = info.rooms[0].id;
+      const base = `/api/rooms/${rid}`;
+      const room = await (await context.request.get(site + base)).json();
+      assert(room.invite_code);
+
       await page.locator('[data-action="room-view"][data-view="judges"]').click();
-      const form = page.locator('form[data-form="add-judge"]');
-      await form.locator('[name="username"]').fill('同名裁判');
-      await form.locator('[name="display_name"]').fill('裁判一');
-      await form.locator('[name="password"]').fill('judge-password');
-      await clickSubmit(page, 'add-judge');
-      const copy = page.locator('[data-action="copy-uid"][data-uid="TL00000002"]');
-      await visible(copy);
-      await copy.click();
-      assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'TL00000002');
-      // API requests share cookies; restore admin login before reloading.
-      const other = await context.request.post(site + '/api/register', {
-        data: { username: '同名裁判', password: 'other-password' } });
-      assert.equal(other.status(), 200);
-      const uid = (await other.json()).uid;
-      assert.equal((await context.request.post(site + '/api/login', {
-        data: { uid: 'TL00000001', password: 'browser-password' } })).status(), 200);
+      await page.locator('form[data-form="add-ai-judge"]').waitFor();
+      await page.locator('[data-action="room-view"][data-view="judges"]').waitFor();
+      await page.locator('form[data-form="add-judge"]').count().then(n => assert.equal(n, 0));
+      await page.locator('form[data-form="assign-judge"]').count().then(n => assert.equal(n, 0));
+      await page.locator('form[data-form="add-ai-judge"] [name="name"]').fill('保留的手动 AI 裁判');
+      await clickSubmit(page, 'add-ai-judge');
+      await page.locator('.feed-item').filter({ hasText: '保留的手动 AI 裁判' }).waitFor();
+
+      // A normal user self-registers, logs in by UID, and chooses the judge role in the lobby.
+      const judgeContext = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+      const judgePage = await judgeContext.newPage();
+      judgePage.setDefaultTimeout(10000);
+      judgePage.on('pageerror', error => errors.push(String(error)));
+      await judgePage.goto(site);
+      await register(judgePage, '自助真人裁判');
+      await uidIs(judgePage, 'TL00000002');
+      await logout(judgePage);
+      await judgePage.locator('[name="uid"]').fill('TL00000002');
+      await judgePage.locator('[name="password"]').fill('browser-password');
+      await clickSubmit(judgePage, 'login');
+      await uidIs(judgePage, 'TL00000002');
+
+      const join = judgePage.locator('form[data-form="join"]');
+      assert.equal(await join.locator('select[name="role"] option[value="judge"]').count(), 1);
+      await join.locator('[name="code"]').fill(room.invite_code);
+      await join.locator('[name="role"]').selectOption('judge');
+      await clickSubmit(judgePage, 'join');
+      await judgePage.locator('.pagehead .pill').filter({ hasText: '独立裁判' }).waitFor();
+      const blind = await (await judgeContext.request.get(site + base)).json();
+      assert.equal(blind.is_judge, true);
+      assert.equal(Object.hasOwn(blind, 'humans'), false);
+      assert.equal(Object.hasOwn(blind, 'invite_code'), false);
+      assert.equal(Object.hasOwn(blind, 'judges'), false);
+
+      // Host sees the roster update; the self-service account is not exposed to judges.
       await page.reload();
       await page.locator('[data-action="room-view"][data-view="judges"]').click();
-      const assign = page.locator('form[data-form="assign-judge"]');
-      assert((await assign.locator('[name="uid"]').boundingBox()).width >
-        (await assign.boundingBox()).width * 0.8, 'UID 输入框应随表单宽度展开');
-      await assign.locator('[name="uid"]').fill(uid);
-      await assign.locator('[name="label"]').fill('裁判二');
-      await clickSubmit(page, 'assign-judge');
-      await visible(page.locator('[data-action="copy-uid"][data-uid="TL00000003"]'));
-      await page.screenshot({ path: path.join(artifacts, 'uid-judges-desktop.png'), fullPage: true, animations: 'disabled' });
+      await page.getByText('真人裁判 · TL00000002', { exact: true }).waitFor();
+      assert.equal(await page.locator('form[data-form="add-judge"]').count(), 0);
+      assert.equal(await page.locator('form[data-form="assign-judge"]').count(), 0);
+      assert.equal(await page.locator('form[data-form="add-ai-judge"]').count(), 1);
+
+      // A repeated join from the same UID is idempotent.
+      const judgeMe = await (await judgeContext.request.get(site + '/api/me')).json();
+      const repeated = await judgeContext.request.post(site + '/api/join', {
+        data: { code: room.invite_code, role: 'judge' },
+        headers: { 'X-CSRF-Token': judgeMe.user.csrf },
+      });
+      assert.equal(repeated.status(), 200, await repeated.text());
+      const hostRoom = await (await context.request.get(site + base)).json();
+      assert.equal(hostRoom.judges.filter(j => j.kind === 'human').length, 1);
+
+      // Model configuration copy and labels are simplified without changing parameter values.
+      await page.locator('[data-action="room-view"][data-view="models"]').click();
+      await page.getByText('采样温度', { exact: true }).waitFor();
+      const modelText = await page.locator('#app').innerText();
+      assert.equal(modelText.includes('Temperature'), false);
+      assert.equal(modelText.includes('Base URL 填到'), false);
+      assert.equal(modelText.includes('MODEL_CREDENTIAL_KEY'), false);
+      assert.equal(modelText.includes('Fernet.generate_key'), false);
+      assert.equal(modelText.includes('Railway'), false);
+      const modelState = await (await context.request.get(site + base)).json();
+      if (!modelState.model_api_enabled) {
+        await page.getByText('模型 API 暂不可用，请联系管理员。', { exact: true }).waitFor();
+        assert.equal(await page.locator('form[data-form="model-profile"] button[type="submit"]').isDisabled(), true);
+      }
+
+      // Check both themes and the 390px layout in a real browser.
+      await page.screenshot({ path: path.join(artifacts, 'self-service-judges-desktop-light.png'), fullPage: true, animations: 'disabled' });
+      assert.equal(await page.locator('body').getAttribute('data-theme'), 'light');
+      await page.setViewportSize({ width: 390, height: 844 });
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+      await page.screenshot({ path: path.join(artifacts, 'self-service-judges-mobile-light.png'), fullPage: true, animations: 'disabled' });
+      await page.locator('#themeBtn').click();
+      assert.equal(await page.locator('body').getAttribute('data-theme'), 'dark');
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+      await page.screenshot({ path: path.join(artifacts, 'self-service-judges-mobile-dark.png'), fullPage: true, animations: 'disabled' });
+
+      await judgePage.locator('[data-action="back"]').click();
+      await judgePage.setViewportSize({ width: 390, height: 844 });
+      const mobileJoin = judgePage.locator('form[data-form="join"]');
+      const joinBox = await mobileJoin.boundingBox();
+      const roleBox = await mobileJoin.locator('select[name="role"]').boundingBox();
+      assert(roleBox.width > joinBox.width * 0.8, '移动端身份选择框应随表单宽度展开');
+      assert(await judgePage.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+      await judgePage.screenshot({ path: path.join(artifacts, 'self-service-judge-lobby-mobile.png'), fullPage: true, animations: 'disabled' });
+
+      await judgeContext.close();
     } else {
       throw new Error('Unknown scenario: ' + scenario);
     }
