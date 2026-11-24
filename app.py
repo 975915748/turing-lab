@@ -1379,13 +1379,22 @@ def create_app(db_path=None):
         return result
 
     @app.put('/api/me/profile')
-    def update_my_profile(body:ProfileNameData,request:Request):
+    async def update_my_profile(body:ProfileNameData,request:Request):
         with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             name=norm_text(body.display_name,40)
             db.execute('UPDATE users SET display_name=? WHERE id=? AND deleted_at IS NULL',(name,u['id']))
             row=db.execute('SELECT id,username,display_name,is_admin FROM users WHERE id=?',(u['id'],)).fetchone()
-            return {'ok':True,'user':dict(row,uid=user_uid(row['id']),csrf=u['csrf'])}
+            if u['is_admin']:
+                room_ids=[r['id'] for r in db.execute('SELECT id FROM rooms')]
+            else:
+                room_ids=[r['room_id'] for r in db.execute('''SELECT room_id FROM members WHERE user_id=? AND removed_at IS NULL
+                    UNION SELECT room_id FROM room_judges WHERE user_id=?
+                    UNION SELECT id AS room_id FROM rooms WHERE owner_id=?''',(u['id'],u['id'],u['id']))]
+            result={'ok':True,'user':dict(row,uid=user_uid(row['id']),csrf=u['csrf'])}
+        for room_id in room_ids:
+            await app.state.hub.notify(room_id,'profile_updated')
+        return result
 
     @app.post('/api/me/password')
     async def change_my_password(body:ChangePasswordData,request:Request,response:Response):
