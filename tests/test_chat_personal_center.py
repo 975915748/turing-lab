@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -86,6 +87,32 @@ def lab(tmp_path, monkeypatch):
         'room_id': room['room_id'], 'base': base, 'code': room['code'],
         'uid1': a['uid'], 'uid2': b['uid'], 'judge_uid': j['uid'],
     }
+
+
+def downgrade_profiles_to_room_scope(path, room_id, invalid_ai_ref=False):
+    with db_open(path) as db:
+        db.commit()
+        db.execute('PRAGMA foreign_keys=OFF')
+        db.execute('PRAGMA legacy_alter_table=ON')
+        db.execute('BEGIN IMMEDIATE')
+        db.execute('ALTER TABLE model_profiles RENAME TO model_profiles_personal_before_test')
+        db.execute('''CREATE TABLE model_profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,base_url TEXT NOT NULL,model TEXT NOT NULL,
+            api_key_encrypted TEXT NOT NULL,temperature REAL NOT NULL DEFAULT 0.7,
+            max_tokens INTEGER NOT NULL DEFAULT 2048,timeout_seconds INTEGER NOT NULL DEFAULT 60,
+            created_at TEXT NOT NULL,updated_at TEXT NOT NULL)''')
+        db.execute('''INSERT INTO model_profiles(id,room_id,name,base_url,model,api_key_encrypted,
+            temperature,max_tokens,timeout_seconds,created_at,updated_at)
+            SELECT id,?,name,base_url,model,api_key_encrypted,temperature,max_tokens,timeout_seconds,
+                created_at,updated_at FROM model_profiles_personal_before_test''',(room_id,))
+        db.execute('DROP TABLE model_profiles_personal_before_test')
+        if invalid_ai_ref:
+            db.execute('UPDATE ai_players SET model_profile_id=999999 WHERE room_id=?',(room_id,))
+        db.commit()
+        db.execute('PRAGMA legacy_alter_table=OFF')
+        db.execute('PRAGMA foreign_keys=ON')
 
 
 class FakeSocket:
@@ -401,27 +428,7 @@ def test_migrates_room_profiles_to_original_owner_and_keeps_ai_references(lab):
     with db_open(path) as db:
         db.execute('INSERT INTO answers(round_id,alias,text,submitted_at) VALUES(?,?,?,?)',
                    (1, ai['alias'], '旧比赛回答', '2026-11-24T00:00:00+00:00'))
-        db.commit()
-        # Rebuild the profile table to the actual room-scoped pre-upgrade schema.
-        db.execute('PRAGMA foreign_keys=OFF')
-        db.execute('PRAGMA legacy_alter_table=ON')
-        db.execute('BEGIN IMMEDIATE')
-        db.execute('ALTER TABLE model_profiles RENAME TO model_profiles_personal_before_test')
-        db.execute('''CREATE TABLE model_profiles (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-            name TEXT NOT NULL,base_url TEXT NOT NULL,model TEXT NOT NULL,
-            api_key_encrypted TEXT NOT NULL,temperature REAL NOT NULL DEFAULT 0.7,
-            max_tokens INTEGER NOT NULL DEFAULT 2048,timeout_seconds INTEGER NOT NULL DEFAULT 60,
-            created_at TEXT NOT NULL,updated_at TEXT NOT NULL)''')
-        db.execute('''INSERT INTO model_profiles(id,room_id,name,base_url,model,api_key_encrypted,
-            temperature,max_tokens,timeout_seconds,created_at,updated_at)
-            SELECT id,?,name,base_url,model,api_key_encrypted,temperature,max_tokens,timeout_seconds,
-                created_at,updated_at FROM model_profiles_personal_before_test''',(lab['room_id'],))
-        db.execute('DROP TABLE model_profiles_personal_before_test')
-        db.commit()
-        db.execute('PRAGMA legacy_alter_table=OFF')
-        db.execute('PRAGMA foreign_keys=ON')
+    downgrade_profiles_to_room_scope(path, lab['room_id'])
 
     # Re-running application initialization performs the versioned SQLite Backup API migration.
     migrated_app = create_app(path)
