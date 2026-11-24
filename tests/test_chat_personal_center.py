@@ -234,7 +234,7 @@ def test_chat_is_cleared_on_successful_reveal_but_not_failed_reveal(lab):
                           (lab['room_id'], '%本场聊天不得进入比赛记录%')).fetchone()[0] == 0
         # Simulate an old residual row to verify the restart / delete-records cleanup paths too.
         db.execute('''INSERT INTO chat_messages(room_id,match_number,sender_user_id,sender_uid,sender_name,text,created_at)
-            VALUES(?,?,?,?,?,?,?)''',(lab['room_id'],1,2,lab['uid1'],'同名玩家','模拟残留', '2026-11-24T00:00:00+00:00'))
+            VALUES(?,?,?,?,?,?,?)''',(lab['room_id'],1,lab['p1_id'],lab['uid1'],'同名玩家','模拟残留', '2026-11-24T00:00:00+00:00'))
 
     post(admin, base + '/restart', {'match_number': 1})
     new_room = admin.get(base).json()
@@ -253,7 +253,7 @@ def test_chat_is_cleared_on_successful_reveal_but_not_failed_reveal(lab):
     post(admin, base + '/reveal', {})
     with db_open(lab['path']) as db:
         db.execute('''INSERT INTO chat_messages(room_id,match_number,sender_user_id,sender_uid,sender_name,text,created_at)
-            VALUES(?,?,?,?,?,?,?)''',(lab['room_id'],2,2,lab['uid1'],'同名玩家','模拟残留2', '2026-11-24T00:00:00+00:00'))
+            VALUES(?,?,?,?,?,?,?)''',(lab['room_id'],2,lab['p1_id'],lab['uid1'],'同名玩家','模拟残留2', '2026-11-24T00:00:00+00:00'))
     delete(admin, base + '/records', {'match_number': 2})
     assert admin.get(base).json()['records_deleted'] is True
     with db_open(lab['path']) as db:
