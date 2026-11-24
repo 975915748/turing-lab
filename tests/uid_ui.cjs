@@ -147,7 +147,7 @@ async function logout(page) {
       const modelState = await (await context.request.get(site + '/api/me/models')).json();
       if (!modelState.model_api_enabled) {
         await page.getByText('模型 API 暂不可用，请联系管理员。', { exact: true }).waitFor();
-        assert.equal(await page.locator('form[data-form="personal-model-create"] button[type="submit"]').isDisabled(), true);
+        assert.equal(await page.locator('form[data-form="personal-model-create"]').count(), 0);
       }
 
       // Check both themes and the 390px layout in a real browser.
