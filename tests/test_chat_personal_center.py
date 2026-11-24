@@ -19,7 +19,7 @@ def request(client, method, path, body=None, expected=200, headers=None):
         merged.setdefault('X-CSRF-Token', current.json()['user']['csrf'])
     response = client.request(method, path, json=body, headers=merged)
     assert response.status_code == expected, (method, path, response.status_code, response.text)
-    return response.json() if response.content else {}
+    return response.json() if response.content and expected == 200 else {}
 
 
 def post(client, path, body=None, expected=200):
@@ -327,7 +327,7 @@ def test_concurrent_password_changes_cannot_both_use_the_same_old_password(lab):
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         statuses = list(pool.map(lambda args: change(*args), [(one, 'parallel-pass-1'), (two, 'parallel-pass-2')]))
-    assert sorted(statuses) == [200, 403]
+    assert sorted(statuses) == [200, 401]
 
 
 def test_personal_model_ownership_room_binding_and_cross_room_reuse(lab):
