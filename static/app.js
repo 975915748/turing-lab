@@ -21,14 +21,14 @@ async function api(path,{method='GET',body,raw=false}={}){
  const response=await fetch(path,opts);
  if(raw){if(!response.ok)throw new Error('下载失败');return response.blob()}
  const data=await response.json().catch(()=>({detail:'网络连接错误'}));
- if(!response.ok){if(response.status===401&&state.me){state.me=null;state.room=null;state.roomId=null;stopWs();renderAuth();}throw new Error(typeof data.detail==='string'?data.detail:'请求失败');}
+ if(!response.ok){if(response.status===401&&state.me){state.me=null;state.room=null;state.roomId=null;state.personalModels=[];state.chat=[];state.chatDraft='';state.drafts={};stopWs();renderAuth();}throw new Error(typeof data.detail==='string'?data.detail:'请求失败');}
  return data;
 }
 function stopWs(){state.lastTyping=null;if(state.reconnect)clearTimeout(state.reconnect);state.reconnect=null; if(state.ws){const ws=state.ws;state.ws=null;ws.onclose=null;ws.close();}setConnection('未连接',false)}
 function connectWs(roomId){stopWs();if(state.roomId!==roomId)return;
  const proto=location.protocol==='https:'?'wss:':'ws:';
  const ws=new WebSocket(`${proto}//${location.host}/ws/rooms/${roomId}`);state.ws=ws;
- ws.onopen=()=>{setConnection('实时同步中',true);sendTypingFromDraft()};
+ ws.onopen=()=>{setConnection('实时同步中',true);sendTypingFromDraft();if(!state.room?.is_judge)loadRoomChat().catch(()=>{})};
  ws.onmessage=async e=>{let m;try{m=JSON.parse(e.data)}catch{return}
  if(m.type==='room_updated' && state.roomId===roomId){await refreshRoom();}
  if(m.type==='chat_message'&&state.roomId===roomId&&!state.room?.is_judge&&m.match_number===state.room?.match_number&&state.room?.status==='open'){addChatMessage(m.message)}
@@ -352,6 +352,7 @@ app.addEventListener('toggle',e=>{
  if(e.target.matches('details[data-packet-panel]'))state.packetPanels[e.target.dataset.key]=e.target.open;
 },true);
 app.addEventListener('input',e=>{
+ if(e.target.dataset?.chatDraft!==undefined){state.chatDraft=e.target.value;return;}
  if(e.target.dataset?.draft&&state.roomId){
   state.drafts[`${state.roomId}:${state.room?.match_number}:${state.selectedRound}:${e.target.dataset.draft}`]=e.target.value;
   if(e.target.dataset.draft==='answer')sendTyping(e.target.value.trim().length>0);
@@ -367,7 +368,9 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
  try{
   if(action==='tab-login'||action==='tab-register'){state.tab=action==='tab-login'?'login':'register';renderAuth()}
   if(action==='toggle-legacy-login'){state.legacyLogin=!state.legacyLogin;renderAuth()}
-  if(action==='copy-uid'){await navigator.clipboard.writeText(b.dataset.uid);toast('UID 已复制')}
+  if(action==='copy-uid'){if(!b.dataset.uid)throw new Error('UID 不可用');await navigator.clipboard.writeText(b.dataset.uid);toast('UID 已复制')}
+  if(action==='personal-center')await openPersonalCenter();
+  if(action==='personal-back')await returnFromPersonalCenter();
   if(action==='back'){history.replaceState(null,'',location.pathname);await loadLobby()}
   if(action==='manage-users')await loadAccounts();
   if(action==='toggle-password-reset'){const form=b.closest('[data-account-uid]').querySelector('form');form.classList.toggle('hide');if(!form.classList.contains('hide'))form.querySelector('input').focus();}
@@ -409,7 +412,8 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
   if(action==='generate-ai-questions'){b.disabled=true;b.textContent='模型正在出题…';const result=await api(`/api/rooms/${state.roomId}/ai-judges/questions/generate`,{method:'POST'});await refreshRoom();const detail=result.failed?.length?'；失败：'+result.failed.map(x=>x.error).join('；'):'';toast(`AI 裁判已生成 ${result.generated||0} 个问题${detail}`)}
   if(action==='generate-ai-answers'){b.disabled=true;b.textContent='模型正在回答…';const result=await api(`/api/rooms/${state.roomId}/ai/answers/generate`,{method:'POST'});await refreshRoom();const detail=result.failed?.length?'；失败：'+result.failed.map(x=>x.alias+' '+x.error).join('；'):'';toast(`模型 AI 已提交 ${result.generated||0} 个回答${detail}`)}
   if(action==='generate-ai-verdicts'){b.disabled=true;b.textContent='模型正在判断…';const result=await api(`/api/rooms/${state.roomId}/ai-judges/verdicts/generate`,{method:'POST'});await refreshRoom();const detail=result.failed?.length?'；失败：'+result.failed.map(x=>x.error).join('；'):'';toast(`AI 裁判已锁定 ${result.generated||0} 份最终判断${detail}`)}
-  if(action==='test-model'){b.disabled=true;b.textContent='测试中…';const result=await api(`/api/rooms/${state.roomId}/models/${Number(b.dataset.id)}/test`,{method:'POST'});toast(`连接成功 · ${result.model} · ${result.latency_ms} ms · ${result.preview}`);b.disabled=false;b.textContent='测试连接'}
+  if(action==='test-personal-model'){b.disabled=true;b.textContent='测试中…';const result=await api(`/api/me/models/${Number(b.dataset.id)}/test`,{method:'POST'});toast(`连接成功 · ${result.model} · ${result.latency_ms} ms · ${result.preview}`);b.disabled=false;b.textContent='测试连接'}
+  if(action==='delete-personal-model'){const id=Number(b.dataset.id);if(confirm('删除此个人模型配置？所有房间中引用它的 AI 席位会解除模型绑定并转为手动转录；席位、匿名代号和比赛历史都会保留。')){await api(`/api/me/models/${id}`,{method:'DELETE'});await loadPersonalModels();renderPersonalCenter();toast('个人模型配置已删除，关联席位已解除绑定')}}
   if(action==='delete-model'){const id=Number(b.dataset.id);if(confirm('删除此模型配置？关联的 AI 参赛者和 AI 裁判将改为手动转录，比赛记录不会删除。')){await api(`/api/rooms/${state.roomId}/models/${id}`,{method:'DELETE'});await refreshRoom();toast('模型配置已删除')}}
   if(action==='download-log')await downloadLog();
   if(action==='download-full-log')await downloadFullLog();
@@ -435,6 +439,22 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
   if(type==='register'){const result=await api('/api/register',{method:'POST',body:data});history.replaceState(null,'',location.pathname);await loadLobby();toast(`注册成功，你的 UID 是 ${result.uid}`);return}
   if(type==='join'){const result=await api('/api/join',{method:'POST',body:{code:data.code,role:data.role||'player'}});await openRoom(result.room_id);toast(result.role==='judge'?'已作为真人裁判加入':'已加入比赛');return}
   if(type==='room'){const result=await api('/api/rooms',{method:'POST',body:data});await openRoom(result.room_id);toast('房间创建成功，可以分享邀请码');return}
+  if(type==='profile-name'){
+   const result=await api('/api/me/profile',{method:'PUT',body:{display_name:data.display_name}});
+   state.me.user=result.user;renderPersonalCenter();toast('名字已更新');return;
+  }
+  if(type==='change-password'){
+   if(data.new_password!==data.confirm_password)throw new Error('两次输入的新密码不一致。');
+   if(!confirm('修改密码后，当前账号的所有登录会话都会失效。确定继续？'))return;
+   const result=await api('/api/me/password',{method:'POST',body:data});
+   if(result.signed_out){state.me=null;state.room=null;state.roomId=null;state.personalModels=[];state.chat=[];state.chatDraft='';state.drafts={};state.personalReturn=null;stopWs();history.replaceState(null,'',location.pathname);renderAuth();toast('密码已修改，请重新登录。');return;}
+  }
+  if(type==='personal-model-create'||type==='personal-model-edit'){
+   const payload={name:data.name,base_url:data.base_url,model:data.model,api_key:data.api_key||'',temperature:Number(data.temperature),max_tokens:Number(data.max_tokens),timeout_seconds:Number(data.timeout_seconds)};
+   if(type==='personal-model-create')await api('/api/me/models',{method:'POST',body:payload});
+   else await api(`/api/me/models/${Number(form.dataset.id)}`,{method:'PUT',body:payload});
+   await loadPersonalModels();renderPersonalCenter();toast(type==='personal-model-create'?'个人模型配置已保存':'个人模型配置已更新');return;
+  }
   if(type==='reset-password'){
    const uid=form.dataset.uid;
    if(confirm(`确定修改 ${uid} 的密码并使其所有登录会话失效？`)){
@@ -444,11 +464,16 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
    return;
   }
   const id=state.roomId;
-  if(type==='model-profile'||type==='edit-model-profile'){
-   const payload={name:data.name,base_url:data.base_url,model:data.model,api_key:data.api_key||'',temperature:Number(data.temperature),max_tokens:Number(data.max_tokens),timeout_seconds:Number(data.timeout_seconds)};
-   if(type==='model-profile')await api(`/api/rooms/${id}/models`,{method:'POST',body:payload});
-   else await api(`/api/rooms/${id}/models/${Number(form.dataset.id)}`,{method:'PUT',body:payload});
-   await refreshRoom();state.roomView='models';renderRoom();toast(type==='model-profile'?'模型配置已保存':'模型配置已更新');return;
+  if(type==='chat'){
+   const result=await api(`/api/rooms/${id}/chat`,{method:'POST',body:{match_number:state.room.match_number,text:data.text}});
+   state.chatDraft='';form.reset();addChatMessage(result.message);toast('消息已发送');return;
+  }
+  if(type==='bind-ai-player-model'||type==='bind-ai-judge-model'){
+   const keep=data.model_profile_id==='__unchanged__';
+   const payload=keep?{keep_existing:true}:{model_profile_id:data.model_profile_id?Number(data.model_profile_id):null};
+   if(type==='bind-ai-player-model')await api(`/api/rooms/${id}/ai/${encodeURIComponent(form.dataset.alias)}/model`,{method:'PUT',body:payload});
+   else await api(`/api/rooms/${id}/ai-judges/${Number(form.dataset.id)}/model`,{method:'PUT',body:payload});
+   await refreshRoom();toast(keep?'保持原模型绑定':'模型绑定已更新');return;
   }
   if(type==='add-ai'){const profileId=data.model_profile_id?Number(data.model_profile_id):null;await api(`/api/rooms/${id}/ai`,{method:'POST',body:{name:data.name,model_profile_id:profileId}});await refreshRoom();toast('AI 参赛位已创建')}
   if(type==='add-ai-judge'){const profileId=data.model_profile_id?Number(data.model_profile_id):null;await api(`/api/rooms/${id}/ai-judges`,{method:'POST',body:{name:data.name,model_profile_id:profileId}});await refreshRoom();toast(profileId?'已添加模型 AI 裁判':'已添加手动 AI 裁判')}
@@ -463,7 +488,6 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
   }
   if(type==='question'){await api(`/api/rooms/${id}/question`,{method:'POST',body:{text:data.question}});delete state.drafts[`${id}:${state.room?.match_number}:${state.selectedRound}:question`];await refreshRoom();toast('裁判问题已同步给所有玩家')}
   if(type==='answer'){await api(`/api/rooms/${id}/answers`,{method:'POST',body:{text:data.answer}});delete state.drafts[`${id}:${state.room?.match_number}:${state.selectedRound}:answer`];await refreshRoom();toast('回答已提交，等待其他玩家')}
-  if(type==='suggestion'){await api(`/api/rooms/${id}/suggestions`,{method:'POST',body:{text:data.suggestion}});delete state.drafts[`${id}:${state.room?.match_number}:${state.selectedRound}:suggestion`];await refreshRoom();toast('消息已实时同步')}
   if(type==='edit-ai-answer'){
    if(confirm('确定保存 AI 回复修订吗？如果答案已公开，裁判会收到更新。')){
     await api(`/api/rooms/${id}/ai/${data.alias}/answer`,{method:'PUT',body:{text:data.text}});
@@ -481,7 +505,7 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
 // 页面在后台休眠、网络断线或切回标签页时，重新核对轮次完成状态。
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&state.roomId&&state.me)refreshRoom()});
 window.addEventListener('focus',()=>{if(state.roomId&&state.me)refreshRoom()});
-window.addEventListener('hashchange',async()=>{const m=/^#room=(\d+)$/.exec(location.hash);if(!state.me)return;if(m&&Number(m[1])!==state.roomId)await openRoom(Number(m[1]));else if(!m&&state.roomId)await loadLobby()});
+window.addEventListener('hashchange',async()=>{if(!state.me)return;if(location.hash==='#profile'){if(!state.personalReturn)await openPersonalCenter({fromHash:true});return;}const m=/^#room=(\d+)$/.exec(location.hash);if(m&&Number(m[1])!==state.roomId)await openRoom(Number(m[1]));else if(!m&&state.roomId)await loadLobby()});
 setInterval(()=>{if(state.roomId && state.me && (!state.ws||state.ws.readyState!==WebSocket.OPEN))refreshRoom()},15000);
 init();
 
