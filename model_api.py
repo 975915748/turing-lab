@@ -27,12 +27,14 @@ class ResolvedEndpoint:
     addresses: tuple[str, ...]
 
 
-def _cipher() -> Fernet:
+def _load_cipher(*, required: bool = False) -> Fernet | None:
     key = os.getenv("MODEL_CREDENTIAL_KEY", "").strip()
     if not key:
-        raise ModelAPIError(
-            "服务器尚未配置 MODEL_CREDENTIAL_KEY，暂时不能保存或调用模型 API。"
-        )
+        if required:
+            raise ModelAPIError(
+                "服务器尚未配置 MODEL_CREDENTIAL_KEY，暂时不能保存或调用模型 API。"
+            )
+        return None
     try:
         return Fernet(key.encode("ascii"))
     except (ValueError, UnicodeEncodeError):
@@ -41,18 +43,42 @@ def _cipher() -> Fernet:
         ) from None
 
 
+def validate_credential_key(*, required: bool = False) -> bool:
+    """Validate the configured Fernet key without exposing its value."""
+    return _load_cipher(required=required) is not None
+
+
+def has_valid_credential_key() -> bool:
+    """Return whether a syntactically valid Fernet key is configured."""
+    try:
+        return validate_credential_key()
+    except ModelAPIError:
+        return False
+
+
+def _cipher() -> Fernet:
+    cipher = _load_cipher(required=True)
+    if cipher is None:
+        raise ModelAPIError(
+            "服务器尚未配置 MODEL_CREDENTIAL_KEY，暂时不能保存或调用模型 API。"
+        )
+    return cipher
+
+
 def encrypt_api_key(api_key: str) -> str:
     return _cipher().encrypt(api_key.encode("utf-8")).decode("ascii")
 
 
 def decrypt_api_key(token: str) -> str:
+    if not isinstance(token, str) or not token:
+        raise ModelAPIError("保存的 API Key 数据无效。")
     try:
         return _cipher().decrypt(token.encode("ascii")).decode("utf-8")
     except InvalidToken:
         raise ModelAPIError(
             "API Key 无法解密，请确认 MODEL_CREDENTIAL_KEY 与保存时完全一致。"
         ) from None
-    except (ValueError, UnicodeEncodeError):
+    except (ValueError, UnicodeEncodeError, TypeError):
         raise ModelAPIError("保存的 API Key 数据无效。") from None
 
 

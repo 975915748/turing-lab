@@ -22,7 +22,8 @@ from pydantic import BaseModel, Field
 from starlette.staticfiles import StaticFiles
 
 from model_api import (ModelAPIError, chat_completion, decrypt_api_key,
-                       encrypt_api_key, parse_json_object, validate_base_url)
+                       encrypt_api_key, has_valid_credential_key, parse_json_object,
+                       validate_base_url)
 
 ROOT = Path(__file__).resolve().parent
 DATABASE = ROOT / 'data' / 'game.sqlite3'
@@ -723,7 +724,7 @@ def public_room(db, room, user, mine):
                       [{'kind':r['kind'],'label':r['label'],'locked':bool(r['locked'])} for r in judges],
             'rounds':body,'suggestions':[dict(s) for s in suggestions],
             'ai_edits':ai_edits,'packets':[dict(p) for p in pkts],
-            'model_profiles':model_profiles,'model_api_enabled':bool(os.getenv('MODEL_CREDENTIAL_KEY'))}
+            'model_profiles':model_profiles,'model_api_enabled':has_valid_credential_key()}
 
 
 def anonymous_match_packet(db, room_id, through_round=None):

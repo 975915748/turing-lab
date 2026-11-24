@@ -83,7 +83,7 @@
 - 选择模型配置的 AI 席位可以使用自动出题、回答或最终判断功能；选择“手动转录”的席位继续使用手动录入。
 - 当前模型 API 仅允许 HTTPS 公网地址。模型服务商的 API 用量可能单独计费。
 - API Key 使用 Fernet 加密后存入 SQLite。Railway 服务端必须配置长期固定的 `MODEL_CREDENTIAL_KEY`；生成、保存和恢复方式见 [Railway 部署说明](RAILWAY_部署说明.md)。
-- **不要更换或丢失 `MODEL_CREDENTIAL_KEY`。** 更换或丢失会导致数据库中已保存的 API Key 无法解密；也不要把密钥或 API Key 提交到 GitHub。
+- **不要更换或丢失 `MODEL_CREDENTIAL_KEY`。** Railway 启动时会检查密钥格式，并逐条验证数据库中已保存的 API Key 能否解密；密钥缺失、格式错误或与现存数据不匹配时，服务会拒绝启动。修复变量后再重新部署；也不要把密钥或 API Key 提交到 GitHub。
 
 ## 5. 房间复用、记录与 UID
 
