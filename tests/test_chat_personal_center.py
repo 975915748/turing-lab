@@ -298,13 +298,19 @@ def test_personal_name_update_and_password_rotation_revoke_every_session(lab):
         'confirm_password': 'new-password-1',
     }).status_code == 403
 
-    result = post(p1, '/api/me/password', {
-        'current_password': 'player-password', 'new_password': 'new-password-1',
-        'confirm_password': 'new-password-1',
-    })
-    assert result['signed_out'] is True
+    with p1_second.websocket_connect(f"/ws/rooms/{lab['room_id']}") as socket:
+        assert socket.receive_json()['type'] == 'connected'
+        result = post(p1, '/api/me/password', {
+            'current_password': 'player-password', 'new_password': 'new-password-1',
+            'confirm_password': 'new-password-1',
+        })
+        assert result['signed_out'] is True
+        closed = socket.receive()
+        assert closed['type'] == 'websocket.close'
+        assert closed['code'] == 1008
     assert p1.get('/api/me').status_code == 401
     assert p1_second.get('/api/me').status_code == 401
+    assert legacy_login.get('/api/me').status_code == 401
     new_login = TestClient(lab['app'])
     post(new_login, '/api/login', {'uid': original['uid'], 'password': 'new-password-1'})
     assert new_login.get('/api/me').json()['user']['uid'] == original['uid']
