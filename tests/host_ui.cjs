@@ -72,6 +72,77 @@ async function screenshot(page, name) {
     await playerPage.reload();
     await playerPage.locator('.chat-body').filter({ hasText: '房主发来的消息' }).waitFor();
 
+    // Visual coverage: chat on desktop/mobile in both light and dark themes.
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    assert.equal(await page.locator('body').getAttribute('data-theme'), 'light');
+    await screenshot(page, 'room-chat-desktop-light.png');
+    await page.locator('#themeBtn').click();
+    assert.equal(await page.locator('body').getAttribute('data-theme'), 'dark');
+    await screenshot(page, 'room-chat-desktop-dark.png');
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await screenshot(page, 'room-chat-mobile-dark.png');
+    await page.locator('#themeBtn').click();
+    assert.equal(await page.locator('body').getAttribute('data-theme'), 'light');
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await screenshot(page, 'room-chat-mobile-light.png');
+    await page.setViewportSize({ width: 1440, height: 1000 });
+
+    async function delayedChatProbe(text, mutateState, verifyState) {
+      let capturedResolve, releaseResolve;
+      const captured = new Promise(resolve => { capturedResolve = resolve; });
+      const release = new Promise(resolve => { releaseResolve = resolve; });
+      const pattern = `**/api/rooms/${rid}/chat`;
+      const handler = async route => {
+        if (route.request().method() !== 'POST') return route.continue();
+        const response = await route.fetch();
+        capturedResolve();
+        await release;
+        await route.fulfill({ response });
+      };
+      await playerPage.route(pattern, handler);
+      const form = playerPage.locator('form[data-form="chat"]');
+      await form.locator('[name="text"]').fill(text);
+      await form.locator('[type="submit"]').click();
+      await captured;
+      await mutateState();
+      releaseResolve();
+      await playerPage.waitForTimeout(250);
+      await verifyState();
+      await playerPage.unroute(pattern, handler);
+    }
+
+    // A late success response after the client has observed formal completion must not restore chat.
+    await delayedChatProbe('完赛后不得回填的旧消息',
+      async () => playerPage.evaluate(() => {
+        state.room.status = 'finished';
+        state.chat = [];
+        state.chatDraft = '';
+        renderRoom();
+      }),
+      async () => {
+        assert.equal(await playerPage.getByText('完赛后不得回填的旧消息', { exact: true }).count(), 0);
+        assert.equal(await playerPage.evaluate(() => state.chat.length), 0);
+      });
+    await playerPage.goto(site + `#room=${rid}`);
+    await playerPage.locator('.chat-card').waitFor();
+
+    // A response from the previous room must not enter the new room state or clear its draft.
+    await delayedChatProbe('切房后不得串入的旧消息',
+      async () => playerPage.evaluate(() => {
+        state.roomId = 999999;
+        state.room = { id: 999999, match_number: 77, status: 'open', is_judge: false };
+        state.chat = [];
+        state.chatDraft = '新房间仍在编辑的草稿';
+      }),
+      async () => {
+        const probe = await playerPage.evaluate(() => ({ chat: state.chat, draft: state.chatDraft }));
+        assert.deepEqual(probe.chat, []);
+        assert.equal(probe.draft, '新房间仍在编辑的草稿');
+      });
+    await playerPage.goto(site + `#room=${rid}`);
+    await playerPage.locator('.chat-card').waitFor();
+
     // Personal center is available from the room, survives refresh, and returns to the same room.
     await page.locator('[data-action="personal-center"]').first().click();
     const profileForm = page.locator('form[data-form="profile-name"]');
