@@ -1252,8 +1252,8 @@ def create_app(db_path=None):
                 temperature=?,max_tokens=?,timeout_seconds=?,updated_at=? WHERE id=? AND owner_user_id=?''',
                 (norm_text(body.name,60),base,norm_text(body.model,120),encrypted,
                  body.temperature,body.max_tokens,body.timeout_seconds,utcnow(),profile_id,u['id']))
-        rooms=[row['room_id'] for row in db.execute('''SELECT room_id FROM ai_players WHERE model_profile_id=?
-            UNION SELECT room_id FROM ai_judges WHERE model_profile_id=?''',(profile_id,profile_id))]
+            rooms=[row['room_id'] for row in db.execute('''SELECT room_id FROM ai_players WHERE model_profile_id=?
+                UNION SELECT room_id FROM ai_judges WHERE model_profile_id=?''',(profile_id,profile_id))]
         for room_id in set(rooms):
             await app.state.hub.notify(room_id,'model_profile_changed')
         return {'ok':True}
@@ -1551,7 +1551,7 @@ def create_app(db_path=None):
 
     @app.post('/api/rooms/{room_id}/models')
     async def create_model_profile(room_id:int,body:ModelProfileData,request:Request):
-        # Authenticate first, then release SQLite before any DNS/network-adjacent wait.
+        # Compatibility adapter: a room manager may create only a profile owned by themselves.
         with connection() as db:
             u=caller(request,db,mutate=True)
             require_room_manager(db,room_id,u)
@@ -1563,16 +1563,16 @@ def create_app(db_path=None):
             encrypted=encrypt_api_key(key)
         except ModelAPIError as exc:
             raise HTTPException(422,str(exc))
-        # Re-check authorization after the await, then keep the write transaction short.
         with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
             now=utcnow()
-            cur=db.execute('''INSERT INTO model_profiles(room_id,name,base_url,model,api_key_encrypted,
-                temperature,max_tokens,timeout_seconds,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)''',
-                (room_id,norm_text(body.name,60),base,norm_text(body.model,120),encrypted,
+            cur=db.execute('''INSERT INTO model_profiles(owner_user_id,legacy_room_id,name,base_url,model,
+                api_key_encrypted,temperature,max_tokens,timeout_seconds,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)''',
+                (u['id'],room_id,norm_text(body.name,60),base,norm_text(body.model,120),encrypted,
                  body.temperature,body.max_tokens,body.timeout_seconds,now,now))
-            log_event(db,room_id,room['current_round'],'model_profile_created','房主','新增模型 API 配置')
+            log_event(db,room_id,room['current_round'],'model_profile_created','房主','新增个人模型 API 配置')
             profile_id=cur.lastrowid
         await app.state.hub.notify(room_id,'model_profile_changed')
         return {'ok':True,'id':profile_id}
@@ -1582,28 +1582,40 @@ def create_app(db_path=None):
         with connection() as db:
             u=caller(request,db,mutate=True)
             require_room_manager(db,room_id,u)
-            if not db.execute('SELECT 1 FROM model_profiles WHERE id=? AND room_id=?',
-                              (profile_id,room_id)).fetchone():
-                raise HTTPException(404,'模型配置不存在。')
+            old=db.execute('''SELECT mp.*,u.deleted_at AS owner_deleted_at FROM model_profiles mp
+                JOIN users u ON u.id=mp.owner_user_id WHERE mp.id=? AND mp.owner_user_id=?''',
+                (profile_id,u['id'])).fetchone()
+            if not old or old['ownership_issue']:
+                raise HTTPException(404,'模型配置不存在或不属于当前账号。')
+            status=model_profile_credential_status(dict(old))
         try:
             base=await asyncio.to_thread(validate_base_url,body.base_url)
             key=(body.api_key or '').strip()
-            new_encrypted=encrypt_api_key(key) if key else None
+            if key:
+                new_encrypted=encrypt_api_key(key)
+            else:
+                if status!='ok':
+                    raise ModelAPIError('此配置的 API Key 不可用，必须重新填写后才能修复。')
+                new_encrypted=None
         except ModelAPIError as exc:
             raise HTTPException(422,str(exc))
         with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
-            old=db.execute('SELECT * FROM model_profiles WHERE id=? AND room_id=?',(profile_id,room_id)).fetchone()
-            if not old:
-                raise HTTPException(404,'模型配置不存在。')
-            encrypted=new_encrypted or old['api_key_encrypted']
+            current=db.execute('SELECT * FROM model_profiles WHERE id=? AND owner_user_id=? AND ownership_issue IS NULL',
+                               (profile_id,u['id'])).fetchone()
+            if not current:
+                raise HTTPException(404,'模型配置不存在或不属于当前账号。')
+            encrypted=new_encrypted if new_encrypted is not None else current['api_key_encrypted']
             db.execute('''UPDATE model_profiles SET name=?,base_url=?,model=?,api_key_encrypted=?,
-                temperature=?,max_tokens=?,timeout_seconds=?,updated_at=? WHERE id=? AND room_id=?''',
+                temperature=?,max_tokens=?,timeout_seconds=?,updated_at=? WHERE id=? AND owner_user_id=?''',
                 (norm_text(body.name,60),base,norm_text(body.model,120),encrypted,
-                 body.temperature,body.max_tokens,body.timeout_seconds,utcnow(),profile_id,room_id))
-            log_event(db,room_id,room['current_round'],'model_profile_updated','房主','更新模型 API 配置')
-        await app.state.hub.notify(room_id,'model_profile_changed')
+                 body.temperature,body.max_tokens,body.timeout_seconds,utcnow(),profile_id,u['id']))
+            rooms=[row['room_id'] for row in db.execute('''SELECT room_id FROM ai_players WHERE model_profile_id=?
+                UNION SELECT room_id FROM ai_judges WHERE model_profile_id=?''',(profile_id,profile_id))]
+            log_event(db,room_id,room['current_round'],'model_profile_updated','房主','更新个人模型 API 配置')
+        for affected_room in set(rooms)|{room_id}:
+            await app.state.hub.notify(affected_room,'model_profile_changed')
         return {'ok':True}
 
     @app.delete('/api/rooms/{room_id}/models/{profile_id}')
@@ -1611,15 +1623,17 @@ def create_app(db_path=None):
         with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
-            if not db.execute('SELECT 1 FROM model_profiles WHERE id=? AND room_id=?',(profile_id,room_id)).fetchone():
-                raise HTTPException(404,'模型配置不存在。')
-            db.execute('UPDATE ai_players SET model_profile_id=NULL WHERE room_id=? AND model_profile_id=?',
-                       (room_id,profile_id))
-            db.execute('UPDATE ai_judges SET model_profile_id=NULL WHERE room_id=? AND model_profile_id=?',
-                       (room_id,profile_id))
-            db.execute('DELETE FROM model_profiles WHERE id=? AND room_id=?',(profile_id,room_id))
-            log_event(db,room_id,room['current_round'],'model_profile_deleted','房主','删除模型 API 配置，关联席位改为手动转录')
-        await app.state.hub.notify(room_id,'model_profile_changed')
+            if not db.execute('SELECT 1 FROM model_profiles WHERE id=? AND owner_user_id=? AND ownership_issue IS NULL',
+                              (profile_id,u['id'])).fetchone():
+                raise HTTPException(404,'模型配置不存在或不属于当前账号。')
+            rooms=[row['room_id'] for row in db.execute('''SELECT room_id FROM ai_players WHERE model_profile_id=?
+                UNION SELECT room_id FROM ai_judges WHERE model_profile_id=?''',(profile_id,profile_id))]
+            db.execute('UPDATE ai_players SET model_profile_id=NULL WHERE model_profile_id=?',(profile_id,))
+            db.execute('UPDATE ai_judges SET model_profile_id=NULL WHERE model_profile_id=?',(profile_id,))
+            db.execute('DELETE FROM model_profiles WHERE id=? AND owner_user_id=?',(profile_id,u['id']))
+            log_event(db,room_id,room['current_round'],'model_profile_deleted','房主','删除个人模型配置，关联席位改为手动转录')
+        for affected_room in set(rooms)|{room_id}:
+            await app.state.hub.notify(affected_room,'model_profile_changed')
         return {'ok':True}
 
     @app.post('/api/rooms/{room_id}/models/{profile_id}/test')
@@ -1627,10 +1641,7 @@ def create_app(db_path=None):
         with connection() as db:
             u=caller(request,db,mutate=True)
             require_room_manager(db,room_id,u)
-            profile=db.execute('SELECT * FROM model_profiles WHERE id=? AND room_id=?',(profile_id,room_id)).fetchone()
-            if not profile:
-                raise HTTPException(404,'模型配置不存在。')
-            profile=dict(profile)
+            profile=require_owned_model_profile(db,profile_id,u['id'])
         try:
             key=decrypt_api_key(profile['api_key_encrypted'])
             started=time.perf_counter()
@@ -1639,8 +1650,14 @@ def create_app(db_path=None):
                 {'role':'user','content':'Reply with OK.'}],key)
         except ModelAPIError as exc:
             raise HTTPException(502,str(exc))
+        with connection() as db:
+            u=caller(request,db)
+            require_room_manager(db,room_id,u)
+            if not db.execute('SELECT 1 FROM model_profiles WHERE id=? AND owner_user_id=?',
+                              (profile_id,u['id'])).fetchone():
+                raise HTTPException(409,'测试期间模型配置或账号状态已变化，请重试。')
         return {'ok':True,'model':profile['model'],'preview':result['text'][:120],
-                'latency_ms':round((time.perf_counter()-started)*1000), 'usage':result['usage']}
+                'latency_ms':round((time.perf_counter()-started)*1000),'usage':result['usage']}
 
     @app.delete('/api/rooms/{room_id}')
     async def delete_room(room_id:int,body:MatchActionData,request:Request):
