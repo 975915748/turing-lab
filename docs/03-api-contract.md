@@ -54,7 +54,7 @@ ModelProfileData 当前约束：
 - name：1–60 字；
 - base_url：8–500 字；
 - model：1–120 字；
-- api_key：最多 2,000 字；更新时可留空以保留原密钥；
+- api_key：最多 2,000 字；创建配置时必填，更新时可留空以保留原密钥；
 - temperature：0–2，默认 0.7；
 - max_tokens：64–8192，默认 2048；
 - timeout_seconds：10–120，默认 60。
