@@ -73,6 +73,8 @@ def lab(tmp_path, monkeypatch):
     b = register(p2, 'same_name_two', '同名玩家')
     j = register(judge, 'human_judge', '真人裁判')
     register(outsider, 'outsider', '房间外用户')
+    post(p1, '/api/join', {'code': room['code']})
+    post(p2, '/api/join', {'code': room['code']})
     post(judge, '/api/join', {'code': room['code'], 'role': 'judge'})
     with db_open(path) as db:
         p1_id = db.execute('SELECT id FROM users WHERE username=?', ('same_name_one',)).fetchone()[0]
