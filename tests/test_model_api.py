@@ -71,7 +71,7 @@ def model_lab(tmp_path, monkeypatch):
         'max_tokens': 1024,
         'timeout_seconds': 30,
     }
-    profile = post(admin, base + '/models', profile_body)
+    profile = post(admin, '/api/me/models', profile_body)
     return {
         'path': path, 'app': app, 'admin': admin, 'p1': p1, 'p2': p2,
         'base': base, 'profile_id': profile['id'], 'profile_body': profile_body,
@@ -80,16 +80,16 @@ def model_lab(tmp_path, monkeypatch):
 
 def test_model_profile_key_is_encrypted_and_never_returned_to_browser(model_lab):
     admin, base, path = model_lab['admin'], model_lab['base'], model_lab['path']
-    info = admin.get(base).json()
+    info = admin.get('/api/me/models').json()
     assert info['model_api_enabled'] is True
-    assert info['model_profiles'][0]['has_api_key'] is True
-    assert 'api_key' not in info['model_profiles'][0]
-    assert 'api_key_encrypted' not in info['model_profiles'][0]
+    assert info['models'][0]['has_api_key'] is True
+    assert 'api_key' not in info['models'][0]
+    assert 'api_key_encrypted' not in info['models'][0]
     with db_open(path) as db:
         encrypted = db.execute('SELECT api_key_encrypted FROM model_profiles').fetchone()[0]
     assert encrypted != model_lab['profile_body']['api_key']
     assert model_lab['profile_body']['api_key'] not in encrypted
-    tested = post(admin, base + f"/models/{model_lab['profile_id']}/test")
+    tested = post(admin, f"/api/me/models/{model_lab['profile_id']}/test")
     assert tested['ok'] is True
     assert tested['preview'] == 'OK'
     assert tested['usage']['total_tokens'] == 5
@@ -107,7 +107,7 @@ def test_model_profile_update_keeps_key_when_input_is_blank(model_lab):
     payload['name'] = '更新后的模型配置'
     payload['api_key'] = ''
     me = admin.get('/api/me').json()
-    response = admin.put(base + f'/models/{profile_id}', json=payload,
+    response = admin.put(f'/api/me/models/{profile_id}', json=payload,
                          headers={'X-CSRF-Token': me['user']['csrf']})
     assert response.status_code == 200, response.text
     with db_open(model_lab['path']) as db:
@@ -266,13 +266,13 @@ def test_broken_model_profile_can_be_repaired_without_changing_match_data(model_
             'members': db.execute('SELECT COUNT(*) FROM members').fetchone()[0],
         }
 
-    state = admin.get(base).json()
-    assert state['model_profiles'][0]['credential_status'] == 'missing'
+    state = admin.get('/api/me/models').json()
+    assert state['models'][0]['credential_status'] == 'missing'
     payload = dict(model_lab['profile_body'])
     payload['api_key'] = 'sk-recovered-provider-key'
     me = admin.get('/api/me').json()
     response = admin.put(
-        base + f'/models/{profile_id}',
+        f'/api/me/models/{profile_id}',
         json=payload,
         headers={'X-CSRF-Token': me['user']['csrf']},
     )
