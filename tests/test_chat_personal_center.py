@@ -202,7 +202,11 @@ def test_public_chat_permissions_identity_and_judge_websocket_isolation(lab):
 
 
 def test_chat_is_cleared_on_successful_reveal_but_not_failed_reveal(lab):
-    admin, p1, p2, base = lab['admin'], lab['p1'], lab['p2'], lab['base']
+    admin, p1, p2 = lab['admin'], lab['p1'], lab['p2']
+    room=post(admin,'/api/rooms',{'title':'独立完赛清聊测试'})
+    base=f"/api/rooms/{room['room_id']}"
+    post(p1,'/api/join',{'code':room['code']})
+    post(p2,'/api/join',{'code':room['code']})
     post(p1, base + '/chat', {'match_number': 1, 'text': '本场聊天不得进入比赛记录'})
     assert post(admin, base + '/reveal', {}, 409) == {}
     assert len(p1.get(base + '/chat?match_number=1').json()['messages']) == 1
@@ -227,14 +231,14 @@ def test_chat_is_cleared_on_successful_reveal_but_not_failed_reveal(lab):
     assert '本场聊天不得进入比赛记录' not in p1.get(base + '/rounds/1/log').text
 
     with db_open(lab['path']) as db:
-        assert db.execute('SELECT COUNT(*) FROM packets WHERE room_id=?', (lab['room_id'],)).fetchone()[0] == 1
+        assert db.execute('SELECT COUNT(*) FROM packets WHERE room_id=?', (room['room_id'],)).fetchone()[0] == 1
         assert db.execute('SELECT COUNT(*) FROM answers WHERE round_id=(SELECT id FROM rounds WHERE room_id=? AND number=1)',
-                          (lab['room_id'],)).fetchone()[0] == 2
+                          (room['room_id'],)).fetchone()[0] == 2
         assert db.execute('SELECT COUNT(*) FROM events WHERE room_id=? AND text LIKE ?',
-                          (lab['room_id'], '%本场聊天不得进入比赛记录%')).fetchone()[0] == 0
+                          (room['room_id'], '%本场聊天不得进入比赛记录%')).fetchone()[0] == 0
         # Simulate an old residual row to verify the restart / delete-records cleanup paths too.
         db.execute('''INSERT INTO chat_messages(room_id,match_number,sender_user_id,sender_uid,sender_name,text,created_at)
-            VALUES(?,?,?,?,?,?,?)''',(lab['room_id'],1,lab['p1_id'],lab['uid1'],'同名玩家','模拟残留', '2026-11-24T00:00:00+00:00'))
+            VALUES(?,?,?,?,?,?,?)''',(room['room_id'],1,lab['p1_id'],lab['uid1'],'同名玩家','模拟残留', '2026-11-24T00:00:00+00:00'))
 
     post(admin, base + '/restart', {'match_number': 1})
     new_room = admin.get(base).json()
@@ -253,11 +257,11 @@ def test_chat_is_cleared_on_successful_reveal_but_not_failed_reveal(lab):
     post(admin, base + '/reveal', {})
     with db_open(lab['path']) as db:
         db.execute('''INSERT INTO chat_messages(room_id,match_number,sender_user_id,sender_uid,sender_name,text,created_at)
-            VALUES(?,?,?,?,?,?,?)''',(lab['room_id'],2,lab['p1_id'],lab['uid1'],'同名玩家','模拟残留2', '2026-11-24T00:00:00+00:00'))
+            VALUES(?,?,?,?,?,?,?)''',(room['room_id'],2,lab['p1_id'],lab['uid1'],'同名玩家','模拟残留2', '2026-11-24T00:00:00+00:00'))
     delete(admin, base + '/records', {'match_number': 2})
     assert admin.get(base).json()['records_deleted'] is True
     with db_open(lab['path']) as db:
-        assert db.execute('SELECT COUNT(*) FROM chat_messages WHERE room_id=?', (lab['room_id'],)).fetchone()[0] == 0
+        assert db.execute('SELECT COUNT(*) FROM chat_messages WHERE room_id=?', (room['room_id'],)).fetchone()[0] == 0
 
 
 def test_personal_name_update_and_password_rotation_revoke_every_session(lab):
