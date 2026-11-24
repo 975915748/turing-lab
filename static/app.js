@@ -261,8 +261,8 @@ function judgeAdminPanel(r){
  return html+'</section>';
 }
 function renderJudgeWorkflowPanel(r){
- const judges=r.judges||[];if(!judges.length)return '';
- const pending=r.rounds.find(x=>x.number===r.current_round);
+ const judges=r.judges||[];
+ const pending=r.rounds.find(x=>x.number===r.current_round);if(!judges.length&&!pending?.questions?.length)return '';
  const allDone=judges.every(j=>j.locked);
  const allRoundsDone=r.rounds.length>0&&r.rounds.every(x=>x.status==='revealed');
  let html='<section class="card compact"><div class="label-line"><h2>统一作答与揭晓</h2><span class="pill">'+judges.filter(j=>j.locked).length+'/'+judges.length+' 位裁判已锁定</span></div>';
