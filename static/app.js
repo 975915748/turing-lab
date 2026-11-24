@@ -217,9 +217,14 @@ function modelProfileOptions(r){
  const profiles=(state.personalModels||[]).filter(p=>p.credential_status==='ok');
  return `<option value="">手动转录（不调用 API）</option>${profiles.map(p=>`<option value="${p.id}">${esc(p.name)} · ${esc(p.model)}</option>`).join('')}`;
 }
-function modelBindingOptions(){
+function modelBindingOptions(current=null){
  const profiles=(state.personalModels||[]).filter(p=>p.credential_status==='ok');
- return `<option value="__unchanged__" selected>保持当前绑定</option><option value="">手动转录（不调用 API）</option>${profiles.map(p=>`<option value="${p.id}">${esc(p.name)} · ${esc(p.model)}</option>`).join('')}`;
+ const currentId=current?.model_profile_id??null;
+ let html='';
+ if(currentId&&!profiles.some(p=>p.id===currentId))html+='<option value="__unchanged__" selected>保持当前已授权绑定</option>';
+ html+='<option value="" '+(!currentId?'selected':'')+'>手动转录（不调用 API）</option>';
+ html+=profiles.map(p=>'<option value="'+p.id+'" '+(p.id===currentId?'selected':'')+'>'+esc(p.name)+' · '+esc(p.model)+'</option>').join('');
+ return html;
 }
 function bindingLabel(item){
  if(!state.modelApiEnabled&&item.model_profile_id)return '模型 API 暂不可用，请联系管理员。';
@@ -239,7 +244,7 @@ function renderAIBindingControls(r){
  if(!r.ais?.length)return '';
  const disabled=r.status!=='open'||r.verdict_locked||(r.judges||[]).some(j=>j.locked);
  return '<div class="divider"></div><h3>AI 参赛席模型绑定</h3><p class="hint">更换或解除绑定不会删除 AI 席位及其匿名代号、历史回答。你只能选择自己拥有的配置；其他账号授权的现有绑定可以保留或解除。</p>'+
- r.ais.map(a=>'<form class="binding-row" data-form="bind-ai-player-model" data-alias="'+esc(a.alias)+'"><div><strong>'+esc(a.alias)+' · '+esc(a.name)+'</strong><div class="tiny muted">当前：'+esc(bindingLabel(a))+'</div></div><select name="model_profile_id">'+modelBindingOptions()+'</select><button class="small" type="submit" '+(disabled?'disabled':'')+'>更新绑定</button></form>').join('');
+ r.ais.map(a=>'<form class="binding-row" data-form="bind-ai-player-model" data-alias="'+esc(a.alias)+'"><div><strong>'+esc(a.alias)+' · '+esc(a.name)+'</strong><div class="tiny muted">当前：'+esc(bindingLabel(a))+'</div></div><select name="model_profile_id">'+modelBindingOptions(a)+'</select><button class="small" type="submit" '+(disabled?'disabled':'')+'>更新绑定</button></form>').join('');
 }
 function judgeAdminPanel(r){
  const judges=(r.judges||[]).filter(j=>j.kind==='ai');
@@ -257,7 +262,7 @@ function judgeAdminPanel(r){
  '<p class="hint">AI 裁判可绑定你自己的个人模型配置自动出题和判断，也可手动转录。绑定他人配置时，只能看到当前席位的必要摘要，不能读取或编辑对方的个人配置。</p>';
  if(judges.length){
   html+=judges.map(j=>'<div class="feed-item"><div class="label-line"><strong>'+esc(j.label)+'</strong><span class="pill '+(j.locked?'ok':'')+'">'+(j.locked?'✓ 已锁定':'未锁定')+'</span></div>'+
-   '<div class="tiny muted">当前绑定：'+esc(bindingLabel(j))+'</div><form data-form="bind-ai-judge-model" data-id="'+j.id+'" class="binding-row"><select name="model_profile_id">'+modelBindingOptions()+'</select><button class="small" type="submit" '+(canEdit?'':'disabled')+'>更新绑定</button></form></div>').join('');
+   '<div class="tiny muted">当前绑定：'+esc(bindingLabel(j))+'</div><form data-form="bind-ai-judge-model" data-id="'+j.id+'" class="binding-row"><select name="model_profile_id">'+modelBindingOptions(j)+'</select><button class="small" type="submit" '+(canEdit?'':'disabled')+'>更新绑定</button></form></div>').join('');
  }else html+=D('尚无 AI 裁判席。');
  if(autoPending.length)html+='<div class="divider"></div><p class="hint">'+autoPending.length+' 位模型 AI 裁判尚未提交第 '+r.current_round+' 轮问题。</p><button class="primary" data-action="generate-ai-questions">让模型自动生成本轮问题</button>';
  if(pendingRound?.status==='draft'&&pendingAis.length){
