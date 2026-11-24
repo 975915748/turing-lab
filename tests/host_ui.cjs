@@ -55,7 +55,43 @@ async function screenshot(page, name) {
     const playerContext = await browser.newContext();
     await mutate(playerContext, '/api/register', { username: '参赛玩家', password: 'player-password' });
     await mutate(playerContext, '/api/join', { code: room.invite_code });
+    const playerPage = await playerContext.newPage();
+    playerPage.setDefaultTimeout(10000);
+    playerPage.on('pageerror', error => errors.push(String(error)));
     await page.locator('[data-action="sync"]').click();
+
+    // Room public chat is live across pages, persists on refresh, and renders plain text safely.
+    await page.locator('[data-action="room-view"][data-view="match"]').click();
+    await playerPage.goto(site + `#room=${rid}`);
+    await playerPage.locator('.chat-card').waitFor();
+    await submit(playerPage, 'chat', { text: '<script>alert(1)</script>' });
+    await page.locator('.chat-body').filter({ hasText: '<script>alert(1)</script>' }).waitFor();
+    assert.equal(await page.locator('.chat-body script').count(), 0);
+    await submit(page, 'chat', { text: '房主发来的消息' });
+    await playerPage.locator('.chat-body').filter({ hasText: '房主发来的消息' }).waitFor();
+    await playerPage.reload();
+    await playerPage.locator('.chat-body').filter({ hasText: '房主发来的消息' }).waitFor();
+
+    // Personal center is available from the room, survives refresh, and returns to the same room.
+    await page.locator('[data-action="personal-center"]').first().click();
+    const profileForm = page.locator('form[data-form="profile-name"]');
+    await profileForm.waitFor();
+    assert.equal(await profileForm.locator('[name="display_name"]').count(), 1);
+    await profileForm.locator('[name="display_name"]').fill('改名后的房主');
+    await profileForm.locator('[type="submit"]').click();
+    await page.getByText('名字已更新', { exact: true }).waitFor();
+    await page.reload();
+    await page.locator('form[data-form="profile-name"]').waitFor();
+    assert.equal(await page.locator('[name="display_name"]').inputValue(), '改名后的房主');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.locator('#themeBtn').click();
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await screenshot(page, 'personal-center-mobile-dark.png');
+    await page.locator('#themeBtn').click();
+    await page.locator('[data-action="personal-back"]').click();
+    await page.locator('.chat-card').waitFor();
+    await page.locator('[data-action="room-view"][data-view="admin"]').click();
+
     await submit(page, 'question', { question: '第一场的问题' });
     await mutate(playerContext, base + '/answers', { text: '第一场的回答' });
     await submit(page, 'ai-answer', { answer: '第一场AI回答' });
