@@ -12,7 +12,8 @@ def validate_stored_model_credentials(path):
     """Inspect every saved model credential and return repairable, non-secret diagnostics."""
     with db_open(path) as db:
         rows = db.execute(
-            "SELECT id, room_id, api_key_encrypted FROM model_profiles ORDER BY id"
+            "SELECT id, owner_user_id, legacy_room_id, ownership_issue, api_key_encrypted "
+            "FROM model_profiles ORDER BY id"
         ).fetchall()
     if not rows:
         return []
@@ -39,7 +40,9 @@ def validate_stored_model_credentials(path):
                 status = 'cannot_decrypt'
         issues.append({
             'profile_id': row['id'],
-            'room_id': row['room_id'],
+            'room_id': row['legacy_room_id'],
+            'owner_user_id': row['owner_user_id'],
+            'ownership_issue': row['ownership_issue'],
             'status': status,
         })
     return issues
@@ -62,7 +65,7 @@ def main():
                 file=sys.stderr,
             )
         print(
-            'Use the room Model API page to replace affected provider API Keys. '
+            'Use the personal center to replace affected provider API Keys. '
             'If MODEL_CREDENTIAL_KEY was lost, set a new valid Fernet key first; '
             'all previously encrypted API Keys must then be entered again.',
             file=sys.stderr,
