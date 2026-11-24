@@ -43,7 +43,7 @@ async function refreshRoom(){if(!state.roomId||location.hash==='#profile')return
  if(r.is_judge||r.status==='finished'){state.chat=[];state.chatDraft='';}else await loadRoomChat().catch(()=>{});
  if(r.can_manage)await loadPersonalModels().catch(()=>{});
  renderRoom();maybeNotifyJudge();}catch(e){if(/不属于这个房间|公共聊天/.test(e.message)){state.roomId=null;state.room=null;state.chat=[];await loadLobby();toast('你已不在该房间');}else toast(e.message)}}
-async function init(){applyPrefs();try{state.me=await api('/api/me');$('#logoutBtn').classList.remove('hide');const q=/^#room=(\d+)$/.exec(location.hash);if(location.hash==='#profile'){state.personalReturn=null;await openPersonalCenter({fromHash:true});}else if(q){await openRoom(Number(q[1]));}else renderLobby()}catch(e){state.me=null;state.roomId=null;state.personalModels=[];state.chat=[];$('#logoutBtn').classList.add('hide');renderAuth();}}
+async function init(){applyPrefs();try{state.me=await api('/api/me');$('#logoutBtn').classList.remove('hide');const q=/^#room=(\d+)$/.exec(location.hash);if(location.hash.startsWith('#profile')){state.personalReturn=profileReturnFromHash();await openPersonalCenter({fromHash:true});}else if(q){await openRoom(Number(q[1]));}else renderLobby()}catch(e){state.me=null;state.roomId=null;state.personalModels=[];state.chat=[];$('#logoutBtn').classList.add('hide');renderAuth();}}
 function renderAuth(){
  stopWs();$('#logoutBtn').classList.add('hide');setConnection('未登录',false);
  const reg=state.tab==='register',legacy=!!state.legacyLogin;
@@ -162,9 +162,11 @@ function makeRoster(r){const submitted=new Set(r.rounds.find(x=>x.number===state
  const people=[...r.humans.map(h=>({...h,role:'人类',label:h.name})),...r.ais.map(a=>({...a,role:'AI',label:a.name}))].sort((a,b)=>a.alias.localeCompare(b.alias));
  return people.map(p=>`<div class="roster-person"><div class="person-left"><span class="alias">${esc(p.alias)}</span><div style="min-width:0"><span class="person-name" title="${esc(p.label)}">${esc(p.label)}</span><span class="roster-role">${p.role==='人类'?'人类 · '+esc(p.uid):'AI 参赛位'}${p.alias===r.mine?' · 我':''}</span></div></div><span class="pill ${submitted.has(p.alias)?'ok':''}" ${p.role==='人类'&&r.mine?`data-typing-alias="${esc(p.alias)}"`:''} title="本轮提交状态">${submitted.has(p.alias)?'√':p.role==='人类'&&r.mine?(state.selectedRound===r.current_round&&state.typing[p.alias]?'....':'X'):'—'}</span></div>`).join('')||D('等待人类玩家加入');}
 
+function profileReturnFromHash(){const m=/^#profile\\?room=(\\d+)&view=([^&]+)&round=(\\d+)$/.exec(location.hash);return m?{roomId:Number(m[1]),view:decodeURIComponent(m[2]),round:Number(m[3])}:null;}
 async function openPersonalCenter(options={}){
  if(!options.fromHash){state.personalReturn=state.roomId&&state.room?{roomId:state.roomId,view:state.roomView,round:state.selectedRound}:null;}
- stopWs();history.replaceState(null,'',`#profile`);
+ else if(!state.personalReturn)state.personalReturn=profileReturnFromHash();
+ stopWs();const back=state.personalReturn;const hash=back?.roomId?`#profile?room=${back.roomId}&view=${encodeURIComponent(back.view)}&round=${back.round||1}`:'#profile';history.replaceState(null,'',hash);
  await loadPersonalModels();renderPersonalCenter();
 }
 async function returnFromPersonalCenter(){
@@ -519,7 +521,7 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
 // 页面在后台休眠、网络断线或切回标签页时，重新核对轮次完成状态。
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&state.roomId&&state.me)refreshRoom()});
 window.addEventListener('focus',()=>{if(state.roomId&&state.me)refreshRoom()});
-window.addEventListener('hashchange',async()=>{if(!state.me)return;if(location.hash==='#profile'){if(!state.personalReturn)await openPersonalCenter({fromHash:true});return;}const m=/^#room=(\d+)$/.exec(location.hash);if(m&&Number(m[1])!==state.roomId)await openRoom(Number(m[1]));else if(!m&&state.roomId)await loadLobby()});
+window.addEventListener('hashchange',async()=>{if(!state.me)return;if(location.hash.startsWith('#profile')){if(!state.personalReturn)state.personalReturn=profileReturnFromHash();await openPersonalCenter({fromHash:true});return;}const m=/^#room=(\d+)$/.exec(location.hash);if(m&&Number(m[1])!==state.roomId)await openRoom(Number(m[1]));else if(!m&&state.roomId)await loadLobby()});
 setInterval(()=>{if(state.roomId && state.me && (!state.ws||state.ws.readyState!==WebSocket.OPEN))refreshRoom()},15000);
 init();
 
