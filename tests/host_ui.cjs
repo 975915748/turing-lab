@@ -124,7 +124,7 @@ async function screenshot(page, name) {
         assert.equal(await playerPage.getByText('完赛后不得回填的旧消息', { exact: true }).count(), 0);
         assert.equal(await playerPage.evaluate(() => state.chat.length), 0);
       });
-    await playerPage.goto(site + `#room=${rid}`);
+    await playerPage.reload();
     await playerPage.locator('.chat-card').waitFor();
 
     // A response from the previous room must not enter the new room state or clear its draft.
@@ -140,7 +140,7 @@ async function screenshot(page, name) {
         assert.deepEqual(probe.chat, []);
         assert.equal(probe.draft, '新房间仍在编辑的草稿');
       });
-    await playerPage.goto(site + `#room=${rid}`);
+    await playerPage.reload();
     await playerPage.locator('.chat-card').waitFor();
 
     // Personal center is available from the room, survives refresh, and returns to the same room.
