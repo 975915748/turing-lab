@@ -111,7 +111,7 @@ async function screenshot(page, name) {
     const adminContext = await browser.newContext();
     await mutate(adminContext, '/api/login', { uid: 'TL00000001', password: 'browser-password' });
     await mutate(adminContext, `/api/admin/users/${formerJudge.uid}`, { confirm: true }, 'DELETE');
-    await page.locator('[data-action="room-view"][data-view="judges"]').click();
+    await page.locator('[data-action="room-view"][data-view="admin"]').click();
     await page.locator('[data-action="start-round"]').waitFor();
     await page.locator('[data-action="start-round"]').click();
     await page.locator('[data-action="room-view"][data-view="match"]').click();
