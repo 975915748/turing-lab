@@ -49,9 +49,10 @@ def test_delete_finished_room_cascades_all_room_data_but_preserves_other_rooms_a
     other_base=f'/api/rooms/{other["room_id"]}'
     post(player, other_base + '/chat', {'match_number':1,'text':'另一房间的聊天'})
     with db_open(path) as db:
-        sender_id=db.execute('SELECT id FROM users WHERE uid=?',(player.get('/api/me').json()['user']['uid'],)).fetchone()[0]
+        player_user=player.get('/api/me').json()['user']
+        sender_id=int(player_user['uid'][2:])
         db.execute('''INSERT INTO chat_messages(room_id,match_number,sender_user_id,sender_uid,sender_name,text,created_at)
-            VALUES(?,?,?,?,?,?,?)''',(rid,1,sender_id,player.get('/api/me').json()['user']['uid'],'房间玩家','待级联清除','2026-11-24T00:00:00+00:00'))
+            VALUES(?,?,?,?,?,?,?)''',(rid,1,sender_id,player_user['uid'],'房间玩家','待级联清除','2026-11-24T00:00:00+00:00'))
         db.execute("INSERT INTO room_judges VALUES(?,4,'真人裁判','2026')", (rid,))
         db.execute("INSERT INTO judge_questions(room_id,round_number,judge_user_id,text,created_at) VALUES(?,1,4,'问题','2026')", (rid,))
         db.execute("INSERT INTO judge_verdicts VALUES(?,4,'{}','2026')", (rid,))
