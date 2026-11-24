@@ -1417,7 +1417,7 @@ def create_app(db_path=None):
         with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             name=norm_text(body.display_name,40)
-            db.execute('UPDATE users SET display_name=? WHERE id=? AND deleted_at IS NULL',(name,u['id']))
+            db.execute('UPDATE users SET username=?,display_name=? WHERE id=? AND deleted_at IS NULL',(name,name,u['id']))
             row=db.execute('SELECT id,username,display_name,is_admin FROM users WHERE id=?',(u['id'],)).fetchone()
             if u['is_admin']:
                 room_ids=[r['id'] for r in db.execute('SELECT id FROM rooms')]
