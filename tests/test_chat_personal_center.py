@@ -240,7 +240,7 @@ def test_chat_is_cleared_on_successful_reveal_but_not_failed_reveal(lab):
         db.execute('''INSERT INTO chat_messages(room_id,match_number,sender_user_id,sender_uid,sender_name,text,created_at)
             VALUES(?,?,?,?,?,?,?)''',(room['room_id'],1,lab['p1_id'],lab['uid1'],'同名玩家','模拟残留', '2026-11-24T00:00:00+00:00'))
 
-    post(admin, base + '/restart', {'match_number': 1})
+    post(admin, base + '/restart', {'confirm': True, 'match_number': 1})
     new_room = admin.get(base).json()
     assert new_room['match_number'] == 2
     assert p1.get(base + '/chat?match_number=2').json()['messages'] == []
@@ -258,7 +258,7 @@ def test_chat_is_cleared_on_successful_reveal_but_not_failed_reveal(lab):
     with db_open(lab['path']) as db:
         db.execute('''INSERT INTO chat_messages(room_id,match_number,sender_user_id,sender_uid,sender_name,text,created_at)
             VALUES(?,?,?,?,?,?,?)''',(room['room_id'],2,lab['p1_id'],lab['uid1'],'同名玩家','模拟残留2', '2026-11-24T00:00:00+00:00'))
-    delete(admin, base + '/records', {'match_number': 2})
+    delete(admin, base + '/records', {'confirm': True, 'match_number': 2})
     assert admin.get(base).json()['records_deleted'] is True
     with db_open(lab['path']) as db:
         assert db.execute('SELECT COUNT(*) FROM chat_messages WHERE room_id=?', (room['room_id'],)).fetchone()[0] == 0
