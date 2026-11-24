@@ -56,8 +56,14 @@ def test_full_round_security_and_reveal(env):
         assert message['reason']=='judge_question'
         assert '光球' not in str(message)
     assert p2.get(base).json()['rounds'][0]['question']=='你会怎样躲开光球？'
-    post(p1,base+'/suggestions',{'text':'我想追问辐光出招权重'})
-    assert len(p2.get(base).json()['suggestions'])==1
+    post(p1,base+'/chat',{'match_number':1,'text':'我想追问辐光出招权重'})
+    chat=p2.get(base+'/chat?match_number=1').json()
+    assert len(chat['messages'])==1
+    assert chat['messages'][0]['text']=='我想追问辐光出招权重'
+    assert chat['messages'][0]['sender_uid']==p1.get('/api/me').json()['user']['uid']
+    assert 'chat' not in p2.get(base).json() and 'chat_messages' not in p2.get(base).json()
+    assert '我想追问辐光出招权重' not in p2.get(base+'/rounds/1/log').text
+    post(p1,base+'/suggestions',{'text':'旧入口已停用'},410)
     # no new participants once first judge question is posted
     post(outsider,'/api/register',{'username':'player_3','display_name':'第三位',
                                   'password':'passwordtest','code':code},409)
@@ -79,7 +85,7 @@ def test_full_round_security_and_reveal(env):
     post(admin,base+'/packets',{},409)
     post(p1,base+'/answers',{'text':'第二次回答'},409)
     # invalid CSRF token
-    assert p1.post(base+'/suggestions',json={'text':'CSRF attempt'}).status_code==403
+    assert p1.post(base+'/chat',json={'match_number':1,'text':'CSRF attempt'}).status_code==403
     post(p2,base+'/answers',{'text':'秘密回答_B'})
     released=p1.get(base).json()['rounds'][0]
     assert released['status']=='revealed'
@@ -122,6 +128,9 @@ def test_full_round_security_and_reveal(env):
     assert after['verdict']['confidence']==80
     assert after['verdict']['predictions']['B']=='AI'
     assert after['revealed_at']
+    assert p1.get(base+'/chat?match_number=1').json()['messages']==[]
+    assert p2.get(base+'/chat?match_number=1').json()['messages']==[]
+    post(p2,base+'/chat',{'match_number':1,'text':'after reveal'},409)
     post(p2,base+'/answers',{'text':'after reveal'},409)
 
 

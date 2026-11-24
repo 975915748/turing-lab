@@ -71,7 +71,7 @@ def model_lab(tmp_path, monkeypatch):
         'max_tokens': 1024,
         'timeout_seconds': 30,
     }
-    profile = post(admin, base + '/models', profile_body)
+    profile = post(admin, '/api/me/models', profile_body)
     return {
         'path': path, 'app': app, 'admin': admin, 'p1': p1, 'p2': p2,
         'base': base, 'profile_id': profile['id'], 'profile_body': profile_body,
@@ -80,16 +80,16 @@ def model_lab(tmp_path, monkeypatch):
 
 def test_model_profile_key_is_encrypted_and_never_returned_to_browser(model_lab):
     admin, base, path = model_lab['admin'], model_lab['base'], model_lab['path']
-    info = admin.get(base).json()
+    info = admin.get('/api/me/models').json()
     assert info['model_api_enabled'] is True
-    assert info['model_profiles'][0]['has_api_key'] is True
-    assert 'api_key' not in info['model_profiles'][0]
-    assert 'api_key_encrypted' not in info['model_profiles'][0]
+    assert info['models'][0]['has_api_key'] is True
+    assert 'api_key' not in info['models'][0]
+    assert 'api_key_encrypted' not in info['models'][0]
     with db_open(path) as db:
         encrypted = db.execute('SELECT api_key_encrypted FROM model_profiles').fetchone()[0]
     assert encrypted != model_lab['profile_body']['api_key']
     assert model_lab['profile_body']['api_key'] not in encrypted
-    tested = post(admin, base + f"/models/{model_lab['profile_id']}/test")
+    tested = post(admin, f"/api/me/models/{model_lab['profile_id']}/test")
     assert tested['ok'] is True
     assert tested['preview'] == 'OK'
     assert tested['usage']['total_tokens'] == 5
@@ -107,7 +107,7 @@ def test_model_profile_update_keeps_key_when_input_is_blank(model_lab):
     payload['name'] = '更新后的模型配置'
     payload['api_key'] = ''
     me = admin.get('/api/me').json()
-    response = admin.put(base + f'/models/{profile_id}', json=payload,
+    response = admin.put(f'/api/me/models/{profile_id}', json=payload,
                          headers={'X-CSRF-Token': me['user']['csrf']})
     assert response.status_code == 200, response.text
     with db_open(model_lab['path']) as db:
@@ -266,13 +266,13 @@ def test_broken_model_profile_can_be_repaired_without_changing_match_data(model_
             'members': db.execute('SELECT COUNT(*) FROM members').fetchone()[0],
         }
 
-    state = admin.get(base).json()
-    assert state['model_profiles'][0]['credential_status'] == 'missing'
+    state = admin.get('/api/me/models').json()
+    assert state['models'][0]['credential_status'] == 'missing'
     payload = dict(model_lab['profile_body'])
     payload['api_key'] = 'sk-recovered-provider-key'
     me = admin.get('/api/me').json()
     response = admin.put(
-        base + f'/models/{profile_id}',
+        f'/api/me/models/{profile_id}',
         json=payload,
         headers={'X-CSRF-Token': me['user']['csrf']},
     )
@@ -554,3 +554,129 @@ def test_ai_judge_discards_verdict_if_match_evidence_changes(tmp_path, monkeypat
             assert state['rounds'][-1]['status'] == 'revealed'
 
     asyncio.run(scenario())
+
+@pytest.mark.parametrize('mutation', ['profile_deleted', 'owner_deleted', 'session_revoked', 'seat_rebound'])
+def test_queued_model_answer_is_revalidated_before_provider_call(tmp_path, monkeypatch, mutation):
+    monkeypatch.setenv('MODEL_CREDENTIAL_KEY', Fernet.generate_key().decode('ascii'))
+    monkeypatch.setattr(app_module, 'validate_base_url', lambda value: value.strip().rstrip('/'))
+    path = tmp_path / f'queued-preflight-{mutation}.sqlite3'
+    seed_admin(path, 'queue_admin', '排队调用主持人', 'queue-admin-password')
+    app = create_app(path)
+
+    started = 0
+    started_aliases = []
+    four_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_chat(profile, messages, api_key):
+        nonlocal started
+        started += 1
+        started_aliases.append(profile.get('alias'))
+        if started == 4:
+            four_started.set()
+        await release.wait()
+        return {'text': '排队调用结果', 'usage': {}}
+
+    monkeypatch.setattr(app_module, 'chat_completion', blocked_chat)
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+        async with (
+            httpx.AsyncClient(transport=transport, base_url='http://testserver') as admin,
+            httpx.AsyncClient(transport=transport, base_url='http://testserver') as mutator,
+            httpx.AsyncClient(transport=transport, base_url='http://testserver') as p1,
+            httpx.AsyncClient(transport=transport, base_url='http://testserver') as p2,
+        ):
+            assert (await async_post(admin, '/api/login', {
+                'username': 'queue_admin', 'password': 'queue-admin-password',
+            })).status_code == 200
+            admin_me = (await admin.get('/api/me')).json()['user']
+            room_response = await async_post(admin, '/api/rooms', {'title': '排队调用二次校验'})
+            assert room_response.status_code == 200, room_response.text
+            room = room_response.json()
+            base = f"/api/rooms/{room['room_id']}"
+            for client, username in ((p1, 'queue_human_a'), (p2, 'queue_human_b')):
+                response = await async_post(client, '/api/register', {
+                    'username': username, 'password': 'queue-human-password', 'code': room['code'],
+                })
+                assert response.status_code == 200, response.text
+            profile_response = await async_post(admin, '/api/me/models', {
+                'name': '排队模型', 'base_url': 'https://api.example.com/v1',
+                'model': 'queued-model', 'api_key': 'sk-queued',
+                'temperature': 0.7, 'max_tokens': 512, 'timeout_seconds': 30,
+            })
+            assert profile_response.status_code == 200, profile_response.text
+            profile_id = profile_response.json()['id']
+            ai_aliases = []
+            for index in range(5):
+                response = await async_post(admin, base + '/ai', {
+                    'name': f'排队 AI {index + 1}', 'model_profile_id': profile_id,
+                })
+                assert response.status_code == 200, response.text
+                ai_aliases.append(response.json()['alias'])
+            question = await async_post(admin, base + '/question', {'text': '排队校验问题'})
+            assert question.status_code == 200, question.text
+
+            if mutation == 'owner_deleted':
+                registered = await async_post(mutator, '/api/register', {
+                    'username': 'queue_second_admin', 'password': 'second-admin-password',
+                })
+                assert registered.status_code == 200, registered.text
+                with db_open(path) as db:
+                    second_id = db.execute(
+                        'SELECT id FROM users WHERE username=?', ('queue_second_admin',)
+                    ).fetchone()[0]
+                    db.execute('UPDATE users SET is_admin=1 WHERE id=?', (second_id,))
+            else:
+                assert (await async_post(mutator, '/api/login', {
+                    'uid': admin_me['uid'], 'password': 'queue-admin-password',
+                })).status_code == 200
+
+            generate_task = asyncio.create_task(async_post(admin, base + '/ai/answers/generate'))
+            await asyncio.wait_for(four_started.wait(), 3)
+            assert started == 4
+
+            me = (await mutator.get('/api/me')).json()['user']
+            if mutation == 'profile_deleted':
+                changed = await mutator.request(
+                    'DELETE', f'/api/me/models/{profile_id}', json={},
+                    headers={'X-CSRF-Token': me['csrf']},
+                )
+            elif mutation == 'owner_deleted':
+                changed = await mutator.request(
+                    'DELETE', f"/api/admin/users/{admin_me['uid']}", json={'confirm': True},
+                    headers={'X-CSRF-Token': me['csrf']},
+                )
+            elif mutation == 'session_revoked':
+                changed = await mutator.post(
+                    '/api/me/password',
+                    json={
+                        'current_password': 'queue-admin-password',
+                        'new_password': 'queue-admin-password-new',
+                        'confirm_password': 'queue-admin-password-new',
+                    },
+                    headers={'X-CSRF-Token': me['csrf']},
+                )
+            else:
+                queued_alias = next(alias for alias in ai_aliases if alias not in started_aliases)
+                changed = await mutator.put(
+                    base + f"/ai/{queued_alias}/model",
+                    json={'model_profile_id': None},
+                    headers={'X-CSRF-Token': me['csrf']},
+                )
+            assert changed.status_code == 200, changed.text
+
+            release.set()
+            generated = await asyncio.wait_for(generate_task, 3)
+            assert generated.status_code == 200, generated.text
+            payload = generated.json()
+            assert started == 4, '第五个排队任务不应在状态失效后触发服务商调用'
+            if mutation == 'seat_rebound':
+                assert payload['generated'] == 4
+                assert payload['skipped'] == 1
+            else:
+                assert payload['generated'] == 0
+                assert payload['skipped'] == 5
+
+    asyncio.run(scenario())
+

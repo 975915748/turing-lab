@@ -55,7 +55,155 @@ async function screenshot(page, name) {
     const playerContext = await browser.newContext();
     await mutate(playerContext, '/api/register', { username: '参赛玩家', password: 'player-password' });
     await mutate(playerContext, '/api/join', { code: room.invite_code });
+    const playerPage = await playerContext.newPage();
+    playerPage.setDefaultTimeout(10000);
+    playerPage.on('pageerror', error => errors.push(String(error)));
     await page.locator('[data-action="sync"]').click();
+
+    // Room public chat is live across pages, persists on refresh, and renders plain text safely.
+    await page.locator('[data-action="room-view"][data-view="match"]').click();
+    await playerPage.goto(site + `#room=${rid}`);
+    await playerPage.locator('.chat-card').waitFor();
+    await submit(playerPage, 'chat', { text: '<script>alert(1)</script>' });
+    await page.locator('.chat-body').filter({ hasText: '<script>alert(1)</script>' }).waitFor();
+    assert.equal(await page.locator('.chat-body script').count(), 0);
+    await submit(page, 'chat', { text: '房主发来的消息' });
+    await playerPage.locator('.chat-body').filter({ hasText: '房主发来的消息' }).waitFor();
+    await playerPage.reload();
+    await playerPage.locator('.chat-body').filter({ hasText: '房主发来的消息' }).waitFor();
+
+    // Visual coverage: chat on desktop/mobile in both light and dark themes.
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    assert.equal(await page.locator('body').getAttribute('data-theme'), 'light');
+    await screenshot(page, 'room-chat-desktop-light.png');
+    await page.locator('#themeBtn').click();
+    assert.equal(await page.locator('body').getAttribute('data-theme'), 'dark');
+    await screenshot(page, 'room-chat-desktop-dark.png');
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await screenshot(page, 'room-chat-mobile-dark.png');
+    await page.locator('#themeBtn').click();
+    assert.equal(await page.locator('body').getAttribute('data-theme'), 'light');
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await screenshot(page, 'room-chat-mobile-light.png');
+    await page.setViewportSize({ width: 1440, height: 1000 });
+
+    async function delayedChatProbe(text, mutateState, verifyState) {
+      let capturedResolve, releaseResolve;
+      const captured = new Promise(resolve => { capturedResolve = resolve; });
+      const release = new Promise(resolve => { releaseResolve = resolve; });
+      const pattern = `**/api/rooms/${rid}/chat`;
+      const handler = async route => {
+        if (route.request().method() !== 'POST') return route.continue();
+        const response = await route.fetch();
+        capturedResolve();
+        await release;
+        await route.fulfill({ response });
+      };
+      await playerPage.route(pattern, handler);
+      const form = playerPage.locator('form[data-form="chat"]');
+      await form.locator('[name="text"]').fill(text);
+      await form.locator('[type="submit"]').click();
+      await captured;
+      await mutateState();
+      releaseResolve();
+      await playerPage.waitForTimeout(250);
+      await verifyState();
+      await playerPage.unroute(pattern, handler);
+    }
+
+    // A late success response after the client has observed formal completion must not restore chat.
+    await delayedChatProbe('完赛后不得回填的旧消息',
+      async () => playerPage.evaluate(() => {
+        state.room.status = 'finished';
+        state.chat = [];
+        state.chatDraft = '';
+        renderRoom();
+      }),
+      async () => {
+        assert.equal(await playerPage.getByText('完赛后不得回填的旧消息', { exact: true }).count(), 0);
+        assert.equal(await playerPage.evaluate(() => state.chat.length), 0);
+      });
+    await playerPage.reload();
+    await playerPage.locator('.chat-card').waitFor();
+
+    // A response from the previous room must not enter the new room state or clear its draft.
+    await delayedChatProbe('切房后不得串入的旧消息',
+      async () => playerPage.evaluate(() => {
+        state.roomId = 999999;
+        state.room = { id: 999999, match_number: 77, status: 'open', is_judge: false };
+        state.chat = [];
+        state.chatDraft = '新房间仍在编辑的草稿';
+      }),
+      async () => {
+        const probe = await playerPage.evaluate(() => ({ chat: state.chat, draft: state.chatDraft }));
+        assert.deepEqual(probe.chat, []);
+        assert.equal(probe.draft, '新房间仍在编辑的草稿');
+      });
+    await playerPage.reload();
+    await playerPage.locator('.chat-card').waitFor();
+
+    // Pause the actual room refresh after a successful chat POST. The send handler must
+    // compare the draft only after that refresh resolves, not before awaiting it.
+    async function chatRefreshDraftProbe(sent, nextDraft) {
+      await playerPage.evaluate(({ roomId }) => {
+        const originalApi = api;
+        const probe = { entered: false, release: null };
+        const gate = new Promise(resolve => { probe.release = resolve; });
+        window.chatRefreshProbe = probe;
+        document.querySelector('#toast').textContent = '';
+        let posted = false;
+        api = async (url, options) => {
+          const result = await originalApi(url, options);
+          if (url === `/api/rooms/${roomId}/chat` && options?.method === 'POST') {
+            posted = true;
+          } else if (posted && url === `/api/rooms/${roomId}` && (!options?.method || options.method === 'GET')) {
+            api = originalApi;
+            probe.entered = true;
+            await gate;
+          }
+          return result;
+        };
+      }, { roomId: rid });
+      const input = playerPage.locator('#roomChatInput');
+      await submit(playerPage, 'chat', { text: sent });
+      await playerPage.waitForFunction(() => window.chatRefreshProbe?.entered === true);
+      try {
+        assert.equal(await input.inputValue(), sent);
+        if (nextDraft !== null) await input.fill(nextDraft);
+      } finally {
+        await playerPage.evaluate(() => window.chatRefreshProbe.release());
+      }
+      await playerPage.waitForFunction(() => document.querySelector('#toast').textContent === '消息已发送');
+      const expected = nextDraft === null ? '' : nextDraft;
+      assert.equal(await playerPage.evaluate(() => state.chatDraft), expected);
+      assert.equal(await input.inputValue(), expected);
+      assert.equal(await playerPage.locator('.chat-body').filter({ hasText: sent }).count(), 1);
+      await playerPage.evaluate(() => { delete window.chatRefreshProbe; });
+    }
+    await chatRefreshDraftProbe('刷新等待期间已发送的消息', '刷新等待期间新输入的未发送草稿');
+    await chatRefreshDraftProbe('正常发送后应清空的原草稿', null);
+
+    // Personal center is available from the room, survives refresh, and returns to the same room.
+    await page.locator('[data-action="personal-center"]').first().click();
+    const profileForm = page.locator('form[data-form="profile-name"]');
+    await profileForm.waitFor();
+    assert.equal(await profileForm.locator('[name="display_name"]').count(), 1);
+    await profileForm.locator('[name="display_name"]').fill('改名后的房主');
+    await profileForm.locator('[type="submit"]').click();
+    await page.getByText('名字已更新', { exact: true }).waitFor();
+    await page.reload();
+    await page.locator('form[data-form="profile-name"]').waitFor();
+    assert.equal(await page.locator('[name="display_name"]').inputValue(), '改名后的房主');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.locator('#themeBtn').click();
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await screenshot(page, 'personal-center-mobile-dark.png');
+    await page.locator('#themeBtn').click();
+    await page.locator('[data-action="personal-back"]').click();
+    await page.locator('.chat-card').waitFor();
+    await page.locator('[data-action="room-view"][data-view="admin"]').click();
+
     await submit(page, 'question', { question: '第一场的问题' });
     await mutate(playerContext, base + '/answers', { text: '第一场的回答' });
     await submit(page, 'ai-answer', { answer: '第一场AI回答' });
@@ -67,7 +215,9 @@ async function screenshot(page, name) {
     await screenshot(page, 'host-finished-desktop.png');
     await page.locator('[data-action="room-view"][data-view="match"]').click();
     assert(await page.getByText('第一场的回答', { exact: true }).isVisible());
+    const firstMatchNumber = await page.evaluate(() => state.room.match_number);
     await page.locator('[data-action="restart-match"]').click();
+    await page.waitForFunction(previous => state.room?.match_number === previous + 1, firstMatchNumber);
     await page.locator('[data-action="room-view"][data-view="admin"]').click();
     await page.locator('form[data-form="question"]').waitFor();
     assert.equal(await page.locator('form[data-form="question"] textarea').inputValue(), '');
@@ -100,7 +250,9 @@ async function screenshot(page, name) {
     await page.getByRole('heading', { name: '开始下一场比赛', exact: true }).waitFor();
     assert.equal(await page.getByText('第二场人类回答', { exact: true }).count(), 0);
     await screenshot(page, 'host-records-cleared.png');
+    const secondMatchNumber = await page.evaluate(() => state.room.match_number);
     await page.locator('[data-action="restart-match"]').click();
+    await page.waitForFunction(previous => state.room?.match_number === previous + 1, secondMatchNumber);
     await page.locator('[data-action="room-view"][data-view="admin"]').click();
     await page.locator('form[data-form="question"]').waitFor();
     // Retained question remains startable if its only judge account is deleted.
@@ -111,7 +263,7 @@ async function screenshot(page, name) {
     const adminContext = await browser.newContext();
     await mutate(adminContext, '/api/login', { uid: 'TL00000001', password: 'browser-password' });
     await mutate(adminContext, `/api/admin/users/${formerJudge.uid}`, { confirm: true }, 'DELETE');
-    await page.locator('[data-action="room-view"][data-view="judges"]').click();
+    await page.locator('[data-action="room-view"][data-view="admin"]').click();
     await page.locator('[data-action="start-round"]').waitFor();
     await page.locator('[data-action="start-round"]').click();
     await page.locator('[data-action="room-view"][data-view="match"]').click();

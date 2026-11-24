@@ -78,11 +78,12 @@ async function logout(page) {
       const room = await (await context.request.get(site + base)).json();
       assert(room.invite_code);
 
-      await page.locator('[data-action="room-view"][data-view="judges"]').click();
-      await page.locator('form[data-form="add-ai-judge"]').waitFor();
-      await page.locator('[data-action="room-view"][data-view="judges"]').waitFor();
+      await page.locator('[data-action="room-view"][data-view="human-judges"]').click();
+      await page.locator('h2', { hasText: '真人裁判管理' }).waitFor();
       await page.locator('form[data-form="add-judge"]').count().then(n => assert.equal(n, 0));
       await page.locator('form[data-form="assign-judge"]').count().then(n => assert.equal(n, 0));
+      await page.locator('[data-action="room-view"][data-view="ai-judges"]').click();
+      await page.locator('form[data-form="add-ai-judge"]').waitFor();
       await page.locator('form[data-form="add-ai-judge"] [name="name"]').fill('保留的手动 AI 裁判');
       await clickSubmit(page, 'add-ai-judge');
       await page.locator('.feed-item').filter({ hasText: '保留的手动 AI 裁判' }).waitFor();
@@ -107,6 +108,8 @@ async function logout(page) {
       await join.locator('[name="role"]').selectOption('judge');
       await clickSubmit(judgePage, 'join');
       await judgePage.locator('.pagehead .pill').filter({ hasText: '独立裁判' }).waitFor();
+      assert.equal(await judgePage.locator('.chat-card').count(), 0);
+      assert.equal(await judgePage.getByText('公共聊天', { exact: true }).count(), 0);
       const blind = await (await judgeContext.request.get(site + base)).json();
       assert.equal(blind.is_judge, true);
       assert.equal(Object.hasOwn(blind, 'humans'), false);
@@ -115,11 +118,30 @@ async function logout(page) {
 
       // Host sees the roster update; the self-service account is not exposed to judges.
       await page.reload();
-      await page.locator('[data-action="room-view"][data-view="judges"]').click();
-      await page.getByText('真人裁判 · TL00000002', { exact: true }).waitFor();
+      await page.locator('[data-action="room-view"][data-view="human-judges"]').click();
+      await page.getByText('UID：TL00000002', { exact: true }).waitFor();
       assert.equal(await page.locator('form[data-form="add-judge"]').count(), 0);
       assert.equal(await page.locator('form[data-form="assign-judge"]').count(), 0);
+
+      // Visual coverage: the independent human-judge management page in all requested viewport/theme combinations.
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      assert.equal(await page.locator('body').getAttribute('data-theme'), 'light');
+      await page.screenshot({ path: path.join(artifacts, 'human-judges-desktop-light.png'), fullPage: true, animations: 'disabled' });
+      await page.locator('#themeBtn').click();
+      assert.equal(await page.locator('body').getAttribute('data-theme'), 'dark');
+      await page.screenshot({ path: path.join(artifacts, 'human-judges-desktop-dark.png'), fullPage: true, animations: 'disabled' });
+      await page.setViewportSize({ width: 390, height: 844 });
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+      await page.screenshot({ path: path.join(artifacts, 'human-judges-mobile-dark.png'), fullPage: true, animations: 'disabled' });
+      await page.locator('#themeBtn').click();
+      assert.equal(await page.locator('body').getAttribute('data-theme'), 'light');
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+      await page.screenshot({ path: path.join(artifacts, 'human-judges-mobile-light.png'), fullPage: true, animations: 'disabled' });
+      await page.setViewportSize({ width: 1440, height: 1000 });
+
+      await page.locator('[data-action="room-view"][data-view="ai-judges"]').click();
       assert.equal(await page.locator('form[data-form="add-ai-judge"]').count(), 1);
+      await page.getByText('服务商可能按实际调用量计费。', { exact: false }).first().waitFor();
 
       // A repeated join from the same UID is idempotent.
       const judgeMe = await (await judgeContext.request.get(site + '/api/me')).json();
@@ -131,31 +153,39 @@ async function logout(page) {
       const hostRoom = await (await context.request.get(site + base)).json();
       assert.equal(hostRoom.judges.filter(j => j.kind === 'human').length, 1);
 
-      // Model configuration copy and labels are simplified without changing parameter values.
-      await page.locator('[data-action="room-view"][data-view="models"]').click();
-      await page.getByText('采样温度', { exact: true }).waitFor();
+      // Personal center owns the profile, password, and model configuration sections.
+      await page.locator('[data-action="personal-center"]').first().click();
+      await page.locator('form[data-form="profile-name"]').waitFor();
+      await page.getByText('个人模型 API', { exact: true }).waitFor();
       const modelText = await page.locator('#app').innerText();
       assert.equal(modelText.includes('Temperature'), false);
       assert.equal(modelText.includes('Base URL 填到'), false);
       assert.equal(modelText.includes('MODEL_CREDENTIAL_KEY'), false);
       assert.equal(modelText.includes('Fernet.generate_key'), false);
       assert.equal(modelText.includes('Railway'), false);
-      const modelState = await (await context.request.get(site + base)).json();
+      const modelState = await (await context.request.get(site + '/api/me/models')).json();
       if (!modelState.model_api_enabled) {
         await page.getByText('模型 API 暂不可用，请联系管理员。', { exact: true }).waitFor();
-        assert.equal(await page.locator('form[data-form="model-profile"] button[type="submit"]').isDisabled(), true);
+        assert.equal(await page.locator('form[data-form="personal-model-create"]').count(), 0);
+      } else {
+        await page.locator('form[data-form="personal-model-create"]').waitFor();
+        await page.getByText('采样温度', { exact: true }).waitFor();
       }
 
-      // Check both themes and the 390px layout in a real browser.
-      await page.screenshot({ path: path.join(artifacts, 'self-service-judges-desktop-light.png'), fullPage: true, animations: 'disabled' });
+      // Personal center visual coverage in all requested viewport/theme combinations.
       assert.equal(await page.locator('body').getAttribute('data-theme'), 'light');
-      await page.setViewportSize({ width: 390, height: 844 });
-      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-      await page.screenshot({ path: path.join(artifacts, 'self-service-judges-mobile-light.png'), fullPage: true, animations: 'disabled' });
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      await page.screenshot({ path: path.join(artifacts, 'personal-center-desktop-light.png'), fullPage: true, animations: 'disabled' });
       await page.locator('#themeBtn').click();
       assert.equal(await page.locator('body').getAttribute('data-theme'), 'dark');
+      await page.screenshot({ path: path.join(artifacts, 'personal-center-desktop-dark.png'), fullPage: true, animations: 'disabled' });
+      await page.setViewportSize({ width: 390, height: 844 });
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-      await page.screenshot({ path: path.join(artifacts, 'self-service-judges-mobile-dark.png'), fullPage: true, animations: 'disabled' });
+      await page.screenshot({ path: path.join(artifacts, 'personal-center-mobile-dark.png'), fullPage: true, animations: 'disabled' });
+      await page.locator('#themeBtn').click();
+      assert.equal(await page.locator('body').getAttribute('data-theme'), 'light');
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+      await page.screenshot({ path: path.join(artifacts, 'personal-center-mobile-light.png'), fullPage: true, animations: 'disabled' });
 
       await judgePage.locator('[data-action="back"]').click();
       await judgePage.setViewportSize({ width: 390, height: 844 });

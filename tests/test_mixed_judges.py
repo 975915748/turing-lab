@@ -137,6 +137,7 @@ def test_ui_static_assets_versioned(tmp_path):
     response=c.get(script.group(1))
     assert response.status_code == 200
     js=response.text
-    for field in ('add-ai-judge','ai-judge-question','ai-judge-verdict','真人 / AI 裁判管理'):
+    for field in ('add-ai-judge','ai-judge-question','ai-judge-verdict','human-judges','ai-judges','personal-center','公共聊天'):
         assert field in js
+    assert '真人 / AI 裁判管理' not in js
 
