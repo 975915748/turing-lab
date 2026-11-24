@@ -156,9 +156,9 @@ def legacy_database(path):
 
 
 def snapshot(db):
-    # Compare pre-existing application data, excluding v1.6-only schema additions.
+    # Compare pre-existing application data, excluding later schema additions.
     tables = [r[0] for r in db.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name!='model_profiles'")]
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('model_profiles','chat_messages')")]
     result = {}
     for name in tables:
         rows = [dict(r) for r in db.execute(f'SELECT * FROM "{name}" ORDER BY rowid')]
