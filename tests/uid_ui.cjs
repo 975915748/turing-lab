@@ -136,7 +136,7 @@ async function logout(page) {
       // Personal center owns the profile, password, and model configuration sections.
       await page.locator('[data-action="personal-center"]').first().click();
       await page.locator('form[data-form="profile-name"]').waitFor();
-      await page.locator('form[data-form="personal-model-create"]').waitFor();
+      await page.getByText('个人模型 API', { exact: true }).waitFor();
       await page.getByText('采样温度', { exact: true }).waitFor();
       const modelText = await page.locator('#app').innerText();
       assert.equal(modelText.includes('Temperature'), false);
@@ -148,6 +148,8 @@ async function logout(page) {
       if (!modelState.model_api_enabled) {
         await page.getByText('模型 API 暂不可用，请联系管理员。', { exact: true }).waitFor();
         assert.equal(await page.locator('form[data-form="personal-model-create"]').count(), 0);
+      } else {
+        await page.locator('form[data-form="personal-model-create"]').waitFor();
       }
 
       // Check both themes and the 390px layout in a real browser.
