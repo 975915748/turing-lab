@@ -473,7 +473,7 @@ def test_migration_preserves_unowned_legacy_profile_without_reassigning_it(lab):
     assert admin.get('/api/me/models').json()['models'] == []
     summary=admin2.get(base).json()['model_profiles']
     assert next(x for x in summary if x['id']==profile['id'])['credential_status']=='owner_unavailable'
-    assert post(admin2, base + '/ai', {'name':'不能接管','model_profile_id':profile['id]}, 404) == {}
+    assert post(admin2, base + '/ai', {'name':'不能接管','model_profile_id':profile['id']}, 404) == {}
 
 
 def test_failed_profile_migration_rolls_back_and_can_be_retried_after_source_repair(lab):
