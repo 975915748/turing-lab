@@ -404,6 +404,8 @@ def test_deleted_profile_owner_is_retained_but_cannot_trigger_new_model_calls(la
     p1, admin2 = lab['p1'], lab['admin2']
     room = post(p1, '/api/rooms', {'title': '账号删除后模型配置'})
     base = f"/api/rooms/{room['room_id']}"
+    post(lab['p2'], '/api/join', {'code': room['code']})
+    post(lab['outsider'], '/api/join', {'code': room['code']})
     profile = make_profile(p1, '删除账号后停用')
     ai = post(p1, base + '/ai', {'name': '已绑定 AI', 'model_profile_id': profile['id']})
     called = []
