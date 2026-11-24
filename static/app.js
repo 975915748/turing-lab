@@ -211,28 +211,65 @@ function bindingLabel(item){
  const p=item.model_profile;if(!p)return '配置不可用';
  return `${p.name} · ${p.model}（${p.owned_by_me?'我的配置':'其他账号的已授权配置'} · ${credentialStatusLabel(p)}）`;
 }
+
+function renderHumanJudgeAdminPanel(r){
+ const judges=(r.judges||[]).filter(j=>j.kind==='human');
+ return '<section class="card compact"><div class="label-line"><h2>真人裁判管理</h2><span class="pill">'+judges.length+' 位真人裁判</span></div>'+
+ '<p class="hint">真人裁判自行注册并使用 UID 登录，再从大厅输入本房间邀请码，选择“真人裁判”身份加入。房主不创建账号，也不绑定已有账号。</p>'+
+ '<p class="hint">同一 UID 同时只能担任一个未完赛房间的真人裁判。裁判加入、出题和独立判断流程保持不变。</p><div class="feed">'+
+ (judges.length?judges.map(j=>'<div class="feed-item"><div class="label-line"><strong>'+esc(j.label)+'</strong><span class="pill '+(j.locked?'ok':'')+'">'+(j.locked?'✓ 已锁定':'未锁定')+'</span></div><div class="tiny muted">UID：'+esc(j.uid||'不可用')+'</div><button class="small spaced" data-action="copy-uid" data-uid="'+esc(j.uid||'')+'">复制 UID</button></div>').join(''):D('尚无真人裁判。'))+'</div></section>';
+}
+function renderAIBindingControls(r){
+ if(!r.ais?.length)return '';
+ const disabled=r.status!=='open'||r.verdict_locked||(r.judges||[]).some(j=>j.locked);
+ return '<div class="divider"></div><h3>AI 参赛席模型绑定</h3><p class="hint">更换或解除绑定不会删除 AI 席位及其匿名代号、历史回答。你只能选择自己拥有的配置；其他账号授权的现有绑定可以保留或解除。</p>'+
+ r.ais.map(a=>'<form class="binding-row" data-form="bind-ai-player-model" data-alias="'+esc(a.alias)+'"><div><strong>'+esc(a.alias)+' · '+esc(a.name)+'</strong><div class="tiny muted">当前：'+esc(bindingLabel(a))+'</div></div><select name="model_profile_id">'+modelBindingOptions()+'</select><button class="small" type="submit" '+(disabled?'disabled':'')+'>更新绑定</button></form>').join('');
+}
 function judgeAdminPanel(r){
- const judges=r.judges||[];
- const allDone=judges.length>0&&judges.every(j=>j.locked);
+ const judges=(r.judges||[]).filter(j=>j.kind==='ai');
  const pendingRound=r.rounds.find(x=>x.number===r.current_round);
  const hasQuestion=j=>pendingRound?.questions?.some(q=>q.kind==='ai'&&q.judge_id===j.id);
- const pendingAis=judges.filter(j=>j.kind==='ai'&&!j.model_profile_id&&!hasQuestion(j));
- const autoPending=judges.filter(j=>j.kind==='ai'&&j.model_profile_id&&!hasQuestion(j));
- const awaitingAiVerdict=judges.filter(j=>j.kind==='ai'&&!j.locked);
- const manualAwaitingAiVerdict=awaitingAiVerdict.filter(j=>!j.model_profile_id);
- const autoAwaitingAiVerdict=awaitingAiVerdict.filter(j=>j.model_profile_id);
+ const usable=j=>j.model_profile?.credential_status==='ok';
+ const pendingAis=judges.filter(j=>!usable(j)&&!hasQuestion(j));
+ const autoPending=judges.filter(j=>usable(j)&&!hasQuestion(j));
+ const awaiting=judges.filter(j=>!j.locked);
+ const manualAwaiting=awaiting.filter(j=>!usable(j));
+ const autoAwaiting=awaiting.filter(j=>usable(j));
  const aliases=[...r.humans,...r.ais].map(x=>x.alias).sort();
- return `<section class="card compact"><div class="label-line"><h2>真人 / AI 裁判管理</h2><span class="pill">${judges.length} 位裁判</span></div>
- <p class="hint">真人裁判独立登录。AI 裁判可绑定模型 API 自动出题和判断，也可继续使用手动转录；各裁判的最终判决在揭晓前互相隔离。</p><p class="hint">真人裁判请先自行注册并使用 UID 登录，再回到大厅输入房间邀请码，选择“真人裁判”身份加入。同一账号同一时间只能担任一个未完赛房间的真人裁判。</p>
- ${autoPending.length?`<div class="divider"></div><p class="hint">${autoPending.length} 位模型 AI 裁判尚未提交第 ${r.current_round} 轮问题。</p><button class="primary" data-action="generate-ai-questions">让模型自动生成本轮问题</button>`:''}
- ${pendingRound?.status==='draft'&&pendingAis.length?`<div class="divider"></div><form data-form="ai-judge-question"><h3>代录 AI 裁判的第 ${r.current_round} 轮问题</h3><p class="hint">每位 AI 裁判每轮只能提交一次。</p><select name="judge_id">${pendingAis.map(j=>`<option value="${j.id}">${esc(j.label)}</option>`).join('')}</select><textarea name="text" data-draft="ai-judge-question" maxlength="3000" required placeholder="粘贴 AI 裁判提出的问题原文…">${myDraft('ai-judge-question')}</textarea><div class="form-actions"><button class="primary" type="submit">提交 AI 裁判问题</button></div></form>`:''}
- <div class="feed">${judges.length?judges.map(j=>`<div class="feed-item"><div class="label-line"><strong>${esc(j.label)}</strong><span class="pill ${j.locked?'ok':''}">${j.locked?'✓ 已锁定':'未锁定'}</span></div><div class="tiny muted">${j.kind==='ai'?'AI 裁判 · '+(j.model_profile_id?'模型 API':'手动转录'):'真人裁判 · '+esc(j.uid)}</div>${j.kind==='human'?`<button class="small spaced" data-action="copy-uid" data-uid="${esc(j.uid)}">复制 UID</button>`:''}</div>`).join(''):D('尚无裁判。真人裁判可自行注册并凭邀请码加入，也可以添加 AI 裁判席。')}</div>
- ${!r.revealed_at&&!r.verdict_locked&&!judges.some(j=>j.locked)?`<div class="divider"></div><form data-form="add-ai-judge"><h3>添加 AI 裁判</h3><label class="field">AI 裁判名称</label><input type="text" name="name" required maxlength="60" placeholder="例如 DeepSeek-R1"><label class="field">模型配置</label><select name="model_profile_id">${modelProfileOptions(r)}</select><div class="form-actions"><button class="primary" type="submit">＋ 添加 AI 裁判</button></div></form>`:''}
- ${pendingRound?.status==='draft'&&(judges.length>0||pendingRound.questions?.length)?`<div class="divider"></div><p class="hint">裁判问题提交后，房主确认并开始统一作答。</p><button class="primary" data-action="start-round">开始统一作答</button>`:''}
- ${!r.revealed_at&&r.rounds.every(x=>x.status==='revealed')&&autoAwaitingAiVerdict.length?`<div class="divider"></div><p class="hint">${autoAwaitingAiVerdict.length} 位模型 AI 裁判尚未完成最终判断。</p><button class="primary" data-action="generate-ai-verdicts">让模型自动完成最终判断</button>`:''}
- ${!r.revealed_at&&r.rounds.every(x=>x.status==='revealed')&&manualAwaitingAiVerdict.length?`<div class="divider"></div><form data-form="ai-judge-verdict"><h3>代录 AI 裁判最终判断</h3><p class="hint">只为未接入模型的 AI 裁判手动转录。</p><label class="field">选择 AI 裁判</label><select name="judge_id">${manualAwaitingAiVerdict.map(j=>`<option value="${j.id}">${esc(j.label)}</option>`).join('')}</select>${aliases.map(a=>`<div class="label-line" style="margin:8px 0"><label>匿名参赛者 ${esc(a)}</label><select name="pred-${esc(a)}" required style="max-width:130px"><option value="">请选择</option><option value="Human">人类</option><option value="AI">AI</option></select></div>`).join('')}<label class="field">AI 裁判判断依据</label><textarea name="evidence" maxlength="5000" required placeholder="复制 AI 裁判的判断依据…"></textarea><label class="field">置信度（0～100）</label><input name="confidence" type="number" min="0" max="100" value="50" required><label class="field">最弱环节（可选）</label><textarea name="weakness" maxlength="5000"></textarea><label class="field">可能误判原因（可选）</label><textarea name="possible_error" maxlength="5000"></textarea><div class="form-actions"><button class="primary" type="submit">锁定该 AI 裁判判断</button></div></form>`:''}
- ${!r.revealed_at&&judges.length?`<div class="divider"></div><h3>独立裁判判决</h3><p class="hint">${judges.filter(j=>j.locked).length}/${judges.length} 位真人及 AI 裁判已锁定。所有已创建轮次的回答必须公布，且每位裁判锁定判断后才能揭晓。</p>${allDone?`<button class="danger" data-action="reveal">全部裁判已锁定 · 正式揭晓</button>`:''}`:''}
- </section>`;
+ const canEdit=r.status==='open'&&!r.verdict_locked&&!judges.some(j=>j.locked);
+ let html='<section class="card compact"><div class="label-line"><h2>AI 裁判管理</h2><span class="pill">'+judges.length+' 位 AI 裁判</span></div>'+
+ '<p class="hint">AI 裁判可绑定你自己的个人模型配置自动出题和判断，也可手动转录。绑定他人配置时，只能看到当前席位的必要摘要，不能读取或编辑对方的个人配置。</p>';
+ if(judges.length){
+  html+=judges.map(j=>'<div class="feed-item"><div class="label-line"><strong>'+esc(j.label)+'</strong><span class="pill '+(j.locked?'ok':'')+'">'+(j.locked?'✓ 已锁定':'未锁定')+'</span></div>'+
+   '<div class="tiny muted">当前绑定：'+esc(bindingLabel(j))+'</div><form data-form="bind-ai-judge-model" data-id="'+j.id+'" class="binding-row"><select name="model_profile_id">'+modelBindingOptions()+'</select><button class="small" type="submit" '+(canEdit?'':'disabled')+'>更新绑定</button></form></div>').join('');
+ }else html+=D('尚无 AI 裁判席。');
+ if(autoPending.length)html+='<div class="divider"></div><p class="hint">'+autoPending.length+' 位模型 AI 裁判尚未提交第 '+r.current_round+' 轮问题。</p><button class="primary" data-action="generate-ai-questions">让模型自动生成本轮问题</button>';
+ if(pendingRound?.status==='draft'&&pendingAis.length){
+  html+='<div class="divider"></div><form data-form="ai-judge-question"><h3>代录 AI 裁判的第 '+r.current_round+' 轮问题</h3><p class="hint">手动转录或配置暂不可用的 AI 裁判，每席每轮只能提交一次。</p><select name="judge_id">'+pendingAis.map(j=>'<option value="'+j.id+'">'+esc(j.label)+'</option>').join('')+'</select><textarea name="text" data-draft="ai-judge-question" maxlength="3000" required placeholder="粘贴 AI 裁判提出的问题原文…">'+myDraft('ai-judge-question')+'</textarea><div class="form-actions"><button class="primary" type="submit">提交 AI 裁判问题</button></div></form>';
+ }
+ if(!r.revealed_at&&!r.verdict_locked){
+  html+='<div class="divider"></div><form data-form="add-ai-judge"><h3>添加 AI 裁判</h3><label class="field">AI 裁判名称</label><input type="text" name="name" required maxlength="60" placeholder="例如 DeepSeek-R1"><label class="field">个人模型配置</label><select name="model_profile_id">'+modelProfileOptions(r)+'</select><div class="form-actions"><button class="primary" type="submit">＋ 添加 AI 裁判</button></div></form>';
+ }
+ if(!r.revealed_at&&r.rounds.every(x=>x.status==='revealed')&&autoAwaiting.length){
+  html+='<div class="divider"></div><p class="hint">'+autoAwaiting.length+' 位模型 AI 裁判尚未完成最终判断。</p><button class="primary" data-action="generate-ai-verdicts">让模型自动完成最终判断</button>';
+ }
+ if(!r.revealed_at&&r.rounds.every(x=>x.status==='revealed')&&manualAwaiting.length){
+  html+='<div class="divider"></div><form data-form="ai-judge-verdict"><h3>代录 AI 裁判最终判断</h3><label class="field">选择 AI 裁判</label><select name="judge_id">'+manualAwaiting.map(j=>'<option value="'+j.id+'">'+esc(j.label)+'</option>').join('')+'</select>'+
+   aliases.map(a=>'<div class="label-line" style="margin:8px 0"><label>匿名参赛者 '+esc(a)+'</label><select name="pred-'+esc(a)+'" required style="max-width:130px"><option value="">请选择</option><option value="Human">人类</option><option value="AI">AI</option></select></div>').join('')+
+   '<label class="field">AI 裁判判断依据</label><textarea name="evidence" maxlength="5000" required placeholder="复制 AI 裁判的判断依据…"></textarea><label class="field">置信度（0～100）</label><input name="confidence" type="number" min="0" max="100" value="50" required><label class="field">最弱环节（可选）</label><textarea name="weakness" maxlength="5000"></textarea><label class="field">可能误判原因（可选）</label><textarea name="possible_error" maxlength="5000"></textarea><div class="form-actions"><button class="primary" type="submit">锁定该 AI 裁判判断</button></div></form>';
+ }
+ return html+'</section>';
+}
+function renderJudgeWorkflowPanel(r){
+ const judges=r.judges||[];if(!judges.length)return '';
+ const pending=r.rounds.find(x=>x.number===r.current_round);
+ const allDone=judges.every(j=>j.locked);
+ const allRoundsDone=r.rounds.length>0&&r.rounds.every(x=>x.status==='revealed');
+ let html='<section class="card compact"><div class="label-line"><h2>统一作答与揭晓</h2><span class="pill">'+judges.filter(j=>j.locked).length+'/'+judges.length+' 位裁判已锁定</span></div>';
+ if(pending?.status==='draft'&&(judges.length||pending.questions?.length))html+='<p class="hint">所有真人 / AI 裁判的问题会统一汇总；由房主在此开启作答。</p><button class="primary" data-action="start-round">开始统一作答</button>';
+ if(!r.revealed_at)html+='<p class="hint">'+(allRoundsDone?'所有轮次已完成。':'仍需完成全部轮次。')+(allDone?'所有裁判均已锁定判断。':'等待所有裁判锁定最终判断。')+'</p>';
+ if(!r.revealed_at&&allDone&&allRoundsDone)html+='<button class="danger" data-action="reveal">全部裁判已锁定 · 正式揭晓</button>';
+ return html+'</section>';
 }
 function renderJudgeRoom(r){
  const n=state.selectedRound||r.current_round;
