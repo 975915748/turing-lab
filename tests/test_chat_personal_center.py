@@ -80,9 +80,10 @@ def lab(tmp_path, monkeypatch):
     with db_open(path) as db:
         p1_id = db.execute('SELECT id FROM users WHERE username=?', ('same_name_one',)).fetchone()[0]
         p2_id = db.execute('SELECT id FROM users WHERE username=?', ('same_name_two',)).fetchone()[0]
+        judge_id = db.execute('SELECT id FROM users WHERE username=?', ('human_judge',)).fetchone()[0]
     return {
         'path': path, 'app': app, 'admin': admin, 'admin2': admin2, 'admin2_id': admin2_id,
-        'p1_id': p1_id, 'p2_id': p2_id,
+        'p1_id': p1_id, 'p2_id': p2_id, 'judge_id': judge_id,
         'p1': p1, 'p2': p2, 'judge': judge, 'outsider': outsider,
         'room_id': room['room_id'], 'base': base, 'code': room['code'],
         'uid1': a['uid'], 'uid2': b['uid'], 'judge_uid': j['uid'],
@@ -426,8 +427,19 @@ def test_migrates_room_profiles_to_original_owner_and_keeps_ai_references(lab):
     profile = make_profile(admin, '迁移旧配置', 'sk-legacy-key')
     ai = post(admin, base + '/ai', {'name': '迁移 AI', 'model_profile_id': profile['id']})
     with db_open(path) as db:
+        stamp='2026-11-24T00:00:00+00:00'
+        db.execute('UPDATE rounds SET question=?,status=?,revealed_at=? WHERE room_id=? AND number=1',
+                   ('旧版已完成问题','revealed',stamp,lab['room_id']))
         db.execute('INSERT INTO answers(round_id,alias,text,submitted_at) VALUES(?,?,?,?)',
-                   (1, ai['alias'], '旧比赛回答', '2026-11-24T00:00:00+00:00'))
+                   (1, ai['alias'], '旧比赛回答', stamp))
+        db.execute('INSERT INTO judge_questions(room_id,round_number,judge_user_id,text,created_at) VALUES(?,?,?,?,?)',
+                   (lab['room_id'],1,lab['judge_id'],'旧版裁判问题',stamp))
+        db.execute('INSERT INTO judge_verdicts(room_id,judge_user_id,verdict_json,locked_at) VALUES(?,?,?,?)',
+                   (lab['room_id'],lab['judge_id'],'{"predictions":{"A":"Human"}}',stamp))
+        db.execute('INSERT INTO packets(room_id,through_round,version,content,sha256,created_at,sent_at) VALUES(?,?,?,?,?,?,?)',
+                   (lab['room_id'],1,1,'旧版匿名快照','legacy-sha',stamp,stamp))
+        db.execute('UPDATE rooms SET status=?,verdict_json=?,verdict_locked_at=?,revealed_at=? WHERE id=?',
+                   ('finished','{"predictions":{"A":"Human"}}',stamp,stamp,lab['room_id']))
     downgrade_profiles_to_room_scope(path, lab['room_id'])
 
     # Re-running application initialization performs the versioned SQLite Backup API migration.
@@ -442,6 +454,11 @@ def test_migrates_room_profiles_to_original_owner_and_keeps_ai_references(lab):
         assert db.execute('SELECT model_profile_id FROM ai_players WHERE room_id=? AND alias=?',
                           (lab['room_id'],ai['alias'])).fetchone()[0] == profile['id']
         assert db.execute('SELECT text FROM answers WHERE round_id=1 AND alias=?',(ai['alias'],)).fetchone()[0] == '旧比赛回答'
+        assert db.execute('SELECT status FROM rounds WHERE room_id=? AND number=1',(lab['room_id'],)).fetchone()[0] == 'revealed'
+        assert db.execute('SELECT text FROM judge_questions WHERE room_id=? AND round_number=1',(lab['room_id'],)).fetchone()[0] == '旧版裁判问题'
+        assert db.execute('SELECT verdict_json FROM judge_verdicts WHERE room_id=?',(lab['room_id'],)).fetchone()[0] == '{"predictions":{"A":"Human"}}'
+        assert db.execute('SELECT content FROM packets WHERE room_id=?',(lab['room_id'],)).fetchone()[0] == '旧版匿名快照'
+        assert db.execute('SELECT status FROM rooms WHERE id=?',(lab['room_id'],)).fetchone()[0] == 'finished'
         assert db.execute('PRAGMA foreign_key_check').fetchall() == []
     backups = list(Path(path).parent.glob(path.stem + '.pre-v1_7-*.sqlite3'))
     assert len(backups) == 1
