@@ -143,6 +143,47 @@ async function screenshot(page, name) {
     await playerPage.reload();
     await playerPage.locator('.chat-card').waitFor();
 
+    // Pause the actual room refresh after a successful chat POST. The send handler must
+    // compare the draft only after that refresh resolves, not before awaiting it.
+    async function chatRefreshDraftProbe(sent, nextDraft) {
+      await playerPage.evaluate(({ roomId }) => {
+        const originalApi = api;
+        const probe = { entered: false, release: null };
+        const gate = new Promise(resolve => { probe.release = resolve; });
+        window.chatRefreshProbe = probe;
+        document.querySelector('#toast').textContent = '';
+        let posted = false;
+        api = async (url, options) => {
+          const result = await originalApi(url, options);
+          if (url === `/api/rooms/${roomId}/chat` && options?.method === 'POST') {
+            posted = true;
+          } else if (posted && url === `/api/rooms/${roomId}` && (!options?.method || options.method === 'GET')) {
+            api = originalApi;
+            probe.entered = true;
+            await gate;
+          }
+          return result;
+        };
+      }, { roomId: rid });
+      const input = playerPage.locator('#roomChatInput');
+      await submit(playerPage, 'chat', { text: sent });
+      await playerPage.waitForFunction(() => window.chatRefreshProbe?.entered === true);
+      try {
+        assert.equal(await input.inputValue(), sent);
+        if (nextDraft !== null) await input.fill(nextDraft);
+      } finally {
+        await playerPage.evaluate(() => window.chatRefreshProbe.release());
+      }
+      await playerPage.waitForFunction(() => document.querySelector('#toast').textContent === '消息已发送');
+      const expected = nextDraft === null ? '' : nextDraft;
+      assert.equal(await playerPage.evaluate(() => state.chatDraft), expected);
+      assert.equal(await input.inputValue(), expected);
+      assert.equal(await playerPage.locator('.chat-body').filter({ hasText: sent }).count(), 1);
+      await playerPage.evaluate(() => { delete window.chatRefreshProbe; });
+    }
+    await chatRefreshDraftProbe('刷新等待期间已发送的消息', '刷新等待期间新输入的未发送草稿');
+    await chatRefreshDraftProbe('正常发送后应清空的原草稿', null);
+
     // Personal center is available from the room, survives refresh, and returns to the same room.
     await page.locator('[data-action="personal-center"]').first().click();
     const profileForm = page.locator('form[data-form="profile-name"]');

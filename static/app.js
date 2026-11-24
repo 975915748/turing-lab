@@ -489,10 +489,10 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
    const requestRoomId=id,requestMatch=state.room?.match_number,requestUid=state.me?.user?.uid,requestCsrf=state.me?.user?.csrf,requestDraft=state.chatDraft;
    await api(`/api/rooms/${requestRoomId}/chat`,{method:'POST',body:{match_number:requestMatch,text:data.text}});
    if(state.roomId!==requestRoomId||state.room?.id!==requestRoomId||state.room?.match_number!==requestMatch||state.room?.status!=='open'||state.me?.user?.uid!==requestUid||state.me?.user?.csrf!==requestCsrf)return;
-   const clearSentDraft=state.chatDraft===requestDraft;
    await refreshRoom();
    if(state.roomId!==requestRoomId||state.room?.id!==requestRoomId||state.room?.match_number!==requestMatch||state.me?.user?.uid!==requestUid||state.me?.user?.csrf!==requestCsrf)return;
-   if(state.room?.status==='open'&&clearSentDraft){state.chatDraft='';const chatInput=$('[data-form="chat"] [name="text"]');if(chatInput)chatInput.value='';}
+   // The user may have typed another message while the authoritative refresh was pending.
+   if(state.room?.status==='open'&&state.chatDraft===requestDraft){state.chatDraft='';const chatInput=$('[data-form="chat"] [name="text"]');if(chatInput)chatInput.value='';}
    toast('消息已发送');return;
   }
   if(type==='bind-ai-player-model'||type==='bind-ai-judge-model'){
