@@ -78,11 +78,12 @@ async function logout(page) {
       const room = await (await context.request.get(site + base)).json();
       assert(room.invite_code);
 
-      await page.locator('[data-action="room-view"][data-view="judges"]').click();
-      await page.locator('form[data-form="add-ai-judge"]').waitFor();
-      await page.locator('[data-action="room-view"][data-view="judges"]').waitFor();
+      await page.locator('[data-action="room-view"][data-view="human-judges"]').click();
+      await page.locator('h2', { hasText: '真人裁判管理' }).waitFor();
       await page.locator('form[data-form="add-judge"]').count().then(n => assert.equal(n, 0));
       await page.locator('form[data-form="assign-judge"]').count().then(n => assert.equal(n, 0));
+      await page.locator('[data-action="room-view"][data-view="ai-judges"]').click();
+      await page.locator('form[data-form="add-ai-judge"]').waitFor();
       await page.locator('form[data-form="add-ai-judge"] [name="name"]').fill('保留的手动 AI 裁判');
       await clickSubmit(page, 'add-ai-judge');
       await page.locator('.feed-item').filter({ hasText: '保留的手动 AI 裁判' }).waitFor();
@@ -115,10 +116,11 @@ async function logout(page) {
 
       // Host sees the roster update; the self-service account is not exposed to judges.
       await page.reload();
-      await page.locator('[data-action="room-view"][data-view="judges"]').click();
+      await page.locator('[data-action="room-view"][data-view="human-judges"]').click();
       await page.getByText('真人裁判 · TL00000002', { exact: true }).waitFor();
       assert.equal(await page.locator('form[data-form="add-judge"]').count(), 0);
       assert.equal(await page.locator('form[data-form="assign-judge"]').count(), 0);
+      await page.locator('[data-action="room-view"][data-view="ai-judges"]').click();
       assert.equal(await page.locator('form[data-form="add-ai-judge"]').count(), 1);
 
       // A repeated join from the same UID is idempotent.
@@ -131,8 +133,10 @@ async function logout(page) {
       const hostRoom = await (await context.request.get(site + base)).json();
       assert.equal(hostRoom.judges.filter(j => j.kind === 'human').length, 1);
 
-      // Model configuration copy and labels are simplified without changing parameter values.
-      await page.locator('[data-action="room-view"][data-view="models"]').click();
+      // Personal center owns the profile, password, and model configuration sections.
+      await page.locator('[data-action="personal-center"]').first().click();
+      await page.locator('form[data-form="profile-name"]').waitFor();
+      await page.locator('form[data-form="personal-model-create"]').waitFor();
       await page.getByText('采样温度', { exact: true }).waitFor();
       const modelText = await page.locator('#app').innerText();
       assert.equal(modelText.includes('Temperature'), false);
@@ -140,10 +144,10 @@ async function logout(page) {
       assert.equal(modelText.includes('MODEL_CREDENTIAL_KEY'), false);
       assert.equal(modelText.includes('Fernet.generate_key'), false);
       assert.equal(modelText.includes('Railway'), false);
-      const modelState = await (await context.request.get(site + base)).json();
+      const modelState = await (await context.request.get(site + '/api/me/models')).json();
       if (!modelState.model_api_enabled) {
         await page.getByText('模型 API 暂不可用，请联系管理员。', { exact: true }).waitFor();
-        assert.equal(await page.locator('form[data-form="model-profile"] button[type="submit"]').isDisabled(), true);
+        assert.equal(await page.locator('form[data-form="personal-model-create"] button[type="submit"]').isDisabled(), true);
       }
 
       // Check both themes and the 390px layout in a real browser.
