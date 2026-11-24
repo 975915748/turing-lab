@@ -74,8 +74,12 @@ def lab(tmp_path, monkeypatch):
     j = register(judge, 'human_judge', '真人裁判')
     register(outsider, 'outsider', '房间外用户')
     post(judge, '/api/join', {'code': room['code'], 'role': 'judge'})
+    with db_open(path) as db:
+        p1_id = db.execute('SELECT id FROM users WHERE username=?', ('same_name_one',)).fetchone()[0]
+        p2_id = db.execute('SELECT id FROM users WHERE username=?', ('same_name_two',)).fetchone()[0]
     return {
         'path': path, 'app': app, 'admin': admin, 'admin2': admin2, 'admin2_id': admin2_id,
+        'p1_id': p1_id, 'p2_id': p2_id,
         'p1': p1, 'p2': p2, 'judge': judge, 'outsider': outsider,
         'room_id': room['room_id'], 'base': base, 'code': room['code'],
         'uid1': a['uid'], 'uid2': b['uid'], 'judge_uid': j['uid'],
@@ -159,7 +163,7 @@ def test_public_chat_permissions_identity_and_judge_websocket_isolation(lab):
     # Removed members and deleted accounts lose access immediately.
     with db_open(lab['path']) as db:
         db.execute('UPDATE members SET removed_at=? WHERE room_id=? AND user_id=?',
-                   ('2026-11-24T01:00:00+00:00', lab['room_id'], 3))
+                   ('2026-11-24T01:00:00+00:00', lab['room_id'], lab['p2_id']))
     assert p2.get(base + '/chat?match_number=1').status_code == 403
     assert len(p1.get(base + '/chat?match_number=1').json()['messages']) == 4
     delete(admin, f"/api/admin/users/{lab['uid1']}", {'confirm': True})
@@ -229,6 +233,8 @@ def test_chat_is_cleared_on_successful_reveal_but_not_failed_reveal(lab):
 def test_personal_name_update_and_password_rotation_revoke_every_session(lab):
     p1, base = lab['p1'], lab['base']
     original = p1.get('/api/me').json()['user']
+    with db_open(lab['path']) as db:
+        db.execute('UPDATE users SET legacy_username=? WHERE id=?', ('legacy_player_one', lab['p1_id']))
     p1_second = TestClient(lab['app'])
     post(p1_second, '/api/login', {'uid': original['uid'], 'password': 'player-password'})
 
@@ -238,10 +244,11 @@ def test_personal_name_update_and_password_rotation_revoke_every_session(lab):
     assert p1.get('/api/me').json()['user']['username'] == original['username']
     assert p1.get(base).json()['humans'][0]['name'] == '改名后的玩家'
     with db_open(lab['path']) as db:
-        row = db.execute('SELECT username,legacy_username FROM users WHERE id=2').fetchone()
+        row = db.execute('SELECT username,legacy_username FROM users WHERE id=?',(lab['p1_id'],)).fetchone()
         assert row['username'] == original['username']
+        assert row['legacy_username'] == 'legacy_player_one'
     legacy_login = TestClient(lab['app'])
-    post(legacy_login, '/api/login', {'username': original['username'], 'password': 'player-password'})
+    post(legacy_login, '/api/login', {'username': 'legacy_player_one', 'password': 'player-password'})
     assert legacy_login.get('/api/me').json()['user']['uid'] == original['uid']
 
     assert p1.post('/api/me/password', json={
@@ -297,6 +304,7 @@ def test_personal_model_ownership_room_binding_and_cross_room_reuse(lab):
     p1, admin2, p2 = lab['p1'], lab['admin2'], lab['p2']
     room_a = post(p1, '/api/rooms', {'title': '配置所有权 A'})
     room_b = post(p1, '/api/rooms', {'title': '配置所有权 B'})
+    post(p2, '/api/join', {'code': room_a['code']})
     base_a, base_b = f"/api/rooms/{room_a['room_id']}", f"/api/rooms/{room_b['room_id']}"
     profile_a = make_profile(p1, 'A 的个人配置', 'sk-user-a')
     profile_admin = make_profile(admin2, '管理员自己的配置', 'sk-admin-two')
@@ -374,7 +382,7 @@ def test_deleted_profile_owner_is_retained_but_cannot_trigger_new_model_calls(la
     with db_open(lab['path']) as db:
         row = db.execute('SELECT owner_user_id,api_key_encrypted FROM model_profiles WHERE id=?',
                          (profile['id'],)).fetchone()
-        assert row['owner_user_id'] == 2 and row['api_key_encrypted']
+        assert row['owner_user_id'] == lab['p1_id'] and row['api_key_encrypted']
     state = admin2.get(base).json()
     seat = next(a for a in state['ais'] if a['alias'] == ai['alias'])
     assert seat['model_profile']['credential_status'] == 'owner_unavailable'
