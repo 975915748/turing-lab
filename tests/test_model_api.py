@@ -13,8 +13,9 @@ from fastapi.testclient import TestClient
 
 import app as app_module
 import model_api
+import railway_start
 from app import create_app, db_open, seed_admin
-from model_api import ModelAPIError
+from model_api import ModelAPIError, has_valid_credential_key, validate_credential_key
 
 
 def post(client, path, body=None, expected=200):
@@ -155,6 +156,153 @@ def test_models_answer_ask_and_judge_without_manual_transcription(model_lab):
     assert len(final['verdicts']) == 1
     assert final['verdicts'][0]['judge'] == 'API 独立裁判'
     assert final['verdicts'][0]['predictions'] == {'A': 'Human', 'B': 'Human', 'C': 'AI'}
+
+
+def test_credential_key_validation_handles_missing_invalid_and_valid_values(monkeypatch):
+    monkeypatch.delenv('MODEL_CREDENTIAL_KEY', raising=False)
+    assert validate_credential_key() is False
+    assert has_valid_credential_key() is False
+    with pytest.raises(ModelAPIError):
+        validate_credential_key(required=True)
+
+    invalid_key = 'not-a-valid-fernet-key'
+    monkeypatch.setenv('MODEL_CREDENTIAL_KEY', invalid_key)
+    with pytest.raises(ModelAPIError) as error:
+        validate_credential_key()
+    assert invalid_key not in str(error.value)
+    assert has_valid_credential_key() is False
+
+    valid_key = Fernet.generate_key().decode('ascii')
+    monkeypatch.setenv('MODEL_CREDENTIAL_KEY', valid_key)
+    assert validate_credential_key() is True
+    assert has_valid_credential_key() is True
+
+
+def test_decrypt_api_key_rejects_a_different_valid_fernet_key_without_leaking_plaintext(monkeypatch):
+    monkeypatch.setenv('MODEL_CREDENTIAL_KEY', Fernet.generate_key().decode('ascii'))
+    encrypted = model_api.encrypt_api_key('sk-sensitive-value')
+    monkeypatch.setenv('MODEL_CREDENTIAL_KEY', Fernet.generate_key().decode('ascii'))
+
+    with pytest.raises(ModelAPIError) as error:
+        model_api.decrypt_api_key(encrypted)
+    assert '无法解密' in str(error.value)
+    assert 'sk-sensitive-value' not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ('replacement', 'expected_status'),
+    [('missing', 'key_missing'), ('different', 'cannot_decrypt')],
+)
+def test_railway_start_keeps_website_available_when_saved_keys_need_repair(
+        model_lab, monkeypatch, capsys, replacement, expected_status):
+    monkeypatch.setenv('DB_PATH', str(model_lab['path']))
+    if replacement == 'missing':
+        monkeypatch.delenv('MODEL_CREDENTIAL_KEY', raising=False)
+    else:
+        monkeypatch.setenv('MODEL_CREDENTIAL_KEY', Fernet.generate_key().decode('ascii'))
+
+    launched = []
+    monkeypatch.setattr(railway_start.os, 'execv', lambda *args: launched.append(args))
+    railway_start.main()
+
+    assert len(launched) == 1
+    assert 'MODEL CREDENTIAL RECOVERY REQUIRED' in capsys.readouterr().err
+    issues = railway_start.validate_stored_model_credentials(model_lab['path'])
+    assert issues[0]['status'] == expected_status
+    assert issues[0]['profile_id'] == model_lab['profile_id']
+
+
+@pytest.mark.parametrize('key_state', ['valid', 'missing'])
+def test_empty_model_ciphertext_is_detected_without_blocking_website(
+        model_lab, monkeypatch, capsys, key_state):
+    with db_open(model_lab['path']) as db:
+        db.execute(
+            'UPDATE model_profiles SET api_key_encrypted=? WHERE id=?',
+            ('', model_lab['profile_id']),
+        )
+    monkeypatch.setenv('DB_PATH', str(model_lab['path']))
+    if key_state == 'missing':
+        monkeypatch.delenv('MODEL_CREDENTIAL_KEY', raising=False)
+
+    launched = []
+    monkeypatch.setattr(railway_start.os, 'execv', lambda *args: launched.append(args))
+    railway_start.main()
+
+    assert len(launched) == 1
+    assert 'status=empty_ciphertext' in capsys.readouterr().err
+    issues = railway_start.validate_stored_model_credentials(model_lab['path'])
+    assert issues[0]['status'] == 'empty_ciphertext'
+
+
+def test_damaged_ciphertext_is_reported_but_does_not_block_manual_site_access(
+        model_lab, monkeypatch, capsys):
+    with db_open(model_lab['path']) as db:
+        db.execute(
+            'UPDATE model_profiles SET api_key_encrypted=? WHERE id=?',
+            ('not-a-valid-fernet-token', model_lab['profile_id']),
+        )
+    monkeypatch.setenv('DB_PATH', str(model_lab['path']))
+    launched = []
+    monkeypatch.setattr(railway_start.os, 'execv', lambda *args: launched.append(args))
+
+    railway_start.main()
+
+    assert len(launched) == 1
+    assert 'status=cannot_decrypt' in capsys.readouterr().err
+
+
+def test_broken_model_profile_can_be_repaired_without_changing_match_data(model_lab):
+    admin, base, profile_id, path = (
+        model_lab['admin'], model_lab['base'], model_lab['profile_id'], model_lab['path']
+    )
+    with db_open(path) as db:
+        db.execute(
+            "UPDATE model_profiles SET api_key_encrypted='' WHERE id=?",
+            (profile_id,),
+        )
+        before = {
+            'rooms': db.execute('SELECT COUNT(*) FROM rooms').fetchone()[0],
+            'users': db.execute('SELECT COUNT(*) FROM users').fetchone()[0],
+            'members': db.execute('SELECT COUNT(*) FROM members').fetchone()[0],
+        }
+
+    state = admin.get(base).json()
+    assert state['model_profiles'][0]['credential_status'] == 'missing'
+    payload = dict(model_lab['profile_body'])
+    payload['api_key'] = 'sk-recovered-provider-key'
+    me = admin.get('/api/me').json()
+    response = admin.put(
+        base + f'/models/{profile_id}',
+        json=payload,
+        headers={'X-CSRF-Token': me['user']['csrf']},
+    )
+    assert response.status_code == 200, response.text
+
+    with db_open(path) as db:
+        row = db.execute(
+            'SELECT api_key_encrypted FROM model_profiles WHERE id=?', (profile_id,)
+        ).fetchone()
+        after = {
+            'rooms': db.execute('SELECT COUNT(*) FROM rooms').fetchone()[0],
+            'users': db.execute('SELECT COUNT(*) FROM users').fetchone()[0],
+            'members': db.execute('SELECT COUNT(*) FROM members').fetchone()[0],
+        }
+    assert model_api.decrypt_api_key(row['api_key_encrypted']) == 'sk-recovered-provider-key'
+    assert after == before
+
+
+def test_railway_start_allows_manual_mode_without_model_profiles(tmp_path, monkeypatch):
+    path = tmp_path / 'manual-mode.sqlite3'
+    seed_admin(path, 'manual_admin', '手动模式主持人', 'manual-admin-password')
+    monkeypatch.setenv('DB_PATH', str(path))
+    monkeypatch.delenv('MODEL_CREDENTIAL_KEY', raising=False)
+
+    launched = []
+    monkeypatch.setattr(railway_start.os, 'execv', lambda *args: launched.append(args))
+    railway_start.main()
+
+    assert len(launched) == 1
+    assert launched[0][1][2:5] == ['uvicorn', 'app:app', '--host']
 
 
 def test_model_api_encryption_and_dns_pinning_preserves_tls_hostname(monkeypatch):

@@ -1,15 +1,72 @@
-"""Start web server after safely creating the first admin account (once)."""
+"""Start web server after validating persisted secrets and the first admin account."""
 import os
 import re
 import sys
 from pathlib import Path
 
 from app import db_open, init_db, seed_admin
+from model_api import ModelAPIError, decrypt_api_key, validate_credential_key
+
+
+def validate_stored_model_credentials(path):
+    """Inspect every saved model credential and return repairable, non-secret diagnostics."""
+    with db_open(path) as db:
+        rows = db.execute(
+            "SELECT id, room_id, api_key_encrypted FROM model_profiles ORDER BY id"
+        ).fetchall()
+    if not rows:
+        return []
+
+    try:
+        key_valid = validate_credential_key()
+        key_status = None if key_valid else 'key_missing'
+    except ModelAPIError:
+        key_valid = False
+        key_status = 'key_invalid'
+
+    issues = []
+    for row in rows:
+        token = row['api_key_encrypted']
+        if not token:
+            status = 'empty_ciphertext'
+        elif not key_valid:
+            status = key_status
+        else:
+            try:
+                decrypt_api_key(token)
+                continue
+            except ModelAPIError:
+                status = 'cannot_decrypt'
+        issues.append({
+            'profile_id': row['id'],
+            'room_id': row['room_id'],
+            'status': status,
+        })
+    return issues
 
 
 def main():
     path = Path(os.environ.get('DB_PATH', '/app/data/game.sqlite3'))
     init_db(path)
+    credential_issues = validate_stored_model_credentials(path)
+    if credential_issues:
+        print(
+            'MODEL CREDENTIAL RECOVERY REQUIRED: the website will start, but affected '
+            'model API profiles cannot be used until their API Keys are repaired.',
+            file=sys.stderr,
+        )
+        for issue in credential_issues:
+            print(
+                f"  profile_id={issue['profile_id']} room_id={issue['room_id']} "
+                f"status={issue['status']}",
+                file=sys.stderr,
+            )
+        print(
+            'Use the room Model API page to replace affected provider API Keys. '
+            'If MODEL_CREDENTIAL_KEY was lost, set a new valid Fernet key first; '
+            'all previously encrypted API Keys must then be entered again.',
+            file=sys.stderr,
+        )
     with db_open(path) as db:
         exists = db.execute('SELECT 1 FROM users WHERE is_admin=1').fetchone() is not None
     if not exists:

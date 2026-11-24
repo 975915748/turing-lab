@@ -22,7 +22,8 @@ from pydantic import BaseModel, Field
 from starlette.staticfiles import StaticFiles
 
 from model_api import (ModelAPIError, chat_completion, decrypt_api_key,
-                       encrypt_api_key, parse_json_object, validate_base_url)
+                       encrypt_api_key, has_valid_credential_key, parse_json_object,
+                       validate_base_url)
 
 ROOT = Path(__file__).resolve().parent
 DATABASE = ROOT / 'data' / 'game.sqlite3'
@@ -693,10 +694,25 @@ def public_room(db, room, user, mine):
     ai_edits = {}
     model_profiles = []
     if manager:
-        model_profiles = [dict(row, has_api_key=bool(row['has_api_key'])) for row in db.execute(
+        for row in db.execute(
             '''SELECT id,name,base_url,model,temperature,max_tokens,timeout_seconds,
-                      CASE WHEN api_key_encrypted<>'' THEN 1 ELSE 0 END AS has_api_key
-               FROM model_profiles WHERE room_id=? ORDER BY id''', (room['id'],))]
+                      api_key_encrypted
+               FROM model_profiles WHERE room_id=? ORDER BY id''', (room['id'],)
+        ):
+            profile = dict(row)
+            encrypted = profile.pop('api_key_encrypted')
+            profile['has_api_key'] = bool(encrypted)
+            if not encrypted:
+                profile['credential_status'] = 'missing'
+            elif not has_valid_credential_key():
+                profile['credential_status'] = 'key_unavailable'
+            else:
+                try:
+                    decrypt_api_key(encrypted)
+                    profile['credential_status'] = 'ok'
+                except ModelAPIError:
+                    profile['credential_status'] = 'needs_repair'
+            model_profiles.append(profile)
     if manager and not room['records_deleted']:
         now_round = current_round(db,room)
         ai_edits = {row['alias']:row['text'] for row in db.execute('''SELECT a.alias,a.text FROM answers a
@@ -723,7 +739,7 @@ def public_room(db, room, user, mine):
                       [{'kind':r['kind'],'label':r['label'],'locked':bool(r['locked'])} for r in judges],
             'rounds':body,'suggestions':[dict(s) for s in suggestions],
             'ai_edits':ai_edits,'packets':[dict(p) for p in pkts],
-            'model_profiles':model_profiles,'model_api_enabled':bool(os.getenv('MODEL_CREDENTIAL_KEY'))}
+            'model_profiles':model_profiles,'model_api_enabled':has_valid_credential_key()}
 
 
 def anonymous_match_packet(db, room_id, through_round=None):

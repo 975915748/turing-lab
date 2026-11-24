@@ -194,17 +194,24 @@ function renderAdminRoomNav(r,finished){
 
 function renderModelRoom(r){
  const profiles=r.model_profiles||[];
- const formFields=(p={})=>`<label class="field">配置名称</label><input name="name" maxlength="60" required value="${esc(p.name||'')}" placeholder="例如 DeepSeek 主力">
+ const formFields=(p={})=>{
+  const status=p.credential_status||'missing';
+  const needsNewKey=!!p.id&&status!=='ok';
+  const keyLabel=!p.id?'':status==='needs_repair'?'（无法解密，必须重新录入）':status==='key_unavailable'?'（服务器密钥不可用）':status==='missing'?'（缺少 API Key）':p.has_api_key?'（已保存，留空保持不变）':'';
+  const keyPlaceholder=!p.id?'填写 API Key':needsNewKey?'请重新填写 API Key':p.has_api_key?'已加密保存；不修改时留空':'填写 API Key';
+  const keyRequired=!p.id||needsNewKey||!p.has_api_key;
+  return `<label class="field">配置名称</label><input name="name" maxlength="60" required value="${esc(p.name||'')}" placeholder="例如 DeepSeek 主力">
  <label class="field">Base URL</label><input name="base_url" maxlength="500" required value="${esc(p.base_url||'https://api.openai.com/v1')}" placeholder="https://api.openai.com/v1">
  <label class="field">模型名称</label><input name="model" maxlength="120" required value="${esc(p.model||'')}" placeholder="例如 gpt-4.1-mini">
- <label class="field">API Key ${p.has_api_key?'（已保存，留空保持不变）':''}</label><input name="api_key" type="password" maxlength="2000" autocomplete="new-password" ${p.has_api_key?'placeholder="已加密保存；不修改时留空"':'required placeholder="填写 API Key"'}>
+ <label class="field">API Key ${keyLabel}</label><input name="api_key" type="password" maxlength="2000" autocomplete="new-password" ${keyRequired?'required':''} placeholder="${keyPlaceholder}">
  <div class="grid2"><div><label class="field">采样温度</label><input name="temperature" type="number" min="0" max="2" step="0.1" value="${p.temperature??0.7}" required></div><div><label class="field">最大输出 Token</label><input name="max_tokens" type="number" min="64" max="8192" step="1" value="${p.max_tokens??2048}" required></div></div>
  <label class="field">请求超时（秒）</label><input name="timeout_seconds" type="number" min="10" max="120" step="1" value="${p.timeout_seconds??60}" required>`;
+ };
  app.innerHTML=`<div class="pagehead"><div><div class="overline">MODEL API / ROOM ${r.id}</div><h1>模型 API 接入</h1><p class="muted">为本房间配置 OpenAI 兼容接口，并将配置分配给 AI 参赛者或 AI 裁判。</p></div><button data-action="room-view" data-view="match">← 返回比赛现场</button></div>
  ${r.model_api_enabled?'':`<section class="notice"><strong>模型 API 暂不可用，请联系管理员。</strong></section>`}
  <section class="card"><h2>新增模型配置</h2><p class="hint">支持标准 OpenAI Chat Completions 接口。</p><form data-form="model-profile">${formFields()}<div class="form-actions"><button class="primary" type="submit" ${r.model_api_enabled?'':'disabled'}>保存模型配置</button></div></form></section>
  <section class="spaced"><div class="label-line"><h2>已有配置</h2><span class="pill">${profiles.length} 个</span></div>
- ${profiles.length?profiles.map(p=>`<section class="card flat"><div class="label-line"><strong>${esc(p.name)}</strong><span class="pill">${p.has_api_key?'API Key 已保存':'缺少 API Key'}</span></div><form data-form="edit-model-profile" data-id="${p.id}">${formFields(p)}<div class="form-actions"><button type="submit" ${r.model_api_enabled?"":"disabled"}>保存修改</button></div></form><div class="buttonrow spaced"><button class="small" data-action="test-model" data-id="${p.id}">测试连接</button><button class="small danger" data-action="delete-model" data-id="${p.id}">删除配置</button></div></section>`).join(''):D('还没有模型配置。添加配置后，就能在 AI 参赛位和 AI 裁判中选择它。')}
+ ${profiles.length?profiles.map(p=>`<section class="card flat"><div class="label-line"><strong>${esc(p.name)}</strong><span class="pill">${p.credential_status==='needs_repair'?'需要重新录入 API Key':p.credential_status==='key_unavailable'?'服务器密钥不可用':p.credential_status==='missing'?'缺少 API Key':'API Key 已验证'}</span></div>${p.credential_status==='needs_repair'?'<p class="hint">当前密钥无法解密此配置。请重新填写服务商 API Key 并保存；房间和比赛记录不会受到影响。</p>':''}<form data-form="edit-model-profile" data-id="${p.id}">${formFields(p)}<div class="form-actions"><button type="submit" ${r.model_api_enabled?"":"disabled"}>保存修改</button></div></form><div class="buttonrow spaced"><button class="small" data-action="test-model" data-id="${p.id}">测试连接</button><button class="small danger" data-action="delete-model" data-id="${p.id}">删除配置</button></div></section>`).join(''):D('还没有模型配置。添加配置后，就能在 AI 参赛位和 AI 裁判中选择它。')}
  </section>${r.model_api_enabled?`<section class="notice spaced"><strong>密钥与连接安全</strong><p class="hint">API Key 在服务器端使用 Fernet 加密后写入 SQLite；浏览器只会收到“是否已保存”的状态，不会收到密钥或密文。仅本房间房主和全站管理员可以管理配置。当前仅允许 HTTPS 公网 Base URL，拒绝本机和局域网地址。</p></section>`:""}`;
 }
 function renderRoom(){
