@@ -34,6 +34,10 @@ MAX_JUDGES = 12
 DURATION_DAYS = 7
 
 
+class ModelCallCancelled(Exception):
+    """Queued model work became unauthorized or stale before the provider call began."""
+
+
 def utcnow():
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
@@ -539,6 +543,25 @@ def model_call_actor_valid(db, room_id, user_id, session_hash):
 def model_profile_owner_active(db, profile_id):
     return bool(db.execute('''SELECT 1 FROM model_profiles mp JOIN users u ON u.id=mp.owner_user_id
         WHERE mp.id=? AND mp.ownership_issue IS NULL AND u.deleted_at IS NULL''',(profile_id,)).fetchone())
+
+
+def model_profile_snapshot_valid(db, profile):
+    row=db.execute('''SELECT mp.*,u.deleted_at AS owner_deleted_at FROM model_profiles mp
+        LEFT JOIN users u ON u.id=mp.owner_user_id WHERE mp.id=?''',(profile['id'],)).fetchone()
+    if not row:
+        return False
+    current=dict(row)
+    if model_profile_credential_status(current)!='ok':
+        return False
+    fields=('owner_user_id','base_url','model','api_key_encrypted','temperature','max_tokens','timeout_seconds','updated_at')
+    return all(current.get(field)==profile.get(field) for field in fields)
+
+
+def model_actor_session_valid(db, user_id, session_hash):
+    return bool(db.execute('''SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id
+        WHERE s.token_hash=? AND s.user_id=? AND s.expires_at>? AND u.deleted_at IS NULL''',
+        (session_hash,user_id,utcnow())).fetchone())
+
 
 def require_chat_access(db, room_id, user):
     room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
@@ -1116,12 +1139,14 @@ def create_app(db_path=None):
     app = FastAPI(title='图灵测试多人主持台', docs_url=None, redoc_url=None)
     app.state.path = path
     app.state.hub = Hub(path)
-    async def model_call(profile, messages, api_key):
+    async def model_call(profile, messages, api_key, preflight=None):
         loop = asyncio.get_running_loop()
         if getattr(app.state, 'model_semaphore_loop', None) is not loop:
             app.state.model_semaphore = asyncio.Semaphore(4)
             app.state.model_semaphore_loop = loop
         async with app.state.model_semaphore:
+            if preflight is not None and not preflight():
+                raise ModelCallCancelled()
             return await chat_completion(profile, messages, api_key)
 
     app.mount('/static', StaticFiles(directory=ROOT/'static'), name='static')
