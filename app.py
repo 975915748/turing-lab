@@ -527,6 +527,19 @@ def require_owned_model_profile(db, profile_id, user_id):
     return profile
 
 
+
+def model_call_actor_valid(db, room_id, user_id, session_hash):
+    actor=db.execute('''SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id
+        WHERE s.token_hash=? AND s.user_id=? AND s.expires_at>? AND u.deleted_at IS NULL''',
+        (session_hash,user_id,utcnow())).fetchone()
+    room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
+    return bool(actor and room and can_manage_room(room,dict(actor)))
+
+
+def model_profile_owner_active(db, profile_id):
+    return bool(db.execute('''SELECT 1 FROM model_profiles mp JOIN users u ON u.id=mp.owner_user_id
+        WHERE mp.id=? AND mp.ownership_issue IS NULL AND u.deleted_at IS NULL''',(profile_id,)).fetchone())
+
 def require_chat_access(db, room_id, user):
     room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
     if not room:
@@ -1756,20 +1769,36 @@ def create_app(db_path=None):
             check_judge_registration(db,room,-1)
             label=norm_text(body.name,60)
             if body.model_profile_id is not None:
-                profile=db.execute('SELECT api_key_encrypted FROM model_profiles WHERE id=? AND room_id=?',
-                                   (body.model_profile_id,room_id)).fetchone()
-                if not profile:
-                    raise HTTPException(404,'模型配置不存在。')
-                try:
-                    decrypt_api_key(profile['api_key_encrypted'])
-                except ModelAPIError as exc:
-                    raise HTTPException(503,str(exc))
+                require_owned_model_profile(db,body.model_profile_id,u['id'])
             cur=db.execute('INSERT INTO ai_judges(room_id,label,model_profile_id,created_at) VALUES(?,?,?,?)',
                            (room_id,label,body.model_profile_id,utcnow()))
             log_event(db,room_id,room['current_round'],'ai_judge_added','管理员','已添加 AI 裁判席')
             jid=cur.lastrowid
         await app.state.hub.notify(room_id,'ai_judge_added')
         return {'ok':True,'id':jid,'label':label}
+
+    @app.put('/api/rooms/{room_id}/ai-judges/{judge_id}/model')
+    async def bind_ai_judge_model(room_id:int,judge_id:int,body:ModelBindingData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            if not db.execute('SELECT 1 FROM ai_judges WHERE room_id=? AND id=?',(room_id,judge_id)).fetchone():
+                raise HTTPException(404,'AI 裁判席不存在。')
+            if body.keep_existing:
+                return {'ok':True,'unchanged':True}
+            if room['status']!='open' or room['verdict_locked_at'] or db.execute(
+                'SELECT 1 FROM judge_verdicts WHERE room_id=? LIMIT 1',(room_id,)).fetchone() or db.execute(
+                'SELECT 1 FROM ai_judge_verdicts WHERE room_id=? LIMIT 1',(room_id,)).fetchone():
+                raise HTTPException(409,'比赛结束或裁判已锁定判断，不能更换模型绑定。')
+            if db.execute('SELECT 1 FROM ai_judge_verdicts WHERE room_id=? AND ai_judge_id=?',
+                          (room_id,judge_id)).fetchone():
+                raise HTTPException(409,'此 AI 裁判已锁定判断，不能更换模型绑定。')
+            if body.model_profile_id is not None:
+                require_owned_model_profile(db,body.model_profile_id,u['id'])
+            db.execute('UPDATE ai_judges SET model_profile_id=? WHERE room_id=? AND id=?',
+                       (body.model_profile_id,room_id,judge_id))
+        await app.state.hub.notify(room_id,'model_profile_changed')
+        return {'ok':True}
 
     @app.post('/api/rooms/{room_id}/ai-judges/questions/generate')
     async def generate_ai_judge_questions(room_id:int,request:Request):
@@ -1785,10 +1814,13 @@ def create_app(db_path=None):
             if len(roster)<2:
                 raise HTTPException(409,'至少需要两名参赛者。')
             rows=db.execute('''SELECT j.id AS judge_id,j.label,mp.* FROM ai_judges j
-                JOIN model_profiles mp ON mp.id=j.model_profile_id
+                JOIN model_profiles mp ON mp.id=j.model_profile_id AND mp.ownership_issue IS NULL
+                JOIN users profile_owner ON profile_owner.id=mp.owner_user_id AND profile_owner.deleted_at IS NULL
                 LEFT JOIN ai_judge_questions q ON q.room_id=j.room_id AND q.round_number=? AND q.ai_judge_id=j.id
                 WHERE j.room_id=? AND q.id IS NULL ORDER BY j.id''',(rnd['number'],room_id)).fetchall()
             match_number=room['match_number']
+            actor_id=u['id']
+            session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
             round_number=rnd['number']
             history=anonymous_match_packet(db,room_id,round_number-1)
             profiles=[dict(row) for row in rows]
@@ -1809,6 +1841,12 @@ def create_app(db_path=None):
                 with connection(immediate=True) as db:
                     current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
                     if not current or current['match_number']!=match_number or current['status']!='open':
+                        return {'judge_id':judge_id,'status':'skipped'}
+                    if not model_call_actor_valid(db,room_id,actor_id,session_hash) or not model_profile_owner_active(db,profile['id']):
+                        return {'judge_id':judge_id,'status':'skipped'}
+                    binding=db.execute('SELECT model_profile_id FROM ai_judges WHERE room_id=? AND id=?',
+                                       (room_id,judge_id)).fetchone()
+                    if not binding or binding['model_profile_id']!=profile['id']:
                         return {'judge_id':judge_id,'status':'skipped'}
                     current_rnd=current_round(db,current)
                     if current_rnd['number']!=round_number or current_rnd['status']!='draft':
@@ -1923,14 +1961,7 @@ def create_app(db_path=None):
             ensure_roster_unlocked(db,room)
             alias=new_alias(db,room_id)
             if body.model_profile_id is not None:
-                profile=db.execute('SELECT api_key_encrypted FROM model_profiles WHERE id=? AND room_id=?',
-                                   (body.model_profile_id,room_id)).fetchone()
-                if not profile:
-                    raise HTTPException(404,'模型配置不存在。')
-                try:
-                    decrypt_api_key(profile['api_key_encrypted'])
-                except ModelAPIError as exc:
-                    raise HTTPException(503,str(exc))
+                require_owned_model_profile(db,body.model_profile_id,u['id'])
             db.execute('INSERT INTO ai_players(room_id,alias,name,model_profile_id) VALUES(?,?,?,?)',
                        (room_id,alias,norm_text(body.name,60),body.model_profile_id))
             log_event(db,room_id,1,'ai_joined',alias,'AI 参赛位已添加')
@@ -2025,10 +2056,13 @@ def create_app(db_path=None):
             if rnd['status']!='collecting':
                 raise HTTPException(409,'只有本轮正在收集回答时才能生成 AI 回复。')
             rows=db.execute('''SELECT ai.alias,ai.name,mp.* FROM ai_players ai
-                JOIN model_profiles mp ON mp.id=ai.model_profile_id
+                JOIN model_profiles mp ON mp.id=ai.model_profile_id AND mp.ownership_issue IS NULL
+                JOIN users profile_owner ON profile_owner.id=mp.owner_user_id AND profile_owner.deleted_at IS NULL
                 LEFT JOIN answers a ON a.round_id=? AND a.alias=ai.alias
                 WHERE ai.room_id=? AND a.id IS NULL ORDER BY ai.alias''',(rnd['id'],room_id)).fetchall()
             match_number=room['match_number']
+            actor_id=u['id']
+            session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
             round_number=rnd['number']
             question=rnd['question']
             profiles=[dict(row) for row in rows]
@@ -2049,6 +2083,12 @@ def create_app(db_path=None):
                 with connection(immediate=True) as db:
                     current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
                     if not current or current['match_number']!=match_number or current['status']!='open':
+                        return {'alias':alias,'status':'skipped'}
+                    if not model_call_actor_valid(db,room_id,actor_id,session_hash) or not model_profile_owner_active(db,profile['id']):
+                        return {'alias':alias,'status':'skipped'}
+                    binding=db.execute('SELECT model_profile_id FROM ai_players WHERE room_id=? AND alias=?',
+                                       (room_id,alias)).fetchone()
+                    if not binding or binding['model_profile_id']!=profile['id']:
                         return {'alias':alias,'status':'skipped'}
                     current_rnd=current_round(db,current)
                     if current_rnd['number']!=round_number or current_rnd['status']!='collecting':
@@ -2319,10 +2359,13 @@ def create_app(db_path=None):
             packet=anonymous_match_packet(db,room_id)
             evidence_revision=hashlib.sha256(packet.encode('utf-8')).hexdigest()
             rows=db.execute('''SELECT j.id AS judge_id,j.label,mp.* FROM ai_judges j
-                JOIN model_profiles mp ON mp.id=j.model_profile_id
+                JOIN model_profiles mp ON mp.id=j.model_profile_id AND mp.ownership_issue IS NULL
+                JOIN users profile_owner ON profile_owner.id=mp.owner_user_id AND profile_owner.deleted_at IS NULL
                 LEFT JOIN ai_judge_verdicts v ON v.room_id=j.room_id AND v.ai_judge_id=j.id
                 WHERE j.room_id=? AND v.ai_judge_id IS NULL ORDER BY j.id''',(room_id,)).fetchall()
             match_number=room['match_number']
+            actor_id=u['id']
+            session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
             profiles=[dict(row) for row in rows]
         if not profiles:
             return {'generated':0,'skipped':0,'failed':[]}
@@ -2347,6 +2390,12 @@ def create_app(db_path=None):
                 with connection(immediate=True) as db:
                     current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
                     if not current or current['match_number']!=match_number or current['status']!='open':
+                        return {'judge_id':judge_id,'status':'skipped'}
+                    if not model_call_actor_valid(db,room_id,actor_id,session_hash) or not model_profile_owner_active(db,profile['id']):
+                        return {'judge_id':judge_id,'status':'skipped'}
+                    binding=db.execute('SELECT model_profile_id FROM ai_judges WHERE room_id=? AND id=?',
+                                       (room_id,judge_id)).fetchone()
+                    if not binding or binding['model_profile_id']!=profile['id']:
                         return {'judge_id':judge_id,'status':'skipped'}
                     states=db.execute('SELECT status FROM rounds WHERE room_id=?',(room_id,)).fetchall()
                     if not states or any(x['status']!='revealed' for x in states):
