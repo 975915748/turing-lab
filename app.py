@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Literal, Optional
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from starlette.staticfiles import StaticFiles
@@ -78,6 +78,8 @@ def init_db(path):
             needs_room_ids = bool(room_sql) and 'AUTOINCREMENT' not in room_sql['sql'].upper()
             if 'users' in old_tables and (
                 'model_profiles' not in old_tables or
+                ('model_profiles' in old_tables and 'owner_user_id' not in {
+                    x['name'] for x in old.execute('PRAGMA table_info(model_profiles)')}) or
                 ('ai_players' in old_tables and 'model_profile_id' not in {
                     x['name'] for x in old.execute('PRAGMA table_info(ai_players)')}) or
                 ('ai_judges' in old_tables and 'model_profile_id' not in {
@@ -92,7 +94,9 @@ def init_db(path):
                 ('answers' in old_tables and 'edited_at' not in {
                     x['name'] for x in old.execute('PRAGMA table_info(answers)')})):
                 stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
-                backup_tag = ('v1_1' if 'room_judges' not in old_tables else
+                backup_tag = ('v1_7' if 'model_profiles' in old_tables and 'owner_user_id' not in {
+                                  x['name'] for x in old.execute('PRAGMA table_info(model_profiles)')} else
+                              'v1_1' if 'room_judges' not in old_tables else
                               'v1_2' if 'ai_judges' not in old_tables else
                               'v1_3' if ('members' in old_tables and 'removed_at' not in {
                                   x['name'] for x in old.execute('PRAGMA table_info(members)')}) or
@@ -150,6 +154,15 @@ def init_db(path):
             id INTEGER PRIMARY KEY, room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
             round_number INTEGER NOT NULL, sender_id INTEGER NOT NULL REFERENCES users(id),
             text TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            match_number INTEGER NOT NULL,
+            sender_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            sender_uid TEXT NOT NULL, sender_name TEXT NOT NULL,
+            text TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_chat_messages_room_match
+            ON chat_messages(room_id,match_number,id);
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY, room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
             round_number INTEGER NOT NULL, kind TEXT NOT NULL, actor TEXT NOT NULL,
@@ -176,11 +189,13 @@ def init_db(path):
             label TEXT NOT NULL, created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS model_profiles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            legacy_room_id INTEGER, ownership_issue TEXT,
             name TEXT NOT NULL, base_url TEXT NOT NULL, model TEXT NOT NULL,
             api_key_encrypted TEXT NOT NULL, temperature REAL NOT NULL DEFAULT 0.7,
             max_tokens INTEGER NOT NULL DEFAULT 2048, timeout_seconds INTEGER NOT NULL DEFAULT 60,
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_model_profiles_owner ON model_profiles(owner_user_id,id);
         CREATE TABLE IF NOT EXISTS ai_judge_questions (
             id INTEGER PRIMARY KEY,
             room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
@@ -225,6 +240,61 @@ def init_db(path):
         room_sql = db.execute("SELECT sql FROM sqlite_master WHERE name='rooms'").fetchone()['sql']
         if 'AUTOINCREMENT' not in room_sql.upper():
             migrate_room_ids(db,room_sql)
+        migrate_model_profiles(db)
+
+
+
+def migrate_model_profiles(db):
+    """Move room-scoped profiles to their original room owner's account without changing IDs."""
+    columns={row['name'] for row in db.execute('PRAGMA table_info(model_profiles)')}
+    if 'owner_user_id' in columns:
+        return
+    if 'room_id' not in columns:
+        raise sqlite3.DatabaseError('model_profiles 表结构无法识别，已停止迁移。')
+    db.commit()
+    db.execute('PRAGMA foreign_keys=OFF')
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        db.execute('''CREATE TABLE model_profiles_user_upgrade (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            legacy_room_id INTEGER, ownership_issue TEXT,
+            name TEXT NOT NULL, base_url TEXT NOT NULL, model TEXT NOT NULL,
+            api_key_encrypted TEXT NOT NULL, temperature REAL NOT NULL DEFAULT 0.7,
+            max_tokens INTEGER NOT NULL DEFAULT 2048, timeout_seconds INTEGER NOT NULL DEFAULT 60,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL)''')
+        db.execute('''INSERT INTO model_profiles_user_upgrade
+            (id,owner_user_id,legacy_room_id,ownership_issue,name,base_url,model,api_key_encrypted,
+             temperature,max_tokens,timeout_seconds,created_at,updated_at)
+            SELECT mp.id,
+                CASE WHEN r.owner_id IS NOT NULL AND u.id IS NOT NULL AND u.deleted_at IS NULL
+                     THEN r.owner_id ELSE NULL END,
+                mp.room_id,
+                CASE WHEN r.id IS NULL THEN 'legacy_room_missing'
+                     WHEN r.owner_id IS NULL THEN 'legacy_owner_missing'
+                     WHEN u.id IS NULL OR u.deleted_at IS NOT NULL THEN 'legacy_owner_deleted'
+                     ELSE NULL END,
+                mp.name,mp.base_url,mp.model,mp.api_key_encrypted,mp.temperature,
+                mp.max_tokens,mp.timeout_seconds,mp.created_at,mp.updated_at
+            FROM model_profiles mp
+            LEFT JOIN rooms r ON r.id=mp.room_id
+            LEFT JOIN users u ON u.id=r.owner_id''')
+        db.execute('DROP TABLE model_profiles')
+        db.execute('ALTER TABLE model_profiles_user_upgrade RENAME TO model_profiles')
+        db.execute('CREATE INDEX IF NOT EXISTS idx_model_profiles_owner ON model_profiles(owner_user_id,id)')
+        problems=db.execute('''SELECT id,legacy_room_id,ownership_issue FROM model_profiles
+            WHERE owner_user_id IS NULL ORDER BY id''').fetchall()
+        violations=db.execute('PRAGMA foreign_key_check').fetchall()
+        if violations:
+            raise sqlite3.IntegrityError('个人模型配置迁移未通过外键检查，已回滚。')
+        db.commit()
+        for row in problems:
+            print(f'[数据迁移] 模型配置 {row["id"]}（原房间 {row["legacy_room_id"]}）无法自动归属：{row["ownership_issue"]}；已保留并停用。')
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.execute('PRAGMA foreign_keys=ON')
 
 
 def migrate_room_ids(db, definition):
@@ -360,6 +430,26 @@ class ModelProfileData(BaseModel, extra='forbid'):
     timeout_seconds: int = Field(default=60, ge=10, le=120)
 
 
+class ProfileNameData(BaseModel, extra='forbid'):
+    display_name: str = Field(min_length=1, max_length=40)
+
+
+class ChangePasswordData(BaseModel, extra='forbid'):
+    current_password: str = Field(min_length=1, max_length=200)
+    new_password: str = Field(min_length=8, max_length=200)
+    confirm_password: str = Field(min_length=8, max_length=200)
+
+
+class ModelBindingData(BaseModel, extra='forbid'):
+    model_profile_id: Optional[int] = Field(default=None, ge=1)
+    keep_existing: bool = False
+
+
+class ChatMessageData(BaseModel, extra='forbid'):
+    match_number: int = Field(ge=1)
+    text: str = Field(min_length=1, max_length=2000)
+
+
 class JudgeAccountData(BaseModel):
     username: str = Field(min_length=1, max_length=40)
     display_name: str = Field(min_length=1, max_length=40)
@@ -393,6 +483,68 @@ def norm_text(value, max_len):
     if not value or len(value) > max_len:
         raise HTTPException(422, f'内容需要 1～{max_len} 字。')
     return value
+
+
+def model_profile_credential_status(profile):
+    if not profile.get('owner_user_id') or profile.get('ownership_issue') or profile.get('owner_deleted_at'):
+        return 'owner_unavailable'
+    encrypted=profile.get('api_key_encrypted') or ''
+    if not encrypted:
+        return 'missing'
+    if not has_valid_credential_key():
+        return 'key_unavailable'
+    try:
+        decrypt_api_key(encrypted)
+    except ModelAPIError:
+        return 'needs_repair'
+    return 'ok'
+
+
+def model_profile_view(profile, *, include_base_url=True):
+    data={'id':profile['id'],'name':profile['name'],'model':profile['model'],
+          'temperature':profile['temperature'],'max_tokens':profile['max_tokens'],
+          'timeout_seconds':profile['timeout_seconds'],
+          'has_api_key':bool(profile['api_key_encrypted']),
+          'credential_status':model_profile_credential_status(profile),
+          'updated_at':profile['updated_at']}
+    if include_base_url:
+        data['base_url']=profile['base_url']
+    return data
+
+
+def require_owned_model_profile(db, profile_id, user_id):
+    row=db.execute('''SELECT mp.*,u.deleted_at AS owner_deleted_at FROM model_profiles mp
+        LEFT JOIN users u ON u.id=mp.owner_user_id
+        WHERE mp.id=? AND mp.owner_user_id=?''',(profile_id,user_id)).fetchone()
+    if not row or row['ownership_issue']:
+        raise HTTPException(404,'模型配置不存在或不属于当前账号。')
+    profile=dict(row)
+    if profile['owner_deleted_at'] is not None:
+        raise HTTPException(403,'模型配置所属账号已停用。')
+    status=model_profile_credential_status(profile)
+    if status!='ok':
+        raise HTTPException(503,'此模型配置的 API Key 不可用，请在个人中心修复后重试。')
+    return profile
+
+
+def require_chat_access(db, room_id, user):
+    room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
+    if not room:
+        raise HTTPException(404,'房间不存在。')
+    if is_judge(db,room_id,user) and not user['is_admin']:
+        raise HTTPException(403,'真人裁判不能查看或发送房间公共聊天。')
+    member=db.execute('''SELECT 1 FROM members WHERE room_id=? AND user_id=? AND removed_at IS NULL''',
+                      (room_id,user['id'])).fetchone()
+    if not (member or can_manage_room(room,user)):
+        raise HTTPException(403,'你不属于这个房间，无法查看公共聊天。')
+    return room
+
+
+def clear_room_chat(db, room_id, match_number=None):
+    if match_number is None:
+        db.execute('DELETE FROM chat_messages WHERE room_id=?',(room_id,))
+    else:
+        db.execute('DELETE FROM chat_messages WHERE room_id=? AND match_number=?',(room_id,match_number))
 
 
 def auth(db, token):
@@ -608,7 +760,7 @@ def current_round(db, room, number=None):
 def clear_match_records(db, room_id):
     # 只清除比赛内容，房间、成员、AI 参赛位及裁判配置保留。
     for table in ('rounds', 'suggestions', 'events', 'judge_questions', 'judge_verdicts',
-                  'ai_judge_questions', 'ai_judge_verdicts', 'ai_answer_revisions', 'packets'):
+                  'ai_judge_questions', 'ai_judge_verdicts', 'ai_answer_revisions', 'packets', 'chat_messages'):
         db.execute(f'DELETE FROM {table} WHERE room_id=?', (room_id,))
     db.execute('''UPDATE rooms SET verdict_json=NULL,verdict_locked_at=NULL,
         revealed_at=NULL,records_deleted=1 WHERE id=?''', (room_id,))
@@ -693,26 +845,23 @@ def public_room(db, room, user, mine):
         WHERE s.room_id=? ORDER BY s.id''', (room['id'],)).fetchall()
     ai_edits = {}
     model_profiles = []
+    profile_summaries = {}
     if manager:
-        for row in db.execute(
-            '''SELECT id,name,base_url,model,temperature,max_tokens,timeout_seconds,
-                      api_key_encrypted
-               FROM model_profiles WHERE room_id=? ORDER BY id''', (room['id'],)
-        ):
-            profile = dict(row)
-            encrypted = profile.pop('api_key_encrypted')
-            profile['has_api_key'] = bool(encrypted)
-            if not encrypted:
-                profile['credential_status'] = 'missing'
-            elif not has_valid_credential_key():
-                profile['credential_status'] = 'key_unavailable'
-            else:
-                try:
-                    decrypt_api_key(encrypted)
-                    profile['credential_status'] = 'ok'
-                except ModelAPIError:
-                    profile['credential_status'] = 'needs_repair'
-            model_profiles.append(profile)
+        bound_ids={row['model_profile_id'] for row in db.execute(
+            '''SELECT model_profile_id FROM ai_players WHERE room_id=? AND model_profile_id IS NOT NULL
+               UNION SELECT model_profile_id FROM ai_judges WHERE room_id=? AND model_profile_id IS NOT NULL''',
+            (room['id'],room['id']))}
+        for profile_id in sorted(bound_ids):
+            row=db.execute('''SELECT mp.*,u.deleted_at AS owner_deleted_at FROM model_profiles mp
+                LEFT JOIN users u ON u.id=mp.owner_user_id WHERE mp.id=?''',(profile_id,)).fetchone()
+            if not row:
+                continue
+            profile=dict(row)
+            summary={'id':profile['id'],'name':profile['name'],'model':profile['model'],
+                     'owned_by_me':profile['owner_user_id']==user['id'],
+                     'credential_status':model_profile_credential_status(profile)}
+            profile_summaries[profile_id]=summary
+            model_profiles.append(summary)
     if manager and not room['records_deleted']:
         now_round = current_round(db,room)
         ai_edits = {row['alias']:row['text'] for row in db.execute('''SELECT a.alias,a.text FROM answers a
@@ -730,10 +879,12 @@ def public_room(db, room, user, mine):
             'humans':[{'alias':r['alias'],'user_id':r['user_id'],'uid':user_uid(r['user_id']),
                        'name':r['display_name'], 'username':r['username']} for r in humans],
             'ais':[{'alias':r['alias'],'name':r['name'],
-                    'model_profile_id':r['model_profile_id'] if manager else None} for r in ais],
+                    'model_profile_id':r['model_profile_id'] if manager else None,
+                    'model_profile':profile_summaries.get(r['model_profile_id']) if manager else None} for r in ais],
             'judges': [{'id':r['id'],'kind':r['kind'],'user_id':r['user_id'],
                         'label':r['label'],'username':r['username'],
                         'model_profile_id':r['model_profile_id'] if manager and r['kind']=='ai' else None,
+                        'model_profile':profile_summaries.get(r['model_profile_id']) if manager and r['kind']=='ai' else None,
                         'uid':user_uid(r['user_id']) if r['kind']=='human' else None,
                         'locked':bool(r['locked'])} for r in judges] if manager else
                       [{'kind':r['kind'],'label':r['label'],'locked':bool(r['locked'])} for r in judges],
@@ -876,6 +1027,55 @@ class Hub:
                     await ws.close(code=1008,reason='房间已删除' if reason=='room_deleted' else '')
                 except Exception:
                     pass
+
+    async def notify_chat(self, room_id, message):
+        for ws in list(self.groups.get(room_id,set())):
+            try:
+                with db_open(self.path) as db:
+                    user=auth(db,ws.cookies.get(COOKIE))
+                    room=require_chat_access(db,room_id,user)
+                    if room['status']!='open' or room['match_number']!=message['match_number']:
+                        continue
+                await ws.send_json({'type':'chat_message','room_id':room_id,
+                                    'match_number':message['match_number'],'message':message})
+            except HTTPException as exc:
+                if exc.status_code==401:
+                    self.groups.get(room_id,set()).discard(ws)
+                    try: await ws.close(code=1008)
+                    except Exception: pass
+            except Exception:
+                self.groups.get(room_id,set()).discard(ws)
+
+    async def clear_chat(self, room_id, match_number):
+        for ws in list(self.groups.get(room_id,set())):
+            try:
+                with db_open(self.path) as db:
+                    user=auth(db,ws.cookies.get(COOKIE))
+                    require_chat_access(db,room_id,user)
+                await ws.send_json({'type':'chat_cleared','room_id':room_id,'match_number':match_number})
+            except HTTPException as exc:
+                if exc.status_code==401:
+                    self.groups.get(room_id,set()).discard(ws)
+                    try: await ws.close(code=1008)
+                    except Exception: pass
+            except Exception:
+                self.groups.get(room_id,set()).discard(ws)
+
+    async def revoke_user(self, user_id):
+        for room_id in list(self.groups):
+            for ws in list(self.groups.get(room_id,set())):
+                try:
+                    with db_open(self.path) as db:
+                        user=auth(db,ws.cookies.get(COOKIE))
+                    if user['id']==user_id:
+                        await ws.close(code=1008,reason='密码已修改，请重新登录。')
+                        self.groups.get(room_id,set()).discard(ws)
+                except HTTPException:
+                    self.groups.get(room_id,set()).discard(ws)
+                    try: await ws.close(code=1008,reason='登录会话已失效')
+                    except Exception: pass
+                except Exception:
+                    self.groups.get(room_id,set()).discard(ws)
 
     async def typing_status(self, room_id):
         # Only active human contestants receive typing info; never judges, AI or admin observers.
