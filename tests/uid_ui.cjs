@@ -122,8 +122,26 @@ async function logout(page) {
       await page.getByText('UID：TL00000002', { exact: true }).waitFor();
       assert.equal(await page.locator('form[data-form="add-judge"]').count(), 0);
       assert.equal(await page.locator('form[data-form="assign-judge"]').count(), 0);
+
+      // Visual coverage: the independent human-judge management page in all requested viewport/theme combinations.
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      assert.equal(await page.locator('body').getAttribute('data-theme'), 'light');
+      await page.screenshot({ path: path.join(artifacts, 'human-judges-desktop-light.png'), fullPage: true, animations: 'disabled' });
+      await page.locator('#themeBtn').click();
+      assert.equal(await page.locator('body').getAttribute('data-theme'), 'dark');
+      await page.screenshot({ path: path.join(artifacts, 'human-judges-desktop-dark.png'), fullPage: true, animations: 'disabled' });
+      await page.setViewportSize({ width: 390, height: 844 });
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+      await page.screenshot({ path: path.join(artifacts, 'human-judges-mobile-dark.png'), fullPage: true, animations: 'disabled' });
+      await page.locator('#themeBtn').click();
+      assert.equal(await page.locator('body').getAttribute('data-theme'), 'light');
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+      await page.screenshot({ path: path.join(artifacts, 'human-judges-mobile-light.png'), fullPage: true, animations: 'disabled' });
+      await page.setViewportSize({ width: 1440, height: 1000 });
+
       await page.locator('[data-action="room-view"][data-view="ai-judges"]').click();
       assert.equal(await page.locator('form[data-form="add-ai-judge"]').count(), 1);
+      await page.getByText('服务商可能按实际调用量计费。', { exact: false }).first().waitFor();
 
       // A repeated join from the same UID is idempotent.
       const judgeMe = await (await judgeContext.request.get(site + '/api/me')).json();
