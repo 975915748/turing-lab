@@ -204,9 +204,9 @@ function renderModelRoom(r){
  <label class="field">Base URL</label><input name="base_url" maxlength="500" required value="${esc(p.base_url||'https://api.openai.com/v1')}" placeholder="https://api.openai.com/v1">
  <label class="field">模型名称</label><input name="model" maxlength="120" required value="${esc(p.model||'')}" placeholder="例如 gpt-4.1-mini">
  <label class="field">API Key ${keyLabel}</label><input name="api_key" type="password" maxlength="2000" autocomplete="new-password" ${keyRequired?'required':''} placeholder="${keyPlaceholder}">
-`};
  <div class="grid2"><div><label class="field">采样温度</label><input name="temperature" type="number" min="0" max="2" step="0.1" value="${p.temperature??0.7}" required></div><div><label class="field">最大输出 Token</label><input name="max_tokens" type="number" min="64" max="8192" step="1" value="${p.max_tokens??2048}" required></div></div>
  <label class="field">请求超时（秒）</label><input name="timeout_seconds" type="number" min="10" max="120" step="1" value="${p.timeout_seconds??60}" required>`;
+ };
  app.innerHTML=`<div class="pagehead"><div><div class="overline">MODEL API / ROOM ${r.id}</div><h1>模型 API 接入</h1><p class="muted">为本房间配置 OpenAI 兼容接口，并将配置分配给 AI 参赛者或 AI 裁判。</p></div><button data-action="room-view" data-view="match">← 返回比赛现场</button></div>
  ${r.model_api_enabled?'':`<section class="notice"><strong>模型 API 暂不可用。</strong><p class="hint">网站仍可使用手动转录。若要恢复模型 API，请先在部署平台设置有效的 MODEL_CREDENTIAL_KEY 并重启网站；如果原密钥已经丢失，之后需要为每个模型配置重新录入服务商 API Key。</p></section>`}
  <section class="card"><h2>新增模型配置</h2><p class="hint">支持标准 OpenAI Chat Completions 接口。</p><form data-form="model-profile">${formFields()}<div class="form-actions"><button class="primary" type="submit" ${r.model_api_enabled?'':'disabled'}>保存模型配置</button></div></form></section>
