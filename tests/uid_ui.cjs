@@ -139,7 +139,6 @@ async function logout(page) {
       await page.locator('[data-action="personal-center"]').first().click();
       await page.locator('form[data-form="profile-name"]').waitFor();
       await page.getByText('个人模型 API', { exact: true }).waitFor();
-      await page.getByText('采样温度', { exact: true }).waitFor();
       const modelText = await page.locator('#app').innerText();
       assert.equal(modelText.includes('Temperature'), false);
       assert.equal(modelText.includes('Base URL 填到'), false);
@@ -152,6 +151,7 @@ async function logout(page) {
         assert.equal(await page.locator('form[data-form="personal-model-create"]').count(), 0);
       } else {
         await page.locator('form[data-form="personal-model-create"]').waitFor();
+        await page.getByText('采样温度', { exact: true }).waitFor();
       }
 
       // Check both themes and the 390px layout in a real browser.
