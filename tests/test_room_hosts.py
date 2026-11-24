@@ -57,7 +57,7 @@ def test_nonadmin_hosts_have_full_controls_without_global_privilege(env):
     post(human, base + '/judge-questions', {'text': '真人裁判问题'})
     post(host, base + f'/ai-judges/{bot}/questions', {'text': 'AI裁判问题'})
     post(host, base + '/start')
-    post(player, base + '/suggestions', {'text': '追问保留'})
+    post(player, base + '/chat', {'match_number':1,'text': '追问保留'})
     post(player, base + '/answers', {'text': '秘密真人回答'})
     assert human.get(base).json()['rounds'][0]['answers'] == {}
     post(host, base + f'/ai/{ai}/answer', {'text': 'AI回答'})
@@ -95,12 +95,12 @@ def test_old_rooms_migrate_to_existing_admin_without_changing_matches(env):
     assert list(path.parent.glob('hosts.pre-v1_5-*.sqlite3'))
 
 
-def finish_match(host, player, base, code, ai='B'):
+def finish_match(host, player, base, code, ai='B', match_number=1):
     post(player, '/api/join', {'code': code})
     if not host.get(base).json()['ais']:
         post(host, base + '/ai', {'name': '保留AI'})
     post(host, base + '/question', {'text': '上一场的问题'})
-    post(player, base + '/suggestions', {'text': '上一场追问'})
+    post(player, base + '/chat', {'match_number':match_number,'text': '上一场追问'})
     post(player, base + '/answers', {'text': '上一场人类回答'})
     post(host, base + f'/ai/{ai}/answer', {'text': '上一场AI回答'})
     request(host, 'PUT', base + f'/ai/{ai}/answer', {'text': '上一场修订'})
@@ -133,7 +133,7 @@ def test_any_authenticated_user_can_clear_only_finished_records_and_room_survive
     assert host.get(base + '/log').status_code == 409
     assert host.get(base + '/packets/1').status_code == 404
     with db_open(path) as db:
-        for table in ('rounds','answers','suggestions','events','judge_questions','judge_verdicts',
+        for table in ('rounds','answers','suggestions','chat_messages','events','judge_questions','judge_verdicts',
                       'ai_judge_questions','ai_judge_verdicts','ai_answer_revisions','packets'):
             assert db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] == 0, table
         assert db.execute('SELECT verdict_json FROM rooms').fetchone()[0] is None
@@ -188,7 +188,7 @@ def test_deleted_participants_and_pending_judges_do_not_block_active_match(env):
     post(host, base + '/judges/assign', {'uid': judge_uid, 'label': '原裁判'})
     post(judge, base + '/judge-questions', {'text': '问题原文应保留'})
     post(host, base + '/start')
-    post(player, base + '/suggestions', {'text': '保留历史追问'})
+    post(player, base + '/chat', {'match_number':1,'text': '保留历史追问'})
     post(host, base + '/ai/B/answer', {'text': 'AI已答'})
     request(admin, 'DELETE', '/api/admin/users/TL00000003', {'confirm': True})
     info = host.get(base).json()
@@ -359,7 +359,7 @@ def test_room_reusable_repeatedly_default_clears_logs_and_stale_clients_rejected
     base = f'/api/rooms/{created["room_id"]}'
     post(host, base + '/restart', {'match_number': 1, 'confirm': True}, 409)
     for number in (1, 2):
-        finish_match(host, player, base, created['code'])
+        finish_match(host, player, base, created['code'], match_number=number)
         post(player, base + '/restart', {'match_number': number, 'confirm': True}, 403)
         post(host, base + '/restart', {'match_number': number, 'confirm': False}, 422)
         with player.websocket_connect(f'/ws/rooms/{created["room_id"]}') as ws:
@@ -372,6 +372,7 @@ def test_room_reusable_repeatedly_default_clears_logs_and_stale_clients_rejected
         assert len(info['rounds']) == 1 and info['rounds'][0]['status'] == 'draft'
         assert not info['records_deleted'] and info['current_round'] == 1
         assert not info['suggestions'] and not info['packets'] and not info['verdicts']
+        assert player.get(base + f'/chat?match_number={number+1}').json()['messages'] == []
         post(host, base + '/question', {'text': '旧标签页题目'}, 409, match=number)
         post(host, base + '/restart', {'match_number': number, 'confirm': True}, 409)
         request(outsider, 'DELETE', base + '/records', {'match_number': number, 'confirm': True}, 409)
