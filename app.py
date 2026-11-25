@@ -2761,6 +2761,7 @@ def create_app(db_path=None):
             session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
             round_number=rnd['number']
             question=rnd['question']
+            results=[]
             profiles=[dict(row) for row in rows]
             history_by_alias={row['alias']:anonymous_player_history(db,room_id,row['alias'],round_number-1)
                               for row in rows}
@@ -3122,6 +3123,7 @@ def create_app(db_path=None):
             match_number=room['match_number']
             actor_id=u['id']
             session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
+            results=[]
             profiles=[dict(row) for row in rows]
             retry_of=getattr(request.state,'model_operation_retry_of',None)
             queued_profiles=[]
