@@ -940,9 +940,13 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
     state.dmPending={uid,text:textValue,client_message_id};
    }
    const pending=state.dmPending;
-   await api('/api/messages/'+encodeURIComponent(uid),{method:'POST',body:{text:pending.text,client_message_id:pending.client_message_id}});
+   const sent=await api('/api/messages/'+encodeURIComponent(uid),{method:'POST',body:{text:pending.text,client_message_id:pending.client_message_id}});
    if(state.dmPending===pending)state.dmPending=null;
-   await openDm(uid);return;
+   await openDm(uid);
+   if(state.dmUid===uid&&sent.message&&!state.dmMessages.some(message=>Number(message.id)===Number(sent.message.id))){
+    state.dmMessages=mergeDmMessages(state.dmMessages,[sent.message]);renderDmPanel();
+   }
+   return;
   }
   if(type==='login'){await api('/api/login',{method:'POST',body:data});await init();toast('登录成功');return}
   if(type==='register'){const result=await api('/api/register',{method:'POST',body:data});history.replaceState(null,'',location.pathname);await loadLobby();toast(`注册成功，你的 UID 是 ${result.uid}`);return}

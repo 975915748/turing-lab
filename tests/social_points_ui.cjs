@@ -148,14 +148,25 @@ async function closePersonalCenter(page) {
     const messageText = '<img src=x onerror=alert(1)>私信纯文本';
     await dmFormA.locator('textarea[name="text"]').fill(messageText);
     const sendResponsePromise = pageA.waitForResponse(response =>
-      response.url().includes('/api/messages/') && response.request().method() === 'POST');
+      response.url().endsWith('/api/messages/' + encodeURIComponent(uidB)) && response.request().method() === 'POST');
     await dmFormA.locator('button[type="submit"]').click();
     const sendResponse = await sendResponsePromise;
     const sendResult = await sendResponse.json();
     assert.equal(sendResponse.status(), 200, JSON.stringify(sendResult));
     const persistedMessages = await api(pageA, 'GET', '/api/messages/' + encodeURIComponent(uidB));
     assert(persistedMessages.messages.some(message => message.text.includes('私信纯文本')), JSON.stringify(persistedMessages));
-    await pageA.waitForFunction(uid => state.dmUid === uid && state.dmMessages.some(message => message.text.includes('私信纯文本')), uidB);
+    await pageA.waitForFunction(uid => state.dmUid === uid && state.dmMessages.some(message => message.text.includes('私信纯文本')), uidB).catch(async error => {
+      const debug = await pageA.evaluate(() => ({
+        dmUid: state.dmUid,
+        dmMessages: state.dmMessages,
+        dmLoadVersion: state.dmLoadVersion,
+        dmPending: state.dmPending,
+        dmSocketState: state.dmSocket?.readyState,
+        toast: document.querySelector('#toast')?.textContent || '',
+        conversations: state.social?.conversations || [],
+      }));
+      throw new Error('DM client state did not update: ' + JSON.stringify(debug) + '; ' + error.message);
+    });
     await pageA.locator('.dm-message.mine').filter({ hasText: '私信纯文本' }).waitFor();
     assert.equal(await pageA.locator('#dmPanel img').count(), 0);
 
