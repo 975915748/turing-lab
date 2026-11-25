@@ -793,6 +793,8 @@ def test_queued_ai_judge_question_is_discarded_when_roster_changes(model_lab, mo
 ])
 def test_chat_completion_reports_http_timeout_and_invalid_content_safely(
         monkeypatch, failure, expected_message):
+    from types import SimpleNamespace
+
     endpoint = model_api.ResolvedEndpoint(
         base_url='https://api.example.com/v1',
         host='api.example.com',
@@ -817,49 +819,22 @@ def test_chat_completion_reports_http_timeout_and_invalid_content_safely(
         body = b''
         status = 200
 
-    wire_response = (
-        f'HTTP/1.1 {status} TEST\\r\\n'.encode('ascii')
-        + f'Content-Length: {len(body)}\\r\\n'.encode('ascii')
-        + b'Connection: close\\r\\n\\r\\n'
-        + body
-    )
+    class FakePool:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
 
-    class FakeStream(httpcore.AsyncNetworkStream):
-        def __init__(self):
-            self.remaining = wire_response
-
-        async def read(self, max_bytes, timeout=None):
-            if failure == 'timeout':
-                raise httpcore.ReadTimeout('simulated timeout')
-            if not self.remaining:
-                return b''
-            chunk, self.remaining = self.remaining[:max_bytes], self.remaining[max_bytes:]
-            return chunk
-
-        async def write(self, buffer, timeout=None):
-            pass
-
-        async def aclose(self):
-            pass
-
-        async def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+        async def __aenter__(self):
             return self
 
-        def get_extra_info(self, info):
-            return None
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
 
-    class FakeBackend(httpcore.AsyncNetworkBackend):
-        async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
-            assert host == '93.184.216.34'
-            assert port == 443
-            return FakeStream()
+        async def request(self, *args, **kwargs):
+            if failure == 'timeout':
+                raise httpcore.ReadTimeout('simulated timeout')
+            return SimpleNamespace(status=status, content=body)
 
-        async def connect_unix_socket(self, path, timeout=None, socket_options=None):
-            raise AssertionError('model API must not use unix sockets')
-
-        async def sleep(self, seconds):
-            pass
-
+    monkeypatch.setattr(model_api.httpcore, 'AsyncConnectionPool', FakePool)
     profile = {
         'base_url': endpoint.base_url,
         'model': 'mock-model',
@@ -870,7 +845,6 @@ def test_chat_completion_reports_http_timeout_and_invalid_content_safely(
     with pytest.raises(ModelAPIError) as caught:
         asyncio.run(model_api.chat_completion(
             profile, [{'role': 'user', 'content': 'test'}], 'sk-never-log-this',
-            network_backend=FakeBackend(),
         ))
     assert expected_message in str(caught.value)
     assert 'sk-never-log-this' not in str(caught.value)
