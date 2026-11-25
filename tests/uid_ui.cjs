@@ -263,7 +263,7 @@ async function logout(page) {
       await second.locator('[name="model"]').fill('second-unsaved-model');
       await second.locator('[name="api_key"]').fill('sk-second-draft');
       await first.locator('[name="model"]').fill('saved-model-first');
-      await first.locator('[name="api_key"]').fill('');
+      await first.locator('[name="api_key"]').fill('sk-new-saved-key');
 
       // A slow test of the old saved profile must not overwrite the new profile
       // or a newer test started after the profile has been saved.
@@ -291,12 +291,60 @@ async function logout(page) {
       await first.locator('[data-action="test-personal-model"]').click();
       await firstTestStarted;
 
+      const saveUrl = '**/api/me/models/' + ids[0];
+      let releaseSave, saveStartedResolve;
+      const saveGate = new Promise(resolve => { releaseSave = resolve; });
+      const saveStarted = new Promise(resolve => { saveStartedResolve = resolve; });
+      await page.route(saveUrl, async route => {
+        saveStartedResolve();
+        await saveGate;
+        const response = await route.fetch();
+        await route.fulfill({ response });
+      });
       const saveResponsePromise = page.waitForResponse(response =>
         response.url().endsWith('/api/me/models/' + ids[0]) && response.request().method() === 'PUT');
       await first.locator('form[data-form="personal-model-edit"] [type="submit"]').click();
+      await saveStarted;
+
+      const testButtonDuringSave = first.locator('[data-action="test-personal-model"]');
+      assert.equal(await testButtonDuringSave.isDisabled(), true,
+        '保存 API Key 期间必须禁用连接测试');
+      assert.equal(await testButtonDuringSave.innerText(), '保存中…');
+      assert.equal(await page.evaluate(id => beginPersonalModelTest(id), ids[0]), null,
+        '保存期间不能创建新的模型测试请求');
+      await testButtonDuringSave.evaluate(button =>
+        button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })));
+      await page.waitForTimeout(30);
+      assert.equal(testRequestCount, 1, '保存期间的点击不能发起新的测试请求');
+
+      // Simulate a late request that was created during the save window by an
+      // already-running client event; the post-save invalidation must kill it.
+      const saveWindowRequest = await page.evaluate(id => {
+        const key = String(id), version = nextPersonalModelTestVersion(key);
+        const request = { version, epoch: state.personalModelEpoch, uid: state.me?.user?.uid,
+          profileSnapshot: personalModelTestFingerprint(state.personalModels.find(p => Number(p.id) === Number(id))) };
+        state.personalModelTestPending[key] = version;
+        return request;
+      }, ids[0]);
+
+      // The old test response arrives while the credential update is still pending.
+      releaseFirstTest();
+      const oldTestResponse = await oldTestResponsePromise;
+      assert.equal(oldTestResponse.status(), 200);
+      await page.waitForTimeout(30);
+      assert.equal(await page.evaluate(id => state.modelTestResults[id] ?? null, ids[0]), null,
+        '保存期间旧配置的迟到测试结果不能写入新状态');
+      assert.equal(await testButtonDuringSave.isDisabled(), true,
+        '迟到测试不能解除保存期间的禁用状态');
+
+      releaseSave();
       const saveResponse = await saveResponsePromise;
       assert.equal(saveResponse.status(), 200, await saveResponse.text());
       await page.locator('#toast').filter({ hasText: '个人模型配置已更新' }).waitFor();
+      assert.equal(await page.evaluate(({id, request}) => isCurrentPersonalModelTest(id, request),
+        { id: ids[0], request: saveWindowRequest }), false,
+        '保存成功后必须使保存期间产生的测试请求失效');
+      await page.unroute(saveUrl);
 
       const firstAfterSave = page.locator('details[data-model-config][data-id="' + ids[0] + '"]');
       const secondAfterSave = page.locator('details[data-model-config][data-id="' + ids[1] + '"]');

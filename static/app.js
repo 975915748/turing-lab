@@ -1,13 +1,13 @@
 'use strict';
 const $ = (selector) => document.querySelector(selector);
 const app = $('#app');
-const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelEpoch:0};
+const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelSavePending:{},personalModelEpoch:0};
 const esc = (v) => String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const shortDate = s => s ? new Date(s).toLocaleString('zh-CN',{hour12:false}) : '';
 const val = (id) => document.getElementById(id)?.value??'';
 const D = (txt='暂无记录') => `<p class="muted hint">${esc(txt)}</p>`;
 let toastTimer;
-function clearPersonalModelState(){state.personalModelEpoch=(state.personalModelEpoch||0)+1;state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};state.personalModelTestVersions={};state.personalModelTestPending={};}
+function clearPersonalModelState(){state.personalModelEpoch=(state.personalModelEpoch||0)+1;state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};state.personalModelTestVersions={};state.personalModelTestPending={};state.personalModelSavePending={};}
 function toast(message){const el=$('#toast');el.textContent=message;el.classList.add('visible');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('visible'),4200)}
 function setConnection(txt,online){const el=$('#connection');el.textContent=(online?'● ':'○ ')+txt;el.className='connection'+(online?' online':'')}
 function applyPrefs(){let theme=localStorage.getItem('turing_theme')||'light';document.body.dataset.theme=theme;$('#themeBtn').textContent=theme==='light'?'☾ 深色':'☀ 日间';let f=Number(localStorage.getItem('turing_font')||15);if(f<12||f>22)f=15;document.documentElement.style.setProperty('--font',f+'px');$('#fontSize').value=f;$('#fontValue').textContent=f;}
@@ -220,12 +220,27 @@ function invalidatePersonalModelTest(id){
  const result=app.querySelector('[data-model-test-result="'+Number(id)+'"]');
  if(result){result.textContent='';result.className='model-test-result';}
  const button=app.querySelector('[data-action="test-personal-model"][data-id="'+Number(id)+'"]');
- if(button){const profile=state.personalModels.find(p=>Number(p.id)===Number(id));button.disabled=profile?.credential_status!=='ok';button.textContent='测试连接';}
+ if(button){
+  const profile=state.personalModels.find(p=>Number(p.id)===Number(id)),saving=!!state.personalModelSavePending[key];
+  button.disabled=profile?.credential_status!=='ok'||saving;button.textContent=saving?'保存中…':'测试连接';
+ }
+}
+function setPersonalModelSavePending(id,pending){
+ const key=String(id);
+ if(pending)state.personalModelSavePending[key]=true;else delete state.personalModelSavePending[key];
+ const button=app.querySelector('[data-action="test-personal-model"][data-id="'+Number(id)+'"]');
+ if(button){
+  const profile=state.personalModels.find(p=>Number(p.id)===Number(id)),saving=!!state.personalModelSavePending[key],testing=state.personalModelTestPending[key]!==undefined;
+  button.disabled=profile?.credential_status!=='ok'||saving||testing;
+  button.textContent=saving?'保存中…':testing?'测试中…':'测试连接';
+ }
 }
 function beginPersonalModelTest(id){
+ const key=String(id);
+ if(state.personalModelSavePending[key])return null;
  const profile=state.personalModels.find(p=>Number(p.id)===Number(id));
  if(!profile)return null;
- const key=String(id),version=nextPersonalModelTestVersion(key);
+ const version=nextPersonalModelTestVersion(key);
  const request={version,epoch:state.personalModelEpoch,uid:state.me?.user?.uid,
   profileSnapshot:personalModelTestFingerprint(profile)};
  state.personalModelTestPending[key]=version;return request;
@@ -260,6 +275,7 @@ function renderPersonalModelManager(){
   const storedTest=state.modelTestResults[p.id];
   const test=storedTest?.profileSnapshot===personalModelTestFingerprint(p)?storedTest:null;
   const testing=state.personalModelTestPending[String(p.id)]!==undefined;
+  const saving=!!state.personalModelSavePending[String(p.id)];
   const expanded=!!state.personalModelExpanded[p.id];
   let card='<details class="personal-model-card" data-model-config data-id="'+p.id+'" '+(expanded?'open':'')+'><summary class="model-config-summary"><strong>'+esc(p.name)+'</strong><span class="model-config-chevron" aria-hidden="true"></span></summary><div class="model-config-details">'+
    '<div class="label-line"><span class="pill '+(p.credential_status==='ok'?'ok':'warn')+'">'+credentialStatusLabel(p)+'</span></div>'+
@@ -267,7 +283,7 @@ function renderPersonalModelManager(){
   if(p.credential_status==='needs_repair')card+='<p class="hint">此配置无法解密，请重新录入服务商 API Key 并保存。</p>';
   if(p.credential_status==='missing')card+='<p class="hint">此配置缺少 API Key，请重新录入后保存。</p>';
   card+='<form data-form="personal-model-edit" data-id="'+p.id+'" class="spaced">'+personalModelFields(p,state.personalModelDrafts['model:'+p.id]||{})+'<div class="form-actions"><button type="submit">保存修改</button></div></form>'+
-   '<div class="buttonrow spaced"><button class="small" data-action="test-personal-model" data-id="'+p.id+'" '+(p.credential_status==='ok'&&!testing?'':'disabled')+'>'+(testing?'测试中…':'测试连接')+'</button><button class="small danger" data-action="delete-personal-model" data-id="'+p.id+'">删除配置</button></div>'+
+   '<div class="buttonrow spaced"><button class="small" data-action="test-personal-model" data-id="'+p.id+'" '+(p.credential_status==='ok'&&!testing&&!saving?'':'disabled')+'>'+(saving?'保存中…':testing?'测试中…':'测试连接')+'</button><button class="small danger" data-action="delete-personal-model" data-id="'+p.id+'">删除配置</button></div>'+
    '<p class="model-test-result '+(test?(test.ok?'success':'failed'):'')+'" data-model-test-result="'+p.id+'" aria-live="polite">'+modelTestResultText(test)+'</p></div></details>';
   return card;
  }).join('');
@@ -523,7 +539,9 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
   if(action==='generate-ai-answers'){b.disabled=true;b.textContent='模型正在回答…';const result=await api(`/api/rooms/${state.roomId}/ai/answers/generate`,{method:'POST'});await refreshRoom();const detail=result.failed?.length?'；失败：'+result.failed.map(x=>x.alias+' '+x.error).join('；'):'';toast(`模型 AI 已提交 ${result.generated||0} 个回答${detail}`)}
   if(action==='generate-ai-verdicts'){b.disabled=true;b.textContent='模型正在判断…';const result=await api(`/api/rooms/${state.roomId}/ai-judges/verdicts/generate`,{method:'POST'});await refreshRoom();const detail=result.failed?.length?'；失败：'+result.failed.map(x=>x.error).join('；'):'';toast(`AI 裁判已锁定 ${result.generated||0} 份最终判断${detail}`)}
   if(action==='test-personal-model'){
-   const id=Number(b.dataset.id),request=beginPersonalModelTest(id);
+   const id=Number(b.dataset.id);
+   if(state.personalModelSavePending[String(id)])throw new Error('模型配置正在保存，请保存完成后再测试连接。');
+   const request=beginPersonalModelTest(id);
    if(!request)throw new Error('模型配置已不存在，请刷新后重试。');
    b.disabled=true;b.textContent='测试中…';
    try{
@@ -582,11 +600,29 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
   if(type==='personal-model-create'||type==='personal-model-edit'){
    const payload={name:data.name,base_url:data.base_url,model:data.model,api_key:data.api_key||'',temperature:Number(data.temperature),max_tokens:Number(data.max_tokens),timeout_seconds:Number(data.timeout_seconds)};
    const draftKey=personalModelDraftKey(form),profileId=Number(form.dataset.id||0);
-   if(type==='personal-model-edit')invalidatePersonalModelTest(profileId);
-   if(type==='personal-model-create')await api('/api/me/models',{method:'POST',body:payload});
-   else await api('/api/me/models/'+profileId,{method:'PUT',body:payload});
-   if(type==='personal-model-edit')delete state.modelTestResults[profileId];
-   await loadPersonalModels();renderPersonalCenter({skipModelDraftKey:draftKey});toast(type==='personal-model-create'?'个人模型配置已保存':'个人模型配置已更新');return;
+   const saveEpoch=state.personalModelEpoch,saveUid=state.me?.user?.uid;
+   if(type==='personal-model-edit'){
+    invalidatePersonalModelTest(profileId);
+    setPersonalModelSavePending(profileId,true);
+   }
+   try{
+    if(type==='personal-model-create')await api('/api/me/models',{method:'POST',body:payload});
+    else await api('/api/me/models/'+profileId,{method:'PUT',body:payload});
+    if(type==='personal-model-edit'){
+     if(state.personalModelEpoch!==saveEpoch||state.me?.user?.uid!==saveUid)return;
+     // Invalidate again after the server has committed the new credential. This
+     // also kills any request that slipped into the save window.
+     invalidatePersonalModelTest(profileId);
+    }
+    await loadPersonalModels();
+    if(type==='personal-model-edit'){
+     if(state.personalModelEpoch!==saveEpoch||state.me?.user?.uid!==saveUid)return;
+     setPersonalModelSavePending(profileId,false);
+    }
+    renderPersonalCenter({skipModelDraftKey:draftKey});toast(type==='personal-model-create'?'个人模型配置已保存':'个人模型配置已更新');return;
+   }finally{
+    if(type==='personal-model-edit'&&state.personalModelEpoch===saveEpoch&&state.me?.user?.uid===saveUid)setPersonalModelSavePending(profileId,false);
+   }
   }
   if(type==='reset-password'){
    const uid=form.dataset.uid;
