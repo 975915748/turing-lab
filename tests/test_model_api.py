@@ -955,3 +955,207 @@ def test_queued_ai_judge_question_rechecks_seat_binding_before_provider_call(tmp
 
     asyncio.run(scenario())
 
+
+def test_ai_question_generation_is_idempotent_and_respects_round_phase(model_lab, monkeypatch):
+    admin, base, path = model_lab['admin'], model_lab['base'], model_lab['path']
+    judge = post(admin, base + '/ai-judges', {
+        'name': '幂等出题裁判',
+        'model_profile_id': model_lab['profile_id'],
+    })
+
+    first = post(admin, base + '/ai-judges/questions/generate')
+    assert first['generated'] == 1
+    second = post(admin, base + '/ai-judges/questions/generate')
+    assert second['generated'] == 0
+    assert second['skipped'] == 0
+    assert second['failed'] == []
+    assert '均已提交问题' in second['message']
+
+    provider_calls = []
+
+    async def provider_must_not_be_called(profile, messages, api_key):
+        provider_calls.append(profile)
+        raise AssertionError('已提交问题或轮次已开始时不得重复请求服务商')
+
+    monkeypatch.setattr(app_module, 'chat_completion', provider_must_not_be_called)
+    post(admin, base + '/start')
+    me = admin.get('/api/me').json()['user']
+    response = admin.post(
+        base + '/ai-judges/questions/generate',
+        headers={'X-CSRF-Token': me['csrf']},
+    )
+    assert response.status_code == 409, response.text
+    assert '只能在本轮开始作答前' in response.json()['detail']
+    assert provider_calls == []
+    with db_open(path) as db:
+        assert db.execute(
+            'SELECT COUNT(*) FROM ai_judge_questions WHERE room_id=? AND ai_judge_id=?',
+            (int(base.rsplit('/', 1)[1]), judge['id'])
+        ).fetchone()[0] == 1
+
+
+def test_ai_question_is_not_saved_if_participant_roster_changes_during_generation(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv('MODEL_CREDENTIAL_KEY', Fernet.generate_key().decode('ascii'))
+    monkeypatch.setattr(app_module, 'validate_base_url', lambda value: value.strip().rstrip('/'))
+    path = tmp_path / 'stale-ai-question-roster.sqlite3'
+    seed_admin(path, 'roster_admin', '名单变化主持人', 'roster-admin-password')
+    app = create_app(path)
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+        async with (
+            httpx.AsyncClient(transport=transport, base_url='http://testserver') as admin,
+            httpx.AsyncClient(transport=transport, base_url='http://testserver') as p1,
+            httpx.AsyncClient(transport=transport, base_url='http://testserver') as p2,
+            httpx.AsyncClient(transport=transport, base_url='http://testserver') as p3,
+        ):
+            assert (await async_post(admin, '/api/login', {
+                'username': 'roster_admin', 'password': 'roster-admin-password',
+            })).status_code == 200
+            room = await async_post(admin, '/api/rooms', {'title': '出题期间名单变化探针'})
+            assert room.status_code == 200, room.text
+            room_id = room.json()['room_id']
+            base = f'/api/rooms/{room_id}'
+            for client, username in ((p1, 'roster_human_a'), (p2, 'roster_human_b')):
+                joined = await async_post(client, '/api/register', {
+                    'username': username, 'password': 'roster-human-password',
+                    'code': room.json()['code'],
+                })
+                assert joined.status_code == 200, joined.text
+
+            profile = await async_post(admin, '/api/me/models', {
+                'name': '名单变化配置', 'base_url': 'https://api.example.com/v1',
+                'model': 'roster-question-model', 'api_key': 'sk-roster-private',
+                'temperature': 0.5, 'max_tokens': 512, 'timeout_seconds': 30,
+            })
+            assert profile.status_code == 200, profile.text
+            judge = await async_post(admin, base + '/ai-judges', {
+                'name': '名单变化 AI 裁判', 'model_profile_id': profile.json()['id'],
+            })
+            assert judge.status_code == 200, judge.text
+
+            started = asyncio.Event()
+            release = asyncio.Event()
+            provider_calls = []
+
+            async def delayed_question(profile_snapshot, messages, api_key):
+                provider_calls.append(profile_snapshot['judge_id'])
+                started.set()
+                await release.wait()
+                return {'text': '名单变化前生成的旧问题。', 'usage': {}}
+
+            monkeypatch.setattr(app_module, 'chat_completion', delayed_question)
+            generation = asyncio.create_task(async_post(
+                admin, base + '/ai-judges/questions/generate'
+            ))
+            await asyncio.wait_for(started.wait(), 2)
+
+            joined = await async_post(p3, '/api/register', {
+                'username': 'roster_human_c', 'password': 'roster-human-password',
+                'code': room.json()['code'],
+            })
+            assert joined.status_code == 200, joined.text
+            release.set()
+
+            response = await asyncio.wait_for(generation, 3)
+            assert response.status_code == 200, response.text
+            result = response.json()
+            assert result['generated'] == 0
+            assert result['skipped'] == 1
+            assert result['failed'] == []
+            assert '参赛名单发生变化' in result['results'][0]['reason']
+            assert provider_calls == [judge.json()['id']]
+            with db_open(path) as db:
+                assert db.execute(
+                    'SELECT COUNT(*) FROM ai_judge_questions WHERE room_id=?',
+                    (room_id,)
+                ).fetchone()[0] == 0
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ('failure', 'expected'),
+    [
+        ('timeout', '模型请求超过 30 秒，已超时。'),
+        ('malformed', '模型服务返回的数据格式无效。'),
+    ],
+)
+def test_ai_question_generation_surfaces_timeout_and_response_parse_failures(
+        model_lab, monkeypatch, failure, expected):
+    admin, base = model_lab['admin'], model_lab['base']
+    judge = post(admin, base + '/ai-judges', {
+        'name': '请求失败裁判',
+        'model_profile_id': model_lab['profile_id'],
+    })
+
+    async def provider_failure(profile, messages, api_key):
+        raise ModelAPIError(expected)
+
+    monkeypatch.setattr(app_module, 'chat_completion', provider_failure)
+    result = post(admin, base + '/ai-judges/questions/generate')
+    assert result['generated'] == 0
+    assert len(result['failed']) == 1
+    assert result['failed'][0]['judge_id'] == judge['id']
+    assert expected in result['failed'][0]['error']
+    assert model_lab['profile_body']['api_key'] not in json.dumps(result, ensure_ascii=False)
+
+
+def test_ai_question_generation_reports_empty_model_content(model_lab, monkeypatch):
+    admin, base, path = model_lab['admin'], model_lab['base'], model_lab['path']
+    judge = post(admin, base + '/ai-judges', {
+        'name': '空内容裁判',
+        'model_profile_id': model_lab['profile_id'],
+    })
+
+    async def empty_provider_response(profile, messages, api_key):
+        return {'text': '   ', 'usage': {}}
+
+    monkeypatch.setattr(app_module, 'chat_completion', empty_provider_response)
+    result = post(admin, base + '/ai-judges/questions/generate')
+    assert result['generated'] == 0
+    assert len(result['failed']) == 1
+    assert result['failed'][0]['judge_id'] == judge['id']
+    assert '内容需要 1～3000 字' in result['failed'][0]['error']
+    with db_open(path) as db:
+        assert db.execute(
+            'SELECT COUNT(*) FROM ai_judge_questions WHERE room_id=?',
+            (int(base.rsplit('/', 1)[1]),)
+        ).fetchone()[0] == 0
+
+
+def test_ai_question_generation_keeps_other_judges_when_one_provider_call_fails(
+        model_lab, monkeypatch):
+    admin, base, path = model_lab['admin'], model_lab['base'], model_lab['path']
+    good = post(admin, base + '/ai-judges', {
+        'name': '正常出题裁判',
+        'model_profile_id': model_lab['profile_id'],
+    })
+    failed = post(admin, base + '/ai-judges', {
+        'name': '单席失败裁判',
+        'model_profile_id': model_lab['profile_id'],
+    })
+
+    async def mixed_provider_results(profile, messages, api_key):
+        if profile['judge_id'] == failed['id']:
+            raise ModelAPIError('模型请求超过 30 秒，已超时。')
+        return {'text': '正常裁判提出的问题。', 'usage': {}}
+
+    monkeypatch.setattr(app_module, 'chat_completion', mixed_provider_results)
+    result = post(admin, base + '/ai-judges/questions/generate')
+    assert result['generated'] == 1
+    assert result['skipped'] == 0
+    assert len(result['failed']) == 1
+    assert result['failed'][0]['judge_id'] == failed['id']
+    statuses = {item['judge_id']: item['status'] for item in result['results']}
+    assert statuses == {good['id']: 'generated', failed['id']: 'failed'}
+    with db_open(path) as db:
+        saved = db.execute(
+            'SELECT ai_judge_id,text FROM ai_judge_questions WHERE room_id=?',
+            (int(base.rsplit('/', 1)[1]),)
+        ).fetchall()
+    assert len(saved) == 1
+    assert saved[0]['ai_judge_id'] == good['id']
+    assert saved[0]['text'] == '正常裁判提出的问题。'
+

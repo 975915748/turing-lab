@@ -319,6 +319,94 @@ async function logout(page) {
         tests: state.modelTestResults,
       }));
       assert.deepEqual(cleared, { drafts: {}, expanded: {}, tests: {} });
+    } else if (scenario === 'copy') {
+      await page.getByRole('button', { name: '使用旧登录名', exact: true }).click();
+      await page.locator('[name="username"]').fill('browser_admin');
+      await page.locator('[name="password"]').fill('browser-password');
+      await clickSubmit(page, 'login');
+      await uidIs(page, 'TL00000001');
+      await page.locator('form[data-form="room"] [name="title"]').fill('P2-P7 文案验收');
+      await clickSubmit(page, 'room');
+
+      const roomInfo = await (await context.request.get(site + '/api/me')).json();
+      const roomId = roomInfo.rooms[0].id;
+      const base = '/api/rooms/' + roomId;
+      const room = await (await context.request.get(site + base)).json();
+      const profiles = await (await context.request.get(site + '/api/me/models')).json();
+      assert.equal(profiles.model_api_enabled, true);
+      const usableProfile = profiles.models.find(profile => profile.credential_status === 'ok');
+      assert(usableProfile, '文案验收需要一个有效的测试模型配置');
+
+      await page.locator('[data-action="room-view"][data-view="admin"]').click();
+      const addAi = page.locator('form[data-form="add-ai"]');
+      await addAi.waitFor();
+      assert.equal(await addAi.locator('[name="model_profile_id"] option[value="' + usableProfile.id + '"]').count(), 1);
+      assert.equal(await addAi.locator('.hint').count(), 0, 'AI 参赛位模型选择框下不应再显示授权 / 计费说明');
+      const initialAdminText = await page.locator('#app').innerText();
+      for (const phrase of [
+        '模型接入的 AI 参赛者可自动回答；AI 裁判可自动出题和判断。未接入模型的 AI 席位仍可手动转录。',
+        '可以添加手动 AI 席位，也可以先在个人中心配置自己的模型 API。',
+        '选择模型配置即授权本房间房主和全站管理员通过比赛操作触发调用；服务商可能按实际调用量计费。',
+        '房主也可使用邀请码加入，以人类身份回答。',
+        '点击轮次可查看历史记录。',
+        '查看本轮问题与回答',
+        '查看真人裁判名单',
+        '配置 AI 裁判席位',
+        '管理参赛者与比赛',
+        '管理名字、密码和个人模型 API',
+      ]) assert.equal(initialAdminText.includes(phrase), false, '不应显示已删除文案：' + phrase);
+      const navButtons = await page.locator('.room-view-menu [data-action="room-view"]').all();
+      assert.equal(navButtons.length, 4);
+      for (let index = 0; index < navButtons.length; index++) {
+        const expected = ['比赛现场', '真人裁判管理', 'AI 裁判管理', '房主管理台'][index];
+        assert.equal((await navButtons[index].innerText()).trim(), expected);
+      }
+      await screenshot(page, 'copy-cleanup-admin-desktop-light.png');
+
+      await addAi.locator('[name="name"]').fill('文案验收 AI 参赛者');
+      await addAi.locator('[name="model_profile_id"]').selectOption(String(usableProfile.id));
+      await addAi.locator('[type="submit"]').click();
+      await page.locator('.roster-person').filter({ hasText: '文案验收 AI 参赛者' }).waitFor();
+
+      await page.locator('[data-action="room-view"][data-view="human-judges"]').click();
+      await page.getByRole('heading', { name: '真人裁判管理', exact: true }).waitFor();
+      await page.getByText('0 位真人裁判', { exact: true }).waitFor();
+      assert.equal(await page.getByText('尚无真人裁判。', { exact: true }).count(), 0);
+      await screenshot(page, 'copy-cleanup-empty-human-judges-desktop-light.png');
+
+      await page.locator('[data-action="room-view"][data-view="ai-judges"]').click();
+      const addJudge = page.locator('form[data-form="add-ai-judge"]');
+      await addJudge.waitFor();
+      await addJudge.locator('[name="name"]').fill('文案验收 AI 裁判');
+      await addJudge.locator('[type="submit"]').click();
+      await page.locator('.feed-item').filter({ hasText: '文案验收 AI 裁判' }).waitFor();
+      await screenshot(page, 'copy-cleanup-ai-judges-desktop-light.png');
+
+      await page.locator('[data-action="room-view"][data-view="admin"]').click();
+      await page.getByRole('heading', { name: '统一作答与揭晓', exact: true }).waitFor();
+      const workflowText = await page.locator('#app').innerText();
+      for (const phrase of [
+        '仍需完成全部轮次。',
+        '等待所有裁判锁定最终判断。',
+        '所有轮次已完成。',
+        '所有裁判均已锁定判断。',
+        '所有真人 / AI 裁判的问题会统一汇总；由房主在此开启作答。',
+      ]) assert.equal(workflowText.includes(phrase), false, '不应显示已删除文案：' + phrase);
+      assert.equal(await page.locator('[data-action="start-round"]').isDisabled(), true,
+        '人数不足时必须保留统一作答的实际限制');
+      assert(workflowText.includes('当前仅有 1 位参赛者；至少需要两名在场参赛者才能开始统一作答。'));
+      await screenshot(page, 'copy-cleanup-workflow-desktop-light.png');
+
+      await page.locator('[data-action="room-view"][data-view="match"]').click();
+      const matchText = await page.locator('#app').innerText();
+      assert.equal(matchText.includes('人类玩家互相可见真实账号身份；裁判包仅含匿名代号。'), false);
+      assert.equal(matchText.includes('房主若希望亲自参赛，请在右侧点击“作为人类玩家加入”（仅开局前）。'), false);
+      assert.equal(matchText.includes('在房主管理台选择以人类身份加入。'), true);
+      assert.equal(matchText.includes('点击轮次可查看历史记录。'), false);
+      assert.equal(await page.locator('.roster-person').count(), 1, '精简说明不能删除参赛者身份卡片');
+      assert.equal(await page.locator('[data-action="admin-join"]').count(), 1,
+        '精简说明不能删除房主实际加入参赛的按钮');
+      await screenshot(page, 'copy-cleanup-match-desktop-light.png');
     } else {
       throw new Error('Unknown scenario: ' + scenario);
     }

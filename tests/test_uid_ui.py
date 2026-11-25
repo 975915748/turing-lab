@@ -115,3 +115,9 @@ def test_model_profile_collapse_browser(model_site):
         cwd=root, capture_output=True, text=True, encoding='utf-8', timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
 
+def test_model_copy_cleanup_browser(model_site):
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(['node', str(root / 'tests' / 'uid_ui.cjs'), model_site, 'copy'],
+        cwd=root, capture_output=True, text=True, encoding='utf-8', timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+
