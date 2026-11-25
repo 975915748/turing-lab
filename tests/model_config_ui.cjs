@@ -131,6 +131,7 @@ async function registerPlayer(browser, username, displayName) {
 
     await second.locator('[data-action="delete-personal-model"]').click();
     await page.locator('#toast').filter({ hasText: '个人模型配置已删除' }).waitFor();
+    await page.waitForFunction(() => !document.querySelector('#toast')?.classList.contains('visible'));
     await first.waitFor();
     assert.equal(await page.locator('details[data-personal-model]').count(), 1);
     assert.equal(await first.evaluate(el => el.open), true);
@@ -141,13 +142,16 @@ async function registerPlayer(browser, username, displayName) {
     await first.locator('summary').click();
     await page.screenshot({ path: path.join(artifacts, 'model-config-desktop-light.png'), fullPage: true });
     await page.locator('#themeBtn').click();
+    await page.waitForTimeout(300);
     await page.screenshot({ path: path.join(artifacts, 'model-config-desktop-dark.png'), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     await page.locator('#themeBtn').click();
+    await page.waitForTimeout(300);
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     await page.screenshot({ path: path.join(artifacts, 'model-config-mobile-light.png'), fullPage: true });
     await page.locator('#themeBtn').click();
+    await page.waitForTimeout(300);
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     await page.screenshot({ path: path.join(artifacts, 'model-config-mobile-dark.png'), fullPage: true });
     await first.locator('summary').click();
@@ -161,6 +165,7 @@ async function registerPlayer(browser, username, displayName) {
 
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.locator('#themeBtn').click();
+    await page.waitForTimeout(300);
     const roomAuto = await mutate(hostContext, '/api/rooms', { title: '自动出题 UI 验收' });
     const roomManual = await mutate(hostContext, '/api/rooms', { title: '手动生成 UI 验收' });
     await mutate(hostContext, '/api/rooms/' + roomAuto.room_id + '/ai-judges', {
