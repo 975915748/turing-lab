@@ -7,7 +7,7 @@ const shortDate = s => s ? new Date(s).toLocaleString('zh-CN',{hour12:false}) : 
 const val = (id) => document.getElementById(id)?.value??'';
 const D = (txt='暂无记录') => `<p class="muted hint">${esc(txt)}</p>`;
 let toastTimer;
-function clearPersonalModelState(){state.personalModelEpoch=(state.personalModelEpoch||0)+1;state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};state.personalModelTestVersions={};state.personalModelTestPending={};state.personalModelSavePending={};}
+function clearPersonalModelState(){state.personalModelEpoch=(state.personalModelEpoch||0)+1;state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};state.personalModelTestVersions={};state.personalModelTestPending={};state.personalModelSavePending={};state.modelOperationRecords=[];state.modelOperationStats={};state.modelOperationProfileOptions=[];state.modelOperationTotal=0;state.modelOperationOffset=0;state.modelOperationFilters={profile_id:'',purpose:'',status:''};state.modelOperationsExpanded=false;}
 function toast(message){const el=$('#toast');el.textContent=message;el.classList.add('visible');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('visible'),4200)}
 function setConnection(txt,online){const el=$('#connection');el.textContent=(online?'● ':'○ ')+txt;el.className='connection'+(online?' online':'')}
 function applyPrefs(){let theme=localStorage.getItem('turing_theme')||'light';document.body.dataset.theme=theme;$('#themeBtn').textContent=theme==='light'?'☾ 深色':'☀ 日间';let f=Number(localStorage.getItem('turing_font')||15);if(f<12||f>22)f=15;document.documentElement.style.setProperty('--font',f+'px');$('#fontSize').value=f;$('#fontValue').textContent=f;}
