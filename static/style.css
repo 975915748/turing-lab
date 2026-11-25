@@ -83,7 +83,7 @@ main{min-height:calc(100vh - 170px);padding:32px 0 44px}.card{background:var(--p
 .readiness-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px}
 .readiness-grid>div{display:flex;flex-direction:column;gap:5px;padding:10px;border:1px solid var(--line);border-radius:10px;min-width:0}
 .readiness-grid strong{font-size:14px;overflow-wrap:anywhere}
-.readiness-messages{margin:0;padding:9px 12px 9px 30px;border-radius:9px;background:var(--surface-2);color:var(--muted);font-size:13px;line-height:1.6}
+.readiness-messages{margin:0;padding:9px 12px 9px 30px;border-radius:9px;background:var(--pane);color:var(--muted);font-size:13px;line-height:1.6}
 .readiness-messages li+li{margin-top:4px}
 .readiness-messages.danger-text{color:var(--danger)}
 .operation-limit-form{display:flex;gap:9px;align-items:center}
@@ -93,10 +93,10 @@ main{min-height:calc(100vh - 170px);padding:32px 0 44px}.card{background:var(--p
 .operation-record .label-line{gap:10px;align-items:flex-start}
 .operation-record .label-line strong{min-width:0;overflow-wrap:anywhere}
 .operation-meta{display:flex;gap:12px;flex-wrap:wrap;margin:8px 0 5px;font-size:12px;color:var(--muted)}
-.operation-status{display:inline-flex;align-items:center;white-space:nowrap;border:1px solid var(--line);border-radius:999px;padding:3px 8px;font-size:11px;color:var(--muted);background:var(--surface-2)}
+.operation-status{display:inline-flex;align-items:center;white-space:nowrap;border:1px solid var(--line);border-radius:999px;padding:3px 8px;font-size:11px;color:var(--muted);background:var(--pane)}
 .operation-status.completed{color:var(--success);border-color:color-mix(in srgb,var(--success) 30%,var(--line))}
 .operation-status.failed,.operation-status.blocked{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 30%,var(--line))}
-.operation-status.requesting,.operation-status.queued{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 30%,var(--line))}
+.operation-status.requesting,.operation-status.queued{color:var(--brand);border-color:color-mix(in srgb,var(--brand) 30%,var(--line))}
 .operation-error{font-size:12px;line-height:1.5;color:var(--danger);overflow-wrap:anywhere;margin:8px 0 0}
 .operation-filters{display:grid;grid-template-columns:1.2fr 1fr 1fr auto;gap:8px;margin:10px 0}
 .operation-pagination{margin-top:12px}
