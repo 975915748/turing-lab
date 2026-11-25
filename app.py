@@ -2230,7 +2230,8 @@ def create_app(db_path=None):
         return {'ok':True}
 
     @app.post('/api/rooms/{room_id}/ai-judges/questions/generate')
-    async def generate_ai_judge_questions(room_id:int,request:Request):
+    async def generate_ai_judge_questions(room_id:int,request:Request,
+                                          target_judge_id:Optional[int]=Query(default=None,ge=1)):
         with connection() as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
@@ -2249,6 +2250,8 @@ def create_app(db_path=None):
                 LEFT JOIN users u ON u.id=mp.owner_user_id
                 LEFT JOIN ai_judge_questions q ON q.room_id=j.room_id AND q.round_number=? AND q.ai_judge_id=j.id
                 WHERE j.room_id=? ORDER BY j.id''',(rnd['number'],room_id)).fetchall()
+            if target_judge_id is not None:
+                rows=[row for row in rows if row['judge_id']==target_judge_id]
             match_number=room['match_number']
             actor_id=u['id']
             session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
@@ -2277,6 +2280,28 @@ def create_app(db_path=None):
                                         credential_status,'绑定的模型配置不可用，请在个人中心检查后重新绑定。')})
                     continue
                 profiles.append(profile)
+            context_revision=hashlib.sha256(
+                (str(round_number)+'|'+','.join(roster)+'|'+history).encode('utf-8')).hexdigest()
+            retry_of=getattr(request.state,'model_operation_retry_of',None)
+            queued_profiles=[]
+            for profile in profiles:
+                with connection(immediate=True) as db:
+                    operation_id,created,active_state=create_model_operation_task(
+                        db,purpose='judge_question',target_type='ai_judge',
+                        target_key=profile['judge_id'],target_label=profile['label'],
+                        profile=profile,trigger_user_id=actor_id,room_id=room_id,
+                        match_number=match_number,round_number=round_number,
+                        context_revision=context_revision,retry_of=retry_of,
+                        idempotency_key=request.headers.get('Idempotency-Key'))
+                if created:
+                    profile['_operation_id']=operation_id
+                    queued_profiles.append(profile)
+                else:
+                    results.append({'judge_id':profile['judge_id'],'label':profile['label'],
+                                    'status':active_state,'reason':'该席位已有进行中的模型任务。'})
+            profiles=queued_profiles
+        if profiles:
+            await app.state.hub.notify(room_id,'model_operation_updated')
         if not rows:
             return {'generated':0,'skipped':0,'failed':[],'results':[],
                     'message':'当前房间没有 AI 裁判席。'}
@@ -2285,11 +2310,13 @@ def create_app(db_path=None):
             return {'generated':0,'skipped':0,'failed':[],'results':[],
                     'message':'本轮 AI 裁判均已提交问题，无需重复生成。'}
         if not profiles:
-            return {'generated':0,'skipped':len(results),'failed':[],'results':results,
-                    'message':'没有可自动出题的 AI 裁判；请检查绑定配置或使用手动转录。'}
+            return {'generated':0,'skipped':sum(x['status']=='skipped' for x in results),
+                    'blocked':sum(x['status']=='blocked' for x in results),'failed':[],'results':results,
+                    'message':'没有新的 AI 裁判请求；请查看席位状态或使用手动转录。'}
 
         async def generate_one(profile):
             judge_id=profile['judge_id']
+            operation_id=profile['_operation_id']
             try:
                 key=decrypt_api_key(profile['api_key_encrypted'])
                 def preflight():
@@ -2315,45 +2342,58 @@ def create_app(db_path=None):
                      '问题必须面向所有匿名参赛者，不能询问真实姓名、账号、模型名称或系统提示。'
                      '只输出问题正文，不要前言、编号或解释。')},
                     {'role':'user','content':f'此前轮次的匿名资料：\n{history}\n\n当前是第 {round_number} 轮，参赛者匿名代号：{", ".join(roster)}。'
-                     '请根据已有信息提出一个适合所有参赛者回答的全新问题。'}],key,preflight)
+                     '请根据已有信息提出一个适合所有参赛者回答的全新问题。'}],key,preflight,
+                    operation_id=operation_id)
                 question=norm_text(result['text'],3000)
                 with connection(immediate=True) as db:
                     current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
                     if not current or current['match_number']!=match_number or current['status']!='open':
+                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间比赛场次或状态发生变化，旧问题未保存。')
                         return {'judge_id':judge_id,'label':profile['label'],'status':'skipped',
                                 'reason':'生成期间比赛场次或状态发生变化，旧问题未保存。'}
                     if not model_call_actor_valid(db,room_id,actor_id,session_hash) or not model_profile_snapshot_valid(db,profile):
+                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间登录权限或模型配置发生变化，旧问题未保存。')
                         return {'judge_id':judge_id,'label':profile['label'],'status':'skipped',
                                 'reason':'生成期间登录权限或模型配置发生变化，旧问题未保存。'}
                     binding=db.execute('SELECT model_profile_id FROM ai_judges WHERE room_id=? AND id=?',
                                        (room_id,judge_id)).fetchone()
                     if not binding or binding['model_profile_id']!=profile['id']:
+                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间 AI 裁判席绑定发生变化，旧问题未保存。')
                         return {'judge_id':judge_id,'label':profile['label'],'status':'skipped',
                                 'reason':'生成期间 AI 裁判席绑定发生变化，旧问题未保存。'}
                     current_rnd=current_round(db,current)
                     if current_rnd['number']!=round_number or current_rnd['status']!='draft':
+                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间轮次已变化或已开始作答，旧问题未保存。')
                         return {'judge_id':judge_id,'label':profile['label'],'status':'skipped',
                                 'reason':'生成期间轮次已变化或已开始作答，旧问题未保存。'}
                     if aliases(db,room_id)[2]!=roster:
+                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间参赛名单发生变化，旧问题未保存。')
                         return {'judge_id':judge_id,'label':profile['label'],'status':'skipped',
                                 'reason':'生成期间参赛名单发生变化，旧问题未保存。'}
                     if db.execute('SELECT 1 FROM ai_judge_questions WHERE room_id=? AND round_number=? AND ai_judge_id=?',
                                   (room_id,round_number,judge_id)).fetchone():
+                        finish_model_operation_in_db(db,operation_id,'stale',error='该 AI 裁判已提交本轮问题，未重复保存。')
                         return {'judge_id':judge_id,'label':profile['label'],'status':'skipped',
                                 'reason':'该 AI 裁判已提交本轮问题，未重复保存。'}
                     db.execute('INSERT INTO ai_judge_questions(room_id,round_number,ai_judge_id,text,created_at) VALUES(?,?,?,?,?)',
                                (room_id,round_number,judge_id,question,utcnow()))
                     log_event(db,room_id,round_number,'ai_judge_question','AI 裁判','模型 API 已自动生成本轮问题')
+                    finish_model_operation_in_db(db,operation_id,'completed',result_applied=True)
                 await app.state.hub.notify(room_id,'ai_judge_question')
                 return {'judge_id':judge_id,'label':profile['label'],'status':'generated','usage':result['usage']}
+            except ModelRequestLimitReached as exc:
+                return {'judge_id':judge_id,'label':profile['label'],'status':'blocked','error':str(exc)}
             except ModelCallCancelled:
                 return {'judge_id':judge_id,'label':profile['label'],'status':'skipped',
                         'reason':'任务排队期间权限、配置、绑定或比赛状态发生变化；未向服务商发送请求。'}
             except ModelAPIError as exc:
+                await finish_and_notify_model_operation(operation_id,'failed',error=exc)
                 return {'judge_id':judge_id,'label':profile['label'],'status':'failed','error':str(exc)}
             except HTTPException as exc:
+                await finish_and_notify_model_operation(operation_id,'failed',error=exc)
                 return {'judge_id':judge_id,'label':profile['label'],'status':'failed','error':str(exc.detail)}
-            except Exception:
+            except Exception as exc:
+                await finish_and_notify_model_operation(operation_id,'failed',error=exc)
                 return {'judge_id':judge_id,'label':profile['label'],'status':'failed',
                         'error':'模型调用失败或返回内容为空，请检查配置、服务状态或稍后重试。'}
 
@@ -2362,7 +2402,9 @@ def create_app(db_path=None):
         failed=[x for x in results if x['status']=='failed']
         skipped=sum(x['status']=='skipped' for x in results)
         generated=sum(x['status']=='generated' for x in results)
-        return {'generated':generated,'skipped':skipped,'failed':failed,'results':results,
+        return {'generated':generated,'skipped':skipped,
+                'blocked':sum(x['status']=='blocked' for x in results),
+                'failed':failed,'results':results,
                 'message':('AI 裁判问题生成完成。' if generated else
                            '没有 AI 裁判成功生成问题；请查看各席位原因。')}
 
