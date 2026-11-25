@@ -680,3 +680,107 @@ def test_queued_model_answer_is_revalidated_before_provider_call(tmp_path, monke
 
     asyncio.run(scenario())
 
+@pytest.mark.parametrize('participant_count', [0, 1])
+def test_ai_judge_question_generation_rejects_insufficient_roster_before_provider_call(
+        model_lab, monkeypatch, participant_count):
+    admin, base, path = model_lab['admin'], model_lab['base'], model_lab['path']
+    post(admin, base + '/ai-judges', {
+        'name': '前置条件 AI 裁判',
+        'model_profile_id': model_lab['profile_id'],
+    })
+    if participant_count == 0:
+        with db_open(path) as db:
+            db.execute('DELETE FROM members WHERE room_id=?', (int(base.rsplit('/', 1)[1]),))
+    else:
+        p2_id = model_lab['p2'].get('/api/me').json()['user']['id']
+        with db_open(path) as db:
+            db.execute('DELETE FROM members WHERE room_id=? AND user_id=?',
+                       (int(base.rsplit('/', 1)[1]), p2_id))
+
+    provider_calls = []
+
+    async def unexpected_provider_call(*args, **kwargs):
+        provider_calls.append(True)
+        raise AssertionError('人数不足时不应调用模型服务商')
+
+    monkeypatch.setattr(app_module, 'chat_completion', unexpected_provider_call)
+    result = post(admin, base + '/ai-judges/questions/generate', expected=409)
+    assert '两名在场参赛者' in result['detail']
+    assert provider_calls == []
+
+
+def test_ai_judge_question_generation_reports_provider_failure(model_lab, monkeypatch):
+    admin, base = model_lab['admin'], model_lab['base']
+    post(admin, base + '/ai-judges', {
+        'name': '失败反馈 AI 裁判',
+        'model_profile_id': model_lab['profile_id'],
+    })
+
+    async def provider_failure(*args, **kwargs):
+        raise ModelAPIError('模型服务返回 HTTP 503。')
+
+    monkeypatch.setattr(app_module, 'chat_completion', provider_failure)
+    result = post(admin, base + '/ai-judges/questions/generate')
+    assert result['generated'] == 0
+    assert len(result['failed']) == 1
+    assert 'HTTP 503' in result['failed'][0]['error']
+    room = admin.get(base).json()
+    assert room['rounds'][0]['questions'] == []
+
+
+def test_queued_ai_judge_question_is_discarded_when_roster_changes(model_lab, monkeypatch):
+    admin, base = model_lab['admin'], model_lab['base']
+    for index in range(5):
+        post(admin, base + '/ai-judges', {
+            'name': f'排队 AI 裁判 {index + 1}',
+            'model_profile_id': model_lab['profile_id'],
+        })
+    room_info = admin.get(base).json()
+    invite_code = room_info['invite_code']
+    cookie = admin.cookies.get(app_module.COOKIE)
+    started = 0
+
+    async def scenario():
+        nonlocal started
+        transport = httpx.ASGITransport(app=model_lab['app'], raise_app_exceptions=False)
+        four_started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocked_provider(*args, **kwargs):
+            nonlocal started
+            started += 1
+            if started == 4:
+                four_started.set()
+            await release.wait()
+            return {'text': '名单变化后不应保存的问题', 'usage': {}}
+
+        monkeypatch.setattr(app_module, 'chat_completion', blocked_provider)
+        async with (
+            httpx.AsyncClient(transport=transport, base_url='http://testserver',
+                              cookies={app_module.COOKIE: cookie}) as async_admin,
+            httpx.AsyncClient(transport=transport, base_url='http://testserver') as third_player,
+        ):
+            generate_task = asyncio.create_task(
+                async_post(async_admin, base + '/ai-judges/questions/generate'))
+            await asyncio.wait_for(four_started.wait(), 3)
+            assert started == 4
+            registered = await async_post(third_player, '/api/register', {
+                'username': 'question_roster_change',
+                'display_name': '新增参赛者',
+                'password': 'question-player-password',
+                'code': invite_code,
+            })
+            assert registered.status_code == 200, registered.text
+            release.set()
+            response = await asyncio.wait_for(generate_task, 3)
+            assert response.status_code == 200, response.text
+            payload = response.json()
+            assert started == 4, '第五个排队任务在名单变化后不应触发服务商调用'
+            assert payload['generated'] == 0
+            assert payload['skipped'] == 5
+            assert all(item.get('reason') for item in payload['results'] if item['status'] == 'skipped')
+            current = (await async_admin.get(base)).json()
+            assert current['rounds'][0]['questions'] == []
+
+    asyncio.run(scenario())
+
