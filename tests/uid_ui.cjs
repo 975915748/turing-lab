@@ -320,7 +320,7 @@ async function logout(page) {
       assert.equal(newTestResponse.status(), 200);
       await firstAfterSave.locator('[data-model-test-result]').getByText('已保存配置连接测试成功', { exact: false }).waitFor();
       assert.equal(await page.evaluate(id => state.modelTestResults[id]?.profileSnapshot ===
-        JSON.stringify([id, 'saved-model-first', 'https://api.example.com/v1', 'saved-model-first', 0.7, 512, 30, true, 'ok']), ids[0]), true,
+        JSON.stringify([id, '重复配置', 'https://api.example.com/v1', 'saved-model-first', 0.7, 512, 30, true, 'ok']), ids[0]), true,
         '最新测试结果必须绑定到已保存的新配置快照');
       await page.unroute(testUrl);
 
