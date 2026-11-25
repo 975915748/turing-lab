@@ -680,3 +680,183 @@ def test_queued_model_answer_is_revalidated_before_provider_call(tmp_path, monke
 
     asyncio.run(scenario())
 
+@pytest.mark.parametrize('participant_count', [0, 1])
+def test_successful_connection_test_does_not_bypass_ai_question_roster_requirement(
+        model_lab, monkeypatch, participant_count):
+    admin, base, path = model_lab['admin'], model_lab['base'], model_lab['path']
+    profile_id = model_lab['profile_id']
+    tested = post(admin, f'/api/me/models/{profile_id}/test')
+    assert tested['ok'] is True
+
+    judge = post(admin, base + '/ai-judges', {
+        'name': '人数前置条件 AI 裁判',
+        'model_profile_id': profile_id,
+    })
+    with db_open(path) as db:
+        members = db.execute(
+            'SELECT user_id FROM members WHERE room_id=? ORDER BY alias', (int(base.rsplit('/', 1)[1]),)
+        ).fetchall()
+        for row in members[participant_count:]:
+            db.execute('DELETE FROM members WHERE room_id=? AND user_id=?',
+                       (int(base.rsplit('/', 1)[1]), row['user_id']))
+
+    provider_calls = []
+
+    async def provider_must_not_be_called(profile, messages, api_key):
+        provider_calls.append(profile)
+        raise AssertionError('人数不足时不得请求模型服务商')
+
+    monkeypatch.setattr(app_module, 'chat_completion', provider_must_not_be_called)
+    me = admin.get('/api/me').json()['user']
+    response = admin.post(base + '/ai-judges/questions/generate',
+                          headers={'X-CSRF-Token': me['csrf']})
+    assert response.status_code == 409, response.text
+    assert f'当前仅有 {participant_count} 位' in response.json()['detail']
+    assert provider_calls == []
+    with db_open(path) as db:
+        assert db.execute(
+            'SELECT COUNT(*) FROM ai_judge_questions WHERE room_id=?',
+            (int(base.rsplit('/', 1)[1]),)
+        ).fetchone()[0] == 0
+
+
+def test_ai_question_generation_reports_unbound_and_unusable_profiles_without_provider_calls(
+        model_lab, monkeypatch):
+    admin, base, path = model_lab['admin'], model_lab['base'], model_lab['path']
+    unbound = post(admin, base + '/ai-judges', {'name': '未绑定裁判'})
+    unusable = post(admin, base + '/ai-judges', {
+        'name': '缺少密钥裁判',
+        'model_profile_id': model_lab['profile_id'],
+    })
+    room_id = int(base.rsplit('/', 1)[1])
+    with db_open(path) as db:
+        db.execute('UPDATE model_profiles SET api_key_encrypted=? WHERE id=?',
+                   ('', model_lab['profile_id']))
+
+    provider_calls = []
+
+    async def provider_must_not_be_called(profile, messages, api_key):
+        provider_calls.append(profile)
+        raise AssertionError('不可用的模型凭据不得请求服务商')
+
+    monkeypatch.setattr(app_module, 'chat_completion', provider_must_not_be_called)
+    result = post(admin, base + '/ai-judges/questions/generate')
+    assert result['generated'] == 0
+    assert result['skipped'] == 2
+    assert result['failed'] == []
+    by_id = {item['judge_id']: item for item in result['results']}
+    assert '尚未绑定个人模型配置' in by_id[unbound['id']]['reason']
+    assert '缺少 API Key' in by_id[unusable['id']]['reason']
+    assert provider_calls == []
+    with db_open(path) as db:
+        assert db.execute(
+            'SELECT COUNT(*) FROM ai_judge_questions WHERE room_id=?', (room_id,)
+        ).fetchone()[0] == 0
+
+
+def test_ai_question_generation_returns_safe_provider_failure(model_lab, monkeypatch):
+    admin, base, path = model_lab['admin'], model_lab['base'], model_lab['path']
+    judge = post(admin, base + '/ai-judges', {
+        'name': '服务失败裁判',
+        'model_profile_id': model_lab['profile_id'],
+    })
+
+    async def provider_failure(profile, messages, api_key):
+        raise ModelAPIError('模型服务返回 HTTP 401，请检查 API Key、模型名称和账户额度。')
+
+    monkeypatch.setattr(app_module, 'chat_completion', provider_failure)
+    result = post(admin, base + '/ai-judges/questions/generate')
+    assert result['generated'] == 0
+    assert len(result['failed']) == 1
+    assert result['failed'][0]['judge_id'] == judge['id']
+    assert 'HTTP 401' in result['failed'][0]['error']
+    assert model_lab['profile_body']['api_key'] not in json.dumps(result, ensure_ascii=False)
+    with db_open(path) as db:
+        assert db.execute(
+            'SELECT COUNT(*) FROM ai_judge_questions WHERE room_id=?',
+            (int(base.rsplit('/', 1)[1]),)
+        ).fetchone()[0] == 0
+
+
+def test_ai_question_is_not_saved_if_model_profile_changes_during_generation(tmp_path, monkeypatch):
+    monkeypatch.setenv('MODEL_CREDENTIAL_KEY', Fernet.generate_key().decode('ascii'))
+    monkeypatch.setattr(app_module, 'validate_base_url', lambda value: value.strip().rstrip('/'))
+    path = tmp_path / 'stale-ai-question.sqlite3'
+    seed_admin(path, 'question_admin', '出题版本主持人', 'question-admin-password')
+    app = create_app(path)
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+        async with (
+            httpx.AsyncClient(transport=transport, base_url='http://testserver') as admin,
+            httpx.AsyncClient(transport=transport, base_url='http://testserver') as mutator,
+            httpx.AsyncClient(transport=transport, base_url='http://testserver') as p1,
+            httpx.AsyncClient(transport=transport, base_url='http://testserver') as p2,
+        ):
+            assert (await async_post(admin, '/api/login', {
+                'username': 'question_admin', 'password': 'question-admin-password',
+            })).status_code == 200
+            room = await async_post(admin, '/api/rooms', {'title': 'AI 出题陈旧配置探针'})
+            assert room.status_code == 200, room.text
+            base = f"/api/rooms/{room.json()['room_id']}"
+            for client, username in ((p1, 'question_human_a'), (p2, 'question_human_b')):
+                registered = await async_post(client, '/api/register', {
+                    'username': username, 'password': 'question-human-password', 'code': room.json()['code'],
+                })
+                assert registered.status_code == 200, registered.text
+
+            profile_body = {
+                'name': '出题模型', 'base_url': 'https://api.example.com/v1',
+                'model': 'question-model', 'api_key': 'sk-question-private',
+                'temperature': 0.4, 'max_tokens': 512, 'timeout_seconds': 30,
+            }
+            profile = await async_post(admin, '/api/me/models', profile_body)
+            assert profile.status_code == 200, profile.text
+            profile_id = profile.json()['id']
+            judge = await async_post(admin, base + '/ai-judges', {
+                'name': '等待中的 AI 裁判', 'model_profile_id': profile_id,
+            })
+            assert judge.status_code == 200, judge.text
+
+            started = asyncio.Event()
+            release = asyncio.Event()
+
+            async def delayed_question(profile, messages, api_key):
+                started.set()
+                await release.wait()
+                return {'text': '在信息不完整时，你会如何决定下一步行动？', 'usage': {}}
+
+            monkeypatch.setattr(app_module, 'chat_completion', delayed_question)
+            generation = asyncio.create_task(async_post(
+                admin, base + '/ai-judges/questions/generate'
+            ))
+            await asyncio.wait_for(started.wait(), 2)
+
+            assert (await async_post(mutator, '/api/login', {
+                'username': 'question_admin', 'password': 'question-admin-password',
+            })).status_code == 200
+            me = (await mutator.get('/api/me')).json()['user']
+            changed_profile = dict(profile_body)
+            changed_profile['name'] = '出题模型（生成期间已编辑）'
+            changed_profile['api_key'] = ''
+            changed = await mutator.put(
+                f'/api/me/models/{profile_id}', json=changed_profile,
+                headers={'X-CSRF-Token': me['csrf']},
+            )
+            assert changed.status_code == 200, changed.text
+
+            release.set()
+            response = await asyncio.wait_for(generation, 3)
+            assert response.status_code == 200, response.text
+            result = response.json()
+            assert result['generated'] == 0
+            assert result['skipped'] == 1
+            assert '模型配置发生变化' in result['results'][0]['reason']
+            with db_open(path) as db:
+                assert db.execute(
+                    'SELECT COUNT(*) FROM ai_judge_questions WHERE room_id=?',
+                    (room.json()['room_id'],)
+                ).fetchone()[0] == 0
+
+    asyncio.run(scenario())
+
