@@ -114,8 +114,15 @@ const { chromium } = require('playwright-core');
     await filters.locator('[name="purpose"]').selectOption('judge_question');
     await filters.locator('button[type="submit"]').click();
     assert.equal(await page.locator('.operation-record').count(), 3);
+    const directCompleted = await api('GET', '/api/me/model-operations?purpose=judge_question&status=completed');
+    assert.equal(directCompleted.total, 2, 'the API status filter should return only completed attempts');
     await filters.locator('[name="status"]').selectOption('completed');
+    const filteredResponsePromise = page.waitForResponse(response =>
+      response.url().includes('/api/me/model-operations') && response.url().includes('status=completed'));
     await filters.locator('button[type="submit"]').click();
+    const filteredResponse = await filteredResponsePromise;
+    const filteredBody = await filteredResponse.json();
+    assert.equal(filteredBody.total, 2, 'the UI should send and receive the selected status filter');
     await page.waitForFunction(() => {
       const status = document.querySelector('form[data-form="model-operation-filters"] [name="status"]');
       return status?.value === 'completed' && document.querySelectorAll('.operation-record').length === 2;
