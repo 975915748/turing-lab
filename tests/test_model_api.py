@@ -251,6 +251,30 @@ def test_damaged_ciphertext_is_reported_but_does_not_block_manual_site_access(
     assert 'status=cannot_decrypt' in capsys.readouterr().err
 
 
+
+def test_model_profile_edit_with_blank_api_key_preserves_existing_credential(model_lab):
+    admin, profile_id, path = model_lab['admin'], model_lab['profile_id'], model_lab['path']
+    with db_open(path) as db:
+        before = db.execute(
+            'SELECT api_key_encrypted FROM model_profiles WHERE id=?', (profile_id,)
+        ).fetchone()['api_key_encrypted']
+    payload = dict(model_lab['profile_body'])
+    payload['name'] = '更新名称但保留密钥'
+    payload['api_key'] = ''
+    me = admin.get('/api/me').json()
+    response = admin.put(
+        f"/api/me/models/{profile_id}",
+        json=payload,
+        headers={'X-CSRF-Token': me['user']['csrf']},
+    )
+    assert response.status_code == 200, response.text
+    with db_open(path) as db:
+        after = db.execute(
+            'SELECT api_key_encrypted FROM model_profiles WHERE id=?', (profile_id,)
+        ).fetchone()['api_key_encrypted']
+    assert after == before
+    assert model_api.decrypt_api_key(after) == model_lab['profile_body']['api_key']
+
 def test_broken_model_profile_can_be_repaired_without_changing_match_data(model_lab):
     admin, base, profile_id, path = (
         model_lab['admin'], model_lab['base'], model_lab['profile_id'], model_lab['path']
