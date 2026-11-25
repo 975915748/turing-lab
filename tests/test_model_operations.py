@@ -276,9 +276,12 @@ def test_inflight_result_does_not_resurrect_tasks_after_match_cleanup(operation_
 def test_startup_marks_unfinished_tasks_interrupted_without_replaying(operation_lab):
     lab = operation_lab
     admin, base, profile_id = lab['admin'], lab['base'], lab['profile_id']
-    add_ai_judge(admin, base, '启动恢复裁判', profile_id)
+    judge = add_ai_judge(admin, base, '启动恢复裁判', profile_id)
     post(admin, base + '/ai-judges/questions/generate')
     with db_open(lab['path']) as db:
+        # Simulate a crash before the response was applied to the match.
+        db.execute('DELETE FROM ai_judge_questions WHERE room_id=? AND ai_judge_id=?',
+                   (lab['room_id'],judge['id']))
         db.execute("""UPDATE model_operation_tasks SET state='requesting',
             request_finished_at=NULL,finished_at=NULL,result_applied=0
             WHERE room_id=?""", (lab['room_id'],))
