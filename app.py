@@ -917,6 +917,12 @@ def combined_round_question(rows):
     return '\n\n'.join(f'【裁判问题 {i}】\n{row["text"]}' for i,row in enumerate(rows,1))
 
 
+def combined_question_length_with_addition(db, room_id, round_number, text):
+    rows=list(round_question_rows(db,room_id,round_number))
+    rows.append({'text':text})
+    return len(combined_round_question(rows))
+
+
 def inspect_round_start(db, room):
     rnd=current_round(db,room)
     participant_count=active_participant_count(db,room['id'])
@@ -962,15 +968,19 @@ def match_readiness(db, room):
         LEFT JOIN ai_judge_questions q ON q.room_id=j.room_id AND q.round_number=? AND q.ai_judge_id=j.id
         WHERE j.room_id=? ORDER BY j.id''',(rnd['number'],room['id'])).fetchall()
     auto_pending=0
-    manual_ai_pending=0
+    unbound_ai_pending=0
+    unavailable_ai_pending=0
     for row in ai_rows:
         if row['question_id'] is not None:
             continue
-        if row['model_profile_id'] is not None and model_profile_credential_status(dict(row))=='ok':
+        if row['model_profile_id'] is None:
+            unbound_ai_pending+=1
+            continue
+        if model_profile_credential_status(dict(row))=='ok':
             auto_pending+=1
         else:
-            manual_ai_pending+=1
-    manual_pending=human_pending+manual_ai_pending
+            unavailable_ai_pending+=1
+    manual_pending=human_pending+unbound_ai_pending
     attempts=model_request_count(db,room['id'],room['match_number'])
     limit=room['model_request_limit']
     limit_reached=limit is not None and attempts>=limit
@@ -979,7 +989,7 @@ def match_readiness(db, room):
                   not limit_reached and validation['question_chars']<=6000)
     blockers=[]
     if validation['participant_count']<2:
-        blockers.append('至少需要两名在场参赛者。')
+        blockers.append(f'当前仅有 {validation["participant_count"]} 位在场参赛者，至少需要 2 位。')
     if room['status']!='open':
         blockers.append('本场比赛已结束。')
     elif rnd['status']!='draft':
@@ -991,6 +1001,8 @@ def match_readiness(db, room):
     notices=[]
     if manual_pending:
         notices.append(f'{manual_pending} 位真人 / 手动 AI 裁判尚未交题；已有至少一份合规问题时，房主仍可按现有规则确认开局。')
+    if unavailable_ai_pending:
+        notices.append(f'{unavailable_ai_pending} 位 AI 裁判配置不可用，请在 AI 裁判管理检查席位，并修复个人配置或更换绑定。')
     if limit_reached and auto_pending:
         notices.append('本场模型请求次数已达上限；可调整上限或手动转录。')
     elif auto_pending:
@@ -1010,6 +1022,7 @@ def match_readiness(db, room):
                 WHERE room_id=? AND round_number=? AND ai_judge_id=?''',
                 (room['id'],rnd['number'],j['id'])).fetchone())),
         'auto_pending':auto_pending,'manual_pending':manual_pending,
+        'unavailable_ai_pending':unavailable_ai_pending,
         'independent_judges':len(judges),'external_judge':not judges,
         'phase':rnd['status'],'can_start':validation['reason'] is None,
         'can_generate_and_start':can_generate,
@@ -1017,8 +1030,9 @@ def match_readiness(db, room):
         'model_request_remaining':None if limit is None else max(0,int(limit)-attempts),
         'model_limit_reached':limit_reached,'blockers':blockers,'notices':notices,
         'manual_question_required':not judges and rnd['status']=='draft' and not question_count,
-        'suggested_view':('human-judges' if human_pending else
-                          'ai-judges' if manual_ai_pending or auto_pending else 'admin'),
+        'suggested_view':('admin' if validation['participant_count']<2 else
+                          'human-judges' if human_pending else
+                          'ai-judges' if unbound_ai_pending or unavailable_ai_pending or auto_pending else 'admin'),
     }
 
 
@@ -1763,10 +1777,8 @@ def create_app(db_path=None):
             session=db.execute('''SELECT u.id FROM sessions s JOIN users u ON u.id=s.user_id
                 WHERE s.token_hash=? AND s.expires_at>? AND u.deleted_at IS NULL''',
                 (token_hash,utcnow())).fetchone()
-            valid=bool(session and session['id']==profile['owner_user_id'] and db.execute(
-                '''SELECT 1 FROM model_profiles mp JOIN users u ON u.id=mp.owner_user_id
-                WHERE mp.id=? AND mp.owner_user_id=? AND mp.ownership_issue IS NULL AND u.deleted_at IS NULL''',
-                (profile_id,profile['owner_user_id'])).fetchone())
+            valid=bool(session and session['id']==profile['owner_user_id'] and
+                model_profile_snapshot_valid(db,profile))
         if not valid:
             await finish_and_notify_model_operation(operation_id,'stale',
                 error='测试期间模型配置或账号状态已变化；服务商请求结果未作为有效测试应用。')
@@ -2243,8 +2255,8 @@ def create_app(db_path=None):
                 (token_hash,utcnow())).fetchone()
             current_room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
             valid=bool(session and current_room and can_manage_room(current_room,dict(session)) and
-                db.execute('SELECT 1 FROM model_profiles WHERE id=? AND owner_user_id=?',
-                           (profile_id,session['id'])).fetchone())
+                model_profile_snapshot_valid(db,profile) and
+                profile['owner_user_id']==session['id'])
         if not valid:
             await finish_and_notify_model_operation(operation_id,'stale',
                 error='测试期间模型配置或账号状态已变化；服务商请求结果未作为有效测试应用。')
@@ -2531,6 +2543,10 @@ def create_app(db_path=None):
                         finish_model_operation_in_db(db,operation_id,'stale',error='该 AI 裁判已提交本轮问题，未重复保存。')
                         return {'judge_id':judge_id,'label':profile['label'],'status':'skipped',
                                 'reason':'该 AI 裁判已提交本轮问题，未重复保存。'}
+                    if combined_question_length_with_addition(db,room_id,round_number,question)>6000:
+                        error='生成的问题会使本轮裁判问题合计超过 6000 字，问题未保存；请先精简已有问题。'
+                        finish_model_operation_in_db(db,operation_id,'failed',error=error)
+                        return {'judge_id':judge_id,'label':profile['label'],'status':'failed','error':error}
                     db.execute('INSERT INTO ai_judge_questions(room_id,round_number,ai_judge_id,text,created_at) VALUES(?,?,?,?,?)',
                                (room_id,round_number,judge_id,question,utcnow()))
                     log_event(db,room_id,round_number,'ai_judge_question','AI 裁判','模型 API 已自动生成本轮问题')
@@ -2585,6 +2601,8 @@ def create_app(db_path=None):
             if len(roster)<2:
                 raise HTTPException(409,'至少需要两名参赛者。')
             msg=norm_text(body.text,3000)
+            if combined_question_length_with_addition(db,room_id,rnd['number'],msg)>6000:
+                raise HTTPException(422,'本轮裁判问题合计不能超过 6000 字，请精简后重新提交。')
             db.execute('INSERT INTO ai_judge_questions(room_id,round_number,ai_judge_id,text,created_at) VALUES(?,?,?,?,?)',
                        (room_id,rnd['number'],judge_id,msg,utcnow()))
             log_event(db,room_id,rnd['number'],'ai_judge_question','管理员','已转录 AI 裁判问题')
@@ -2609,6 +2627,8 @@ def create_app(db_path=None):
             if len(roster)<2:
                 raise HTTPException(409,'至少需要两名参赛者。')
             text=norm_text(body.text,3000)
+            if combined_question_length_with_addition(db,room_id,rnd['number'],text)>6000:
+                raise HTTPException(422,'本轮裁判问题合计不能超过 6000 字，请精简后重新提交。')
             db.execute('INSERT INTO judge_questions(room_id,round_number,judge_user_id,text,created_at) VALUES(?,?,?,?,?)',
                        (room_id,rnd['number'],u['id'],text,utcnow()))
             # 审计日志只记录提交动作，不存入账号信息或答案。
@@ -2844,7 +2864,7 @@ def create_app(db_path=None):
                     if not current or current['match_number']!=match_number or current['status']!='open':
                         finish_model_operation_in_db(db,operation_id,'stale',error='生成期间比赛场次或状态发生变化，旧回答未保存。')
                         return {'alias':alias,'status':'skipped'}
-                    if not model_call_actor_valid(db,room_id,actor_id,session_hash) or not model_profile_owner_active(db,profile['id']):
+                    if not model_call_actor_valid(db,room_id,actor_id,session_hash) or not model_profile_snapshot_valid(db,profile):
                         finish_model_operation_in_db(db,operation_id,'stale',error='生成期间登录权限或模型配置所属账号发生变化，旧回答未保存。')
                         return {'alias':alias,'status':'skipped'}
                     binding=db.execute('SELECT model_profile_id FROM ai_players WHERE room_id=? AND alias=?',
@@ -3212,7 +3232,7 @@ def create_app(db_path=None):
                     if not current or current['match_number']!=match_number or current['status']!='open':
                         finish_model_operation_in_db(db,operation_id,'stale',error='生成期间比赛场次或状态发生变化，旧判决未保存。')
                         return {'judge_id':judge_id,'status':'skipped'}
-                    if not model_call_actor_valid(db,room_id,actor_id,session_hash) or not model_profile_owner_active(db,profile['id']):
+                    if not model_call_actor_valid(db,room_id,actor_id,session_hash) or not model_profile_snapshot_valid(db,profile):
                         finish_model_operation_in_db(db,operation_id,'stale',error='生成期间登录权限或模型配置所属账号发生变化，旧判决未保存。')
                         return {'judge_id':judge_id,'status':'skipped'}
                     binding=db.execute('SELECT model_profile_id FROM ai_judges WHERE room_id=? AND id=?',
