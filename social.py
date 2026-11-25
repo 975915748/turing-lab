@@ -783,11 +783,11 @@ def register_social_routes(
             message_id = int(body.last_read_message_id)
             if message_id:
                 row = db.execute(
-                    "SELECT id FROM dm_messages WHERE id=? AND conversation_id=?",
-                    (message_id, conv["id"]),
+                    "SELECT id FROM dm_messages WHERE id=? AND conversation_id=? AND recipient_user_id=?",
+                    (message_id, conv["id"], user["id"]),
                 ).fetchone()
                 if not row:
-                    raise HTTPException(404, "已读位置不属于当前会话。")
+                    raise HTTPException(404, "已读位置不属于当前收件人的消息。")
             now = utcnow()
             db.execute(
                 """INSERT INTO dm_read_positions(conversation_id,user_id,last_read_message_id,updated_at)
