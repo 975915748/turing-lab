@@ -861,3 +861,97 @@ def test_ai_question_is_not_saved_if_model_profile_changes_during_generation(tmp
 
     asyncio.run(scenario())
 
+def test_queued_ai_judge_question_rechecks_seat_binding_before_provider_call(tmp_path, monkeypatch):
+    monkeypatch.setenv('MODEL_CREDENTIAL_KEY', Fernet.generate_key().decode('ascii'))
+    monkeypatch.setattr(app_module, 'validate_base_url', lambda value: value.strip().rstrip('/'))
+    path = tmp_path / 'queued-ai-question.sqlite3'
+    seed_admin(path, 'queued_question_admin', '排队出题主持人', 'queued-question-password')
+    app = create_app(path)
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+        async with (
+            httpx.AsyncClient(transport=transport, base_url='http://testserver') as admin,
+            httpx.AsyncClient(transport=transport, base_url='http://testserver') as mutator,
+            httpx.AsyncClient(transport=transport, base_url='http://testserver') as p1,
+            httpx.AsyncClient(transport=transport, base_url='http://testserver') as p2,
+        ):
+            assert (await async_post(admin, '/api/login', {
+                'username': 'queued_question_admin', 'password': 'queued-question-password',
+            })).status_code == 200
+            room = await async_post(admin, '/api/rooms', {'title': 'AI 裁判排队预检'})
+            assert room.status_code == 200, room.text
+            room_id = room.json()['room_id']
+            base = f'/api/rooms/{room_id}'
+            for client, username in ((p1, 'queued_question_a'), (p2, 'queued_question_b')):
+                joined = await async_post(client, '/api/register', {
+                    'username': username, 'password': 'queued-question-human-password',
+                    'code': room.json()['code'],
+                })
+                assert joined.status_code == 200, joined.text
+            profile = await async_post(admin, '/api/me/models', {
+                'name': '排队出题配置', 'base_url': 'https://api.example.com/v1',
+                'model': 'queued-question-model', 'api_key': 'sk-queued-question',
+                'temperature': 0.5, 'max_tokens': 512, 'timeout_seconds': 30,
+            })
+            assert profile.status_code == 200, profile.text
+            judge_ids = []
+            for index in range(5):
+                judge = await async_post(admin, base + '/ai-judges', {
+                    'name': f'排队出题裁判 {index + 1}',
+                    'model_profile_id': profile.json()['id'],
+                })
+                assert judge.status_code == 200, judge.text
+                judge_ids.append(judge.json()['id'])
+
+            started_ids = []
+            four_started = asyncio.Event()
+            release = asyncio.Event()
+
+            async def blocked_question(profile_snapshot, messages, api_key):
+                started_ids.append(profile_snapshot['judge_id'])
+                if len(started_ids) == 4:
+                    four_started.set()
+                await release.wait()
+                return {'text': '如果无法立即确认信息，你会如何验证？', 'usage': {}}
+
+            monkeypatch.setattr(app_module, 'chat_completion', blocked_question)
+            generation = asyncio.create_task(async_post(
+                admin, base + '/ai-judges/questions/generate'
+            ))
+            await asyncio.wait_for(four_started.wait(), 3)
+            assert len(started_ids) == 4
+            queued_judge_id = next(judge_id for judge_id in judge_ids if judge_id not in started_ids)
+
+            assert (await async_post(mutator, '/api/login', {
+                'username': 'queued_question_admin', 'password': 'queued-question-password',
+            })).status_code == 200
+            me = (await mutator.get('/api/me')).json()['user']
+            rebound = await mutator.put(
+                base + f'/ai-judges/{queued_judge_id}/model',
+                json={'model_profile_id': None},
+                headers={'X-CSRF-Token': me['csrf']},
+            )
+            assert rebound.status_code == 200, rebound.text
+
+            release.set()
+            response = await asyncio.wait_for(generation, 4)
+            assert response.status_code == 200, response.text
+            result = response.json()
+            assert result['generated'] == 4
+            assert result['skipped'] == 1
+            assert len(started_ids) == 4, '排队席位解绑后不得发出第五个 provider 请求'
+            skipped = next(x for x in result['results'] if x['judge_id'] == queued_judge_id)
+            assert skipped['status'] == 'skipped'
+            assert '未向服务商发送请求' in skipped['reason']
+            with db_open(path) as db:
+                assert db.execute(
+                    'SELECT COUNT(*) FROM ai_judge_questions WHERE room_id=? AND ai_judge_id=?',
+                    (room_id, queued_judge_id)
+                ).fetchone()[0] == 0
+                assert db.execute(
+                    'SELECT COUNT(*) FROM ai_judge_questions WHERE room_id=?', (room_id,)
+                ).fetchone()[0] == 4
+
+    asyncio.run(scenario())
+
