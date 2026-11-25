@@ -236,15 +236,19 @@ async function logout(page) {
       assert.equal(await second.evaluate(el => el.open), false);
 
       // A real mocked connection test is separate from the stored credential status.
-      await first.locator('[data-action="test-personal-model"]').click();
-      await first.locator('[data-model-test-result]').getByText('连接测试成功', { exact: false }).waitFor();
       assert.equal(await first.getByText('API Key 已保存（可解密）', { exact: true }).count(), 1);
       assert.equal(await first.getByText('API Key 已验证', { exact: true }).count(), 0);
 
-      // Collapse / expand retains unsaved fields; the next input invalidates the previous test result.
+      // Test the saved credential while a separate unsaved draft is being edited.
       await first.locator('[name="model"]').fill('draft-model-first');
       await first.locator('[name="api_key"]').fill('sk-unsaved-only');
       assert.equal(await first.locator('[data-model-test-result]').innerText(), '');
+      await first.locator('[data-action="test-personal-model"]').click();
+      await first.locator('[data-model-test-result]').getByText('已保存配置连接测试成功', { exact: false }).waitFor();
+      assert.equal(await first.locator('[name="model"]').inputValue(), 'draft-model-first');
+      assert.equal(await first.locator('[name="api_key"]').inputValue(), 'sk-unsaved-only');
+
+      // Collapse / expand retains unsaved fields.
       await first.locator('summary').click();
       await page.waitForFunction(id => state.personalModelExpanded[id] === false, ids[0]);
       await first.locator('summary').click();
@@ -417,6 +421,8 @@ async function logout(page) {
       assert.equal(await page.locator('[data-action="start-round"]').isDisabled(), true,
         '人数不足时必须保留统一作答的实际限制');
       assert(workflowText.includes('当前仅有 1 位参赛者；至少需要两名在场参赛者才能开始统一作答。'));
+      assert.equal(await page.locator('[data-action="admin-join"]').count(), 1,
+        '房主管理台中的实际参赛入口必须保留');
       await screenshot(page, 'copy-cleanup-workflow-desktop-light.png');
 
       await page.locator('[data-action="room-view"][data-view="match"]').click();
@@ -426,8 +432,6 @@ async function logout(page) {
       assert.equal(matchText.includes('在房主管理台选择以人类身份加入。'), true);
       assert.equal(matchText.includes('点击轮次可查看历史记录。'), false);
       assert.equal(await page.locator('.roster-person').count(), 1, '精简说明不能删除参赛者身份卡片');
-      assert.equal(await page.locator('[data-action="admin-join"]').count(), 1,
-        '精简说明不能删除房主实际加入参赛的按钮');
       await screenshot(page, 'copy-cleanup-match-desktop-light.png');
     } else {
       throw new Error('Unknown scenario: ' + scenario);

@@ -198,12 +198,12 @@ function personalModelFields(p={},draft={}){
 }
 function modelTestResultText(result){
  if(!result)return '';
- return result.ok?'最近一次连接测试成功 · '+esc(result.model)+' · '+esc(result.latency_ms)+' ms':'最近一次连接测试失败：'+esc(result.error);
+ return result.ok?'已保存配置连接测试成功 · '+esc(result.model)+' · '+esc(result.latency_ms)+' ms':'已保存配置连接测试失败：'+esc(result.error);
 }
 function updateModelTestResult(id,result){
  state.modelTestResults[id]=result;
  const node=app.querySelector('[data-model-test-result="'+id+'"]');
- if(node){node.textContent=result.ok?'最近一次连接测试成功 · '+result.model+' · '+result.latency_ms+' ms':'最近一次连接测试失败：'+result.error;
+ if(node){node.textContent=result.ok?'已保存配置连接测试成功 · '+result.model+' · '+result.latency_ms+' ms':'已保存配置连接测试失败：'+result.error;
   node.className='model-test-result '+(result.ok?'success':'failed');}
 }
 function renderPersonalModelManager(){
