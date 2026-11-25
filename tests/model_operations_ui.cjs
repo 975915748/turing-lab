@@ -116,6 +116,10 @@ const { chromium } = require('playwright-core');
     assert.equal(await page.locator('.operation-record').count(), 3);
     await filters.locator('[name="status"]').selectOption('completed');
     await filters.locator('button[type="submit"]').click();
+    await page.waitForFunction(() => {
+      const status = document.querySelector('form[data-form="model-operation-filters"] [name="status"]');
+      return status?.value === 'completed' && document.querySelectorAll('.operation-record').length === 2;
+    });
     assert.equal(await page.locator('.operation-record').count(), 2);
 
     await page.screenshot({ path: path.join(artifacts, 'model-operations-desktop.png'),
