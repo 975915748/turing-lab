@@ -197,6 +197,128 @@ async function logout(page) {
       await judgePage.screenshot({ path: path.join(artifacts, 'self-service-judge-lobby-mobile.png'), fullPage: true, animations: 'disabled' });
 
       await judgeContext.close();
+    } else if (scenario === 'models') {
+      await page.getByRole('button', { name: '使用旧登录名', exact: true }).click();
+      await page.locator('[name="username"]').fill('browser_admin');
+      await page.locator('[name="password"]').fill('browser-password');
+      await clickSubmit(page, 'login');
+      await uidIs(page, 'TL00000001');
+      await page.locator('[data-action="personal-center"]').click();
+      await page.locator('details[data-model-config]').first().waitFor();
+
+      const profiles = await (await context.request.get(site + '/api/me/models')).json();
+      assert.equal(profiles.model_api_enabled, true);
+      assert.equal(profiles.models.length, 4);
+      const ids = profiles.models.map(p => p.id);
+      const first = page.locator('details[data-model-config][data-id="' + ids[0] + '"]');
+      const second = page.locator('details[data-model-config][data-id="' + ids[1] + '"]');
+      const longName = page.locator('details[data-model-config][data-id="' + ids[2] + '"]');
+      const repair = page.locator('details[data-model-config][data-id="' + ids[3] + '"]');
+      assert.equal(await first.locator('summary strong').innerText(), '重复配置');
+      assert.equal(await second.locator('summary strong').innerText(), '重复配置');
+      for (const card of [first, second, longName, repair]) {
+        assert.equal(await card.evaluate(el => el.open), false, '已有配置应默认收起');
+        assert.equal(await card.locator('form[data-form="personal-model-edit"]').isVisible(), false);
+      }
+      await page.screenshot({ path: path.join(artifacts, 'model-config-desktop-collapsed-light.png'), fullPage: true, animations: 'disabled' });
+
+      // Same-name cards are keyed by profile ID and expand independently.
+      await first.locator('summary').click();
+      await page.waitForFunction(id => state.personalModelExpanded[id] === true, ids[0]);
+      await first.locator('form[data-form="personal-model-edit"]').waitFor({ state: 'visible' });
+      assert.equal(await second.evaluate(el => el.open), false);
+
+      // A real mocked connection test is separate from the stored credential status.
+      await first.locator('[data-action="test-personal-model"]').click();
+      await first.locator('[data-model-test-result]').getByText('连接测试成功', { exact: false }).waitFor();
+      assert.equal(await first.getByText('API Key 已保存（可解密）', { exact: true }).count(), 1);
+      assert.equal(await first.getByText('API Key 已验证', { exact: true }).count(), 0);
+
+      // Collapse / expand retains unsaved fields; the next input invalidates the previous test result.
+      await first.locator('[name="model"]').fill('draft-model-first');
+      await first.locator('[name="api_key"]').fill('sk-unsaved-only');
+      assert.equal(await first.locator('[data-model-test-result]').innerText(), '');
+      await first.locator('summary').click();
+      await page.waitForFunction(id => state.personalModelExpanded[id] === false, ids[0]);
+      await first.locator('summary').click();
+      await page.waitForFunction(id => state.personalModelExpanded[id] === true, ids[0]);
+      assert.equal(await first.locator('[name="model"]').inputValue(), 'draft-model-first');
+      assert.equal(await first.locator('[name="api_key"]').inputValue(), 'sk-unsaved-only');
+
+      // A second card may be edited independently while the first is saved.
+      await second.locator('summary').click();
+      await page.waitForFunction(id => state.personalModelExpanded[id] === true, ids[1]);
+      await second.locator('[name="model"]').fill('second-unsaved-model');
+      await second.locator('[name="api_key"]').fill('sk-second-draft');
+      await first.locator('[name="model"]').fill('saved-model-first');
+      await first.locator('[name="api_key"]').fill('');
+      await clickSubmit(page, 'personal-model-edit');
+      await page.locator('#toast').filter({ hasText: '个人模型配置已更新' }).waitFor();
+
+      const firstAfterSave = page.locator('details[data-model-config][data-id="' + ids[0] + '"]');
+      const secondAfterSave = page.locator('details[data-model-config][data-id="' + ids[1] + '"]');
+      assert.equal(await firstAfterSave.evaluate(el => el.open), true, '保存后应保留第一条配置的展开状态');
+      assert.equal(await secondAfterSave.evaluate(el => el.open), true, '保存其他配置时不应折叠第二条配置');
+      assert.equal(await firstAfterSave.locator('[name="model"]').inputValue(), 'saved-model-first');
+      assert.equal(await secondAfterSave.locator('[name="model"]').inputValue(), 'second-unsaved-model');
+      assert.equal(await secondAfterSave.locator('[name="api_key"]').inputValue(), 'sk-second-draft');
+      const savedProfiles = await (await context.request.get(site + '/api/me/models')).json();
+      const savedFirst = savedProfiles.models.find(p => p.id === ids[0]);
+      assert.equal(savedFirst.model, 'saved-model-first');
+      assert.equal(savedFirst.has_api_key, true, 'API Key 留空更新时应保留已保存密钥');
+      assert.equal(Object.hasOwn(savedFirst, 'api_key'), false);
+      const localValues = await page.evaluate(() => Object.keys(localStorage).map(k => localStorage.getItem(k)).join('|'));
+      assert.equal(localValues.includes('sk-unsaved-only'), false);
+      assert.equal(localValues.includes('sk-second-draft'), false);
+
+      // A credential-repair profile remains editable and requires a newly entered key.
+      await repair.locator('summary').click();
+      await page.waitForFunction(id => state.personalModelExpanded[id] === true, ids[3]);
+      assert.equal(await repair.getByText('缺少 API Key', { exact: true }).count(), 1);
+      assert.equal(await repair.locator('[name="api_key"]').getAttribute('required'), '');
+      await repair.locator('[name="api_key"]').fill('sk-browser-repaired');
+      await clickSubmit(page, 'personal-model-edit');
+      await page.locator('#toast').filter({ hasText: '个人模型配置已更新' }).waitFor();
+      const repaired = page.locator('details[data-model-config][data-id="' + ids[3] + '"]');
+      assert.equal(await repaired.getByText('API Key 已保存（可解密）', { exact: true }).count(), 1);
+      assert.equal(await repaired.locator('[data-action="test-personal-model"]').isEnabled(), true);
+
+      // Long profile names wrap inside the summary instead of widening the card.
+      await longName.locator('summary').click();
+      await page.waitForFunction(id => state.personalModelExpanded[id] === true, ids[2]);
+      await page.setViewportSize({ width: 390, height: 844 });
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+      const wrapStyle = await longName.locator('summary strong').evaluate(el => getComputedStyle(el).overflowWrap);
+      assert.equal(wrapStyle, 'anywhere');
+      await page.screenshot({ path: path.join(artifacts, 'model-config-mobile-light-expanded.png'), fullPage: true, animations: 'disabled' });
+
+      // The same fold / expanded layout must remain readable in dark mode.
+      await page.locator('#themeBtn').click();
+      assert.equal(await page.locator('body').getAttribute('data-theme'), 'dark');
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+      await page.screenshot({ path: path.join(artifacts, 'model-config-mobile-dark-expanded.png'), fullPage: true, animations: 'disabled' });
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      await page.screenshot({ path: path.join(artifacts, 'model-config-desktop-dark-expanded.png'), fullPage: true, animations: 'disabled' });
+      await page.locator('#themeBtn').click();
+      assert.equal(await page.locator('body').getAttribute('data-theme'), 'light');
+      await page.screenshot({ path: path.join(artifacts, 'model-config-desktop-light-expanded.png'), fullPage: true, animations: 'disabled' });
+
+      // Delete remains available inside the expanded card.
+      page.once('dialog', dialog => dialog.accept());
+      await longName.locator('[data-action="delete-personal-model"]').click();
+      await longName.waitFor({ state: 'detached' });
+      const afterDelete = await (await context.request.get(site + '/api/me/models')).json();
+      assert.equal(afterDelete.models.length, 3);
+
+      // Logging out clears account-scoped drafts, expansion state and test results.
+      await page.locator('#logoutBtn').click();
+      await page.locator('form[data-form="login"]').waitFor();
+      const cleared = await page.evaluate(() => ({
+        drafts: state.personalModelDrafts,
+        expanded: state.personalModelExpanded,
+        tests: state.modelTestResults,
+      }));
+      assert.deepEqual(cleared, { drafts: {}, expanded: {}, tests: {} });
     } else {
       throw new Error('Unknown scenario: ' + scenario);
     }
