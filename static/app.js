@@ -232,7 +232,13 @@ function renderPersonalCenter({skipModelDraftKey=null}={}){
  capturePersonalModelDrafts(skipModelDraftKey);
  if(skipModelDraftKey)delete state.personalModelDrafts[skipModelDraftKey];
  stopWs();
- app.innerHTML=function modelProfileOptions(r){
+ app.innerHTML='<div class="pagehead"><div><div class="overline">ACCOUNT / PERSONAL CENTER</div><h1>个人中心</h1><p class="muted">管理当前账号的基本资料、登录密码和个人模型 API 配置。</p></div><div class="buttonrow"><button data-action="personal-back">← 返回'+(state.personalReturn?.roomId?'房间':'大厅')+'</button></div></div>'+
+ '<div class="personal-layout"><div class="stack">'+
+ '<section class="card"><h2>基本资料</h2><div class="uid-row"><div><label class="field">UID（不可修改）</label><div class="code"> '+esc(u.uid)+'</div></div><button class="small" data-action="copy-uid" data-uid="'+esc(u.uid)+'">复制 UID</button></div><form data-form="profile-name" class="spaced"><label class="field">名字</label><input name="display_name" type="text" maxlength="40" required value="'+esc(u.display_name)+'"><div class="form-actions"><button class="primary" type="submit">保存名字</button></div></form></section>'+
+ '<section class="card"><h2>修改密码</h2><p class="hint">修改成功后，当前账号的所有登录会话都会退出，需要使用新密码重新登录。</p><form data-form="change-password"><label class="field">当前密码</label><input name="current_password" type="password" autocomplete="current-password" maxlength="200" required><label class="field">新密码（8～200 位）</label><input name="new_password" type="password" autocomplete="new-password" minlength="8" maxlength="200" required><label class="field">确认新密码</label><input name="confirm_password" type="password" autocomplete="new-password" minlength="8" maxlength="200" required><div class="form-actions"><button class="primary" type="submit">修改密码并退出登录</button></div></form></section>'+
+ '</div><div class="stack"><section class="card"><h2>个人模型 API</h2>'+renderPersonalModelManager()+'</section></div></div>';
+}
+function modelProfileOptions(r){
  const profiles=(state.personalModels||[]).filter(p=>p.credential_status==='ok');
  return `<option value="">手动转录（不调用 API）</option>${profiles.map(p=>`<option value="${p.id}">${esc(p.name)} · ${esc(p.model)}</option>`).join('')}`;
 }
