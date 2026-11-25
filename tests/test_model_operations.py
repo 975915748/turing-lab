@@ -273,6 +273,37 @@ def test_inflight_result_does_not_resurrect_tasks_after_match_cleanup(operation_
     assert admin.get('/api/me/model-operations').json()['total'] == 0
 
 
+
+def test_ai_question_result_is_stale_when_profile_changes_during_provider_call(operation_lab):
+    lab = operation_lab
+    admin, base, profile_id = lab['admin'], lab['base'], lab['profile_id']
+    add_ai_judge(admin, base, '配置修改期间出题的裁判', profile_id)
+    block = {'started': threading.Event(), 'release': threading.Event()}
+    lab['state']['block'] = block
+    second_admin = TestClient(lab['app'])
+    post(second_admin, '/api/login', {'username': 'ops_admin', 'password': 'ops-admin-password'})
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(post, second_admin, base + '/ai-judges/questions/generate')
+        assert block['started'].wait(5), '模拟模型请求没有进入请求阶段'
+        updated = dict(lab['profile_body'])
+        updated['model'] = 'ops-test-model-updated'
+        updated['api_key'] = ''
+        put(admin, f'/api/me/models/{profile_id}', updated)
+        block['release'].set()
+        result = future.result(timeout=15)
+
+    lab['state']['block'] = None
+    assert result['generated'] == 0
+    assert result['skipped'] == 1
+    room = admin.get(base).json()
+    assert room['rounds'][0]['questions'] == []
+    task = room['model_operations'][0]
+    assert task['state'] == 'stale'
+    assert task['request_succeeded'] is True
+    assert task['result_applied'] is False
+    assert room['model_request_count'] == 1
+
 def test_startup_marks_unfinished_tasks_interrupted_without_replaying(operation_lab):
     lab = operation_lab
     admin, base, profile_id = lab['admin'], lab['base'], lab['profile_id']
