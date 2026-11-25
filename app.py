@@ -1677,6 +1677,9 @@ def create_app(db_path=None):
                 UNION SELECT room_id FROM ai_judges WHERE model_profile_id=?''',(profile_id,profile_id))]
             db.execute('UPDATE ai_players SET model_profile_id=NULL WHERE model_profile_id=?',(profile_id,))
             db.execute('UPDATE ai_judges SET model_profile_id=NULL WHERE model_profile_id=?',(profile_id,))
+            db.execute("""DELETE FROM model_operation_tasks
+                WHERE purpose='connection_test' AND profile_id=? AND profile_owner_user_id=?""",
+                (profile_id,u['id']))
             db.execute('DELETE FROM model_profiles WHERE id=? AND owner_user_id=?',(profile_id,u['id']))
         for room_id in set(rooms):
             await app.state.hub.notify(room_id,'model_profile_changed')
@@ -1684,9 +1687,15 @@ def create_app(db_path=None):
 
     @app.post('/api/me/models/{profile_id}/test')
     async def test_my_model_profile(profile_id:int,request:Request):
-        with connection() as db:
+        with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             profile=require_owned_model_profile(db,profile_id,u['id'])
+            operation_id,created,_=create_model_operation_task(
+                db,purpose='connection_test',target_type='model_profile',
+                target_key=profile_id,target_label=profile['name'],profile=profile,
+                trigger_user_id=u['id'],idempotency_key=request.headers.get('Idempotency-Key'))
+            if not created:
+                raise HTTPException(409,'该模型配置已有连接测试正在进行。')
         actor_id=u['id']
         session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
         def preflight():
@@ -1699,17 +1708,22 @@ def create_app(db_path=None):
             started=time.perf_counter()
             result=await model_call(profile,[
                 {'role':'system','content':'You are a connection test. Reply with exactly OK.'},
-                {'role':'user','content':'Reply with OK.'}],key,preflight)
+                {'role':'user','content':'Reply with OK.'}],key,preflight,operation_id=operation_id)
         except ModelCallCancelled:
             raise HTTPException(409,'测试排队期间模型配置或账号状态已变化，请重试。')
         except ModelAPIError as exc:
+            await finish_and_notify_model_operation(operation_id,'failed',error=exc)
             raise HTTPException(502,str(exc))
         with connection() as db:
             u=caller(request,db)
-            if not db.execute('''SELECT 1 FROM model_profiles mp JOIN users u ON u.id=mp.owner_user_id
+            valid=bool(db.execute('''SELECT 1 FROM model_profiles mp JOIN users u ON u.id=mp.owner_user_id
                 WHERE mp.id=? AND mp.owner_user_id=? AND mp.ownership_issue IS NULL AND u.deleted_at IS NULL''',
-                (profile_id,u['id'])).fetchone():
-                raise HTTPException(409,'测试期间模型配置或账号状态已变化，请重试。')
+                (profile_id,u['id'])).fetchone())
+        if not valid:
+            await finish_and_notify_model_operation(operation_id,'stale',
+                error='测试期间模型配置或账号状态已变化；服务商请求结果未作为有效测试应用。')
+            raise HTTPException(409,'测试期间模型配置或账号状态已变化，请重试。')
+        await finish_and_notify_model_operation(operation_id,'completed',result_applied=True)
         return {'ok':True,'model':profile['model'],'preview':result['text'][:120],
                 'latency_ms':round((time.perf_counter()-started)*1000),'usage':result['usage']}
 
@@ -2059,6 +2073,9 @@ def create_app(db_path=None):
                 UNION SELECT room_id FROM ai_judges WHERE model_profile_id=?''',(profile_id,profile_id))]
             db.execute('UPDATE ai_players SET model_profile_id=NULL WHERE model_profile_id=?',(profile_id,))
             db.execute('UPDATE ai_judges SET model_profile_id=NULL WHERE model_profile_id=?',(profile_id,))
+            db.execute("""DELETE FROM model_operation_tasks
+                WHERE purpose='connection_test' AND profile_id=? AND profile_owner_user_id=?""",
+                (profile_id,u['id']))
             db.execute('DELETE FROM model_profiles WHERE id=? AND owner_user_id=?',(profile_id,u['id']))
             log_event(db,room_id,room['current_round'],'model_profile_deleted','房主','删除个人模型配置，关联席位改为手动转录')
         for affected_room in set(rooms)|{room_id}:
@@ -2067,10 +2084,16 @@ def create_app(db_path=None):
 
     @app.post('/api/rooms/{room_id}/models/{profile_id}/test')
     async def test_model_profile(room_id:int,profile_id:int,request:Request):
-        with connection() as db:
+        with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             require_room_manager(db,room_id,u)
             profile=require_owned_model_profile(db,profile_id,u['id'])
+            operation_id,created,_=create_model_operation_task(
+                db,purpose='connection_test',target_type='model_profile',
+                target_key=profile_id,target_label=profile['name'],profile=profile,
+                trigger_user_id=u['id'],idempotency_key=request.headers.get('Idempotency-Key'))
+            if not created:
+                raise HTTPException(409,'该模型配置已有连接测试正在进行。')
         actor_id=u['id']
         session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
         def preflight():
@@ -2083,17 +2106,22 @@ def create_app(db_path=None):
             started=time.perf_counter()
             result=await model_call(profile,[
                 {'role':'system','content':'You are a connection test. Reply with exactly OK.'},
-                {'role':'user','content':'Reply with OK.'}],key,preflight)
+                {'role':'user','content':'Reply with OK.'}],key,preflight,operation_id=operation_id)
         except ModelCallCancelled:
             raise HTTPException(409,'测试排队期间房间权限、模型配置或账号状态已变化，请重试。')
         except ModelAPIError as exc:
+            await finish_and_notify_model_operation(operation_id,'failed',error=exc)
             raise HTTPException(502,str(exc))
         with connection() as db:
             u=caller(request,db)
             require_room_manager(db,room_id,u)
-            if not db.execute('SELECT 1 FROM model_profiles WHERE id=? AND owner_user_id=?',
-                              (profile_id,u['id'])).fetchone():
-                raise HTTPException(409,'测试期间模型配置或账号状态已变化，请重试。')
+            valid=bool(db.execute('SELECT 1 FROM model_profiles WHERE id=? AND owner_user_id=?',
+                                  (profile_id,u['id'])).fetchone())
+        if not valid:
+            await finish_and_notify_model_operation(operation_id,'stale',
+                error='测试期间模型配置或账号状态已变化；服务商请求结果未作为有效测试应用。')
+            raise HTTPException(409,'测试期间模型配置或账号状态已变化，请重试。')
+        await finish_and_notify_model_operation(operation_id,'completed',result_applied=True)
         return {'ok':True,'model':profile['model'],'preview':result['text'][:120],
                 'latency_ms':round((time.perf_counter()-started)*1000),'usage':result['usage']}
 
