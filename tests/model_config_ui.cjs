@@ -179,10 +179,11 @@ async function registerPlayer(browser, username, displayName) {
     const invalidSaveResponse = await invalidSaveResponsePromise;
     assert.equal(invalidSaveResponse.status(), 200);
     await page.locator('#toast').filter({ hasText: '个人模型配置已更新' }).waitFor();
-    releaseOldTest();
-    const oldTestResponse = await page.waitForResponse(response =>
+    const oldTestResponsePromise = page.waitForResponse(response =>
       response.url().endsWith('/api/me/models/' + profileOne.id + '/test') &&
       response.request().method() === 'POST');
+    releaseOldTest();
+    const oldTestResponse = await oldTestResponsePromise;
     assert.equal(oldTestResponse.status(), 200);
     await page.waitForTimeout(100);
     assert.equal(await first.locator('[data-model-test-result]').innerText(), '');
