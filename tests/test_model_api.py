@@ -549,7 +549,7 @@ def test_ai_judge_discards_verdict_if_match_evidence_changes(tmp_path, monkeypat
             assert result['failed'] == []
             assert len(result['results']) == 1
             assert result['results'][0]['status'] == 'skipped'
-            assert '资料在模型判断期间发生变化' in result['results'][0]['reason']
+            assert '比赛资料发生变化' in result['results'][0]['reason']
             state = (await admin.get(base)).json()
             assert state['judges'][0]['locked'] is False
             assert state['rounds'][-1]['number'] == 2

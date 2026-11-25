@@ -102,7 +102,7 @@ const { chromium } = require('playwright-core');
     assert.equal(await phaseHistory.locator('[data-action="retry-model-operation"]').count(), 0,
       'previous phase tasks must not be retried from the current phase');
 
-    await page.locator('[data-action="personal-center"]').click();
+    await page.locator('[data-action="personal-center"]').first().click();
     const recordsPanel = page.locator('[data-model-operations-panel]');
     await recordsPanel.waitFor();
     await recordsPanel.locator('summary').click();

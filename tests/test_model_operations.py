@@ -156,8 +156,9 @@ def test_connection_and_game_calls_are_owner_scoped_and_cleaned_differently(oper
     assert after_delete['records'][0]['purpose'] == 'judge_question'
     assert after_delete['records'][0]['profile_name'] == '调用记录测试配置'
     assert 'sk-ops-secret-never-return' not in json.dumps(after_delete, ensure_ascii=False)
-    assert not any('api_key' in key or 'prompt' in key or 'response' in key
-                   for key in after_delete['records'][0])
+    forbidden_fields = {'api_key', 'api_key_encrypted', 'prompt', 'messages',
+                        'response', 'request_body', 'response_body'}
+    assert forbidden_fields.isdisjoint(after_delete['records'][0])
 
 
 def test_atomic_request_limit_blocks_last_slot_and_retries_only_blocked_seat(operation_lab):

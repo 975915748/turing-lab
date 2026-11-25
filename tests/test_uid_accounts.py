@@ -165,6 +165,9 @@ def snapshot(db):
         if name in ('ai_players', 'ai_judges'):
             for row in rows:
                 row.pop('model_profile_id', None)
+        if name == 'rooms':
+            for row in rows:
+                row.pop('model_request_limit', None)
         result[name] = rows
     return result
 

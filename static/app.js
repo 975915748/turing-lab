@@ -717,7 +717,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
     const a=await api('/api/rooms/'+state.roomId+'/ai/answers/generate',{method:'POST'});
     await refreshRoom();
     const detail=a.failed?.length?'；失败：'+a.failed.map(x=>x.alias+' '+x.error).join('；'):'';
-    const questionDetail=q.failed?.length||q.blocked?'；'+aiQuestionFeedback(q):'';
+    const questionDetail=q.generated||q.skipped||q.blocked||q.failed?.length?'；'+aiQuestionFeedback(q):'';
     toast('本轮已开始，模型自动提交 '+(a.generated||0)+' 个回答'+detail+questionDetail);
    }
   }
