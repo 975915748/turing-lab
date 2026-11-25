@@ -327,16 +327,7 @@ async function logout(page) {
         return request;
       }, ids[0]);
 
-      // The old test response arrives while the credential update is still pending.
-      releaseFirstTest();
-      const oldTestResponse = await oldTestResponsePromise;
-      assert.equal(oldTestResponse.status(), 200);
-      await page.waitForTimeout(30);
-      assert.equal(await page.evaluate(id => state.modelTestResults[id] ?? null, ids[0]), null,
-        '保存期间旧配置的迟到测试结果不能写入新状态');
-      assert.equal(await testButtonDuringSave.isDisabled(), true,
-        '迟到测试不能解除保存期间的禁用状态');
-
+      // Keep the pre-save test response pending until a newer post-save test starts.
       releaseSave();
       const saveResponse = await saveResponsePromise;
       assert.equal(saveResponse.status(), 200, await saveResponse.text());
@@ -380,10 +371,11 @@ async function logout(page) {
       const savedProfiles = await (await context.request.get(site + '/api/me/models')).json();
       const savedFirst = savedProfiles.models.find(p => p.id === ids[0]);
       assert.equal(savedFirst.model, 'saved-model-first');
-      assert.equal(savedFirst.has_api_key, true, 'API Key 留空更新时应保留已保存密钥');
+      assert.equal(savedFirst.has_api_key, true, '保存新 API Key 后仍应保留密钥状态');
       assert.equal(Object.hasOwn(savedFirst, 'api_key'), false);
       const localValues = await page.evaluate(() => Object.keys(localStorage).map(k => localStorage.getItem(k)).join('|'));
       assert.equal(localValues.includes('sk-unsaved-only'), false);
+      assert.equal(localValues.includes('sk-new-saved-key'), false);
       assert.equal(localValues.includes('sk-second-draft'), false);
 
       // A credential-repair profile remains editable and requires a newly entered key.
