@@ -134,6 +134,11 @@ async function registerPlayer(browser, username, displayName) {
     await page.screenshot({ path: path.join(artifacts, 'model-config-desktop-dark.png'), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await page.locator('#themeBtn').click();
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await page.screenshot({ path: path.join(artifacts, 'model-config-mobile-light.png'), fullPage: true });
+    await page.locator('#themeBtn').click();
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     await page.screenshot({ path: path.join(artifacts, 'model-config-mobile-dark.png'), fullPage: true });
     await first.locator('summary').click();
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
