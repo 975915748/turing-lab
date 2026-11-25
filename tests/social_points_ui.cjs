@@ -140,14 +140,22 @@ async function closePersonalCenter(page) {
     await pageA.locator(`[data-action="friend-note"][data-uid="${uidB}"]`).click();
     await visible(pageA.getByText('仅我可见的备注').first());
     await pageA.locator(`[data-action="friend-reset-note"][data-uid="${uidB}"]`).click();
-    await visible(pageA.getByText('好友测试乙'));
+    await visible(pageA.getByText('好友测试乙').first());
 
     await pageA.locator(`[data-action="dm-open"][data-uid="${uidB}"]`).first().click();
     const dmFormA = pageA.locator('form[data-form="dm-send"]');
     await visible(dmFormA);
     const messageText = '<img src=x onerror=alert(1)>私信纯文本';
     await dmFormA.locator('textarea[name="text"]').fill(messageText);
+    const sendResponsePromise = pageA.waitForResponse(response =>
+      response.url().includes('/api/messages/') && response.request().method() === 'POST');
     await dmFormA.locator('button[type="submit"]').click();
+    const sendResponse = await sendResponsePromise;
+    const sendResult = await sendResponse.json();
+    assert.equal(sendResponse.status(), 200, JSON.stringify(sendResult));
+    const persistedMessages = await api(pageA, 'GET', '/api/messages/' + encodeURIComponent(uidB));
+    assert(persistedMessages.messages.some(message => message.text.includes('私信纯文本')), JSON.stringify(persistedMessages));
+    await pageA.waitForFunction(uid => state.dmUid === uid && state.dmMessages.some(message => message.text.includes('私信纯文本')), uidB);
     await pageA.locator('.dm-message.mine').filter({ hasText: '私信纯文本' }).waitFor();
     assert.equal(await pageA.locator('#dmPanel img').count(), 0);
 
