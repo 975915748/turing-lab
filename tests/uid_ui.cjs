@@ -249,9 +249,10 @@ async function logout(page) {
       assert.equal(await first.locator('[name="api_key"]').inputValue(), 'sk-unsaved-only');
 
       // Collapse / expand retains unsaved fields.
-      await first.locator('summary').click();
+      await first.locator('summary').focus();
+      await page.keyboard.press('Enter');
       await page.waitForFunction(id => state.personalModelExpanded[id] === false, ids[0]);
-      await first.locator('summary').click();
+      await page.keyboard.press('Space');
       await page.waitForFunction(id => state.personalModelExpanded[id] === true, ids[0]);
       assert.equal(await first.locator('[name="model"]').inputValue(), 'draft-model-first');
       assert.equal(await first.locator('[name="api_key"]').inputValue(), 'sk-unsaved-only');
@@ -373,10 +374,10 @@ async function logout(page) {
       await addManualJudge.locator('[type="submit"]').click();
       await page.locator('.feed-item').filter({ hasText: '手动转录 AI 裁判' }).waitFor();
 
+      assert.equal(await page.locator('[data-action="generate-ai-questions"]').isDisabled(), true);
       await page.locator('[data-action="room-view"][data-view="admin"]').click();
       await page.locator('[data-action="start-round"]').waitFor();
       assert.equal(await page.locator('[data-action="start-round"]').isDisabled(), true);
-      assert.equal(await page.locator('[data-action="generate-ai-questions"]').isDisabled(), true);
       assert((await page.locator('#app').innerText()).includes('当前仅有 0 位参赛者；至少需要两名在场参赛者才能开始统一作答。'));
       await screenshot(page, 'ai-question-zero-participants-blocked.png');
 
@@ -504,6 +505,9 @@ async function logout(page) {
       await addAi.locator('[name="model_profile_id"]').selectOption(String(usableProfile.id));
       await addAi.locator('[type="submit"]').click();
       await page.locator('.roster-person').filter({ hasText: '文案验收 AI 参赛者' }).waitFor();
+      const playerBindingText = await page.locator('#app').innerText();
+      assert.equal(playerBindingText.includes('绑定模型配置后，本房间房主和全站管理员可通过比赛操作触发该配置的模型调用，服务商可能按实际调用量计费。'), false);
+      assert(playerBindingText.includes('更换或解除绑定不会删除 AI 席位及其匿名代号、历史回答。'));
 
       await page.locator('[data-action="room-view"][data-view="human-judges"]').click();
       await page.getByRole('heading', { name: '真人裁判管理', exact: true }).waitFor();
