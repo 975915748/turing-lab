@@ -15,6 +15,9 @@ async function uidIs(page, uid) {
 async function clickSubmit(page, form) {
   await page.locator(`form[data-form="${form}"] button[type="submit"]`).click();
 }
+async function screenshot(page, name) {
+  await page.screenshot({ path: path.join(artifacts, name), fullPage: true, animations: 'disabled' });
+}
 async function register(page, username = '重复名字') {
   await page.getByRole('button', { name: '注册账号', exact: true }).click();
   assert.equal(await page.locator('form[data-form="register"] input[name="code"]').count(), 0);
@@ -71,7 +74,11 @@ async function logout(page) {
       await clickSubmit(page, 'login');
       await uidIs(page, 'TL00000001');
       await page.locator('form[data-form="room"] [name="title"]').fill('真人裁判自助入房验收');
+      const roomCreated = page.waitForResponse(response =>
+        response.url().endsWith('/api/rooms') && response.request().method() === 'POST');
       await clickSubmit(page, 'room');
+      const createdRoom = await roomCreated;
+      assert.equal(createdRoom.status(), 200, await createdRoom.text());
       const info = await (await context.request.get(site + '/api/me')).json();
       const rid = info.rooms[0].id;
       const base = `/api/rooms/${rid}`;
@@ -280,7 +287,11 @@ async function logout(page) {
       await repair.locator('form[data-form="personal-model-edit"] [type="submit"]').click();
       await page.locator('#toast').filter({ hasText: '个人模型配置已更新' }).waitFor();
       const repaired = page.locator('details[data-model-config][data-id="' + ids[3] + '"]');
-      assert.equal(await repaired.getByText('API Key 已保存（可解密）', { exact: true }).count(), 1);
+      const repairedState = await (await context.request.get(site + '/api/me/models')).json();
+      const repairedProfile = repairedState.models.find(profile => profile.id === ids[3]);
+      assert.equal(repairedProfile.credential_status, 'ok', JSON.stringify(repairedProfile));
+      assert.equal(await repaired.getByText('API Key 已保存（可解密）', { exact: true }).count(), 1,
+        '修复后的状态标签未更新：' + await repaired.innerText());
       assert.equal(await repaired.locator('[data-action="test-personal-model"]').isEnabled(), true);
 
       // Long profile names wrap inside the summary instead of widening the card.
@@ -326,7 +337,11 @@ async function logout(page) {
       await clickSubmit(page, 'login');
       await uidIs(page, 'TL00000001');
       await page.locator('form[data-form="room"] [name="title"]').fill('P2-P7 文案验收');
+      const roomCreated = page.waitForResponse(response =>
+        response.url().endsWith('/api/rooms') && response.request().method() === 'POST');
       await clickSubmit(page, 'room');
+      const createdRoom = await roomCreated;
+      assert.equal(createdRoom.status(), 200, await createdRoom.text());
 
       const roomInfo = await (await context.request.get(site + '/api/me')).json();
       const roomId = roomInfo.rooms[0].id;
@@ -371,7 +386,10 @@ async function logout(page) {
       await page.locator('[data-action="room-view"][data-view="human-judges"]').click();
       await page.getByRole('heading', { name: '真人裁判管理', exact: true }).waitFor();
       await page.getByText('0 位真人裁判', { exact: true }).waitFor();
-      assert.equal(await page.getByText('尚无真人裁判。', { exact: true }).count(), 0);
+      const humanJudgeText = await page.locator('#app').innerText();
+      assert.equal(humanJudgeText.includes('尚无真人裁判。'), false);
+      assert.equal(humanJudgeText.includes('真人裁判自行注册并使用 UID 登录，再从大厅输入本房间邀请码，选择“真人裁判”身份加入。房主不创建账号，也不绑定已有账号。'), false);
+      assert.equal(humanJudgeText.includes('同一 UID 同时只能担任一个未完赛房间的真人裁判。裁判加入、出题和独立判断流程保持不变。'), false);
       await screenshot(page, 'copy-cleanup-empty-human-judges-desktop-light.png');
 
       await page.locator('[data-action="room-view"][data-view="ai-judges"]').click();

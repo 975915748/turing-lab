@@ -1079,7 +1079,7 @@ def test_ai_question_is_not_saved_if_participant_roster_changes_during_generatio
     ('failure', 'expected'),
     [
         ('timeout', '模型请求超过 30 秒，已超时。'),
-        ('malformed', '模型服务返回的数据格式无效。'),
+        ('malformed', '模型服务返回的数据不符合 Chat Completions 格式。'),
     ],
 )
 def test_ai_question_generation_surfaces_timeout_and_response_parse_failures(
