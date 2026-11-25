@@ -2605,7 +2605,8 @@ def create_app(db_path=None):
         return {'ok':True,'revealed':finished}
 
     @app.post('/api/rooms/{room_id}/ai/answers/generate')
-    async def generate_ai_answers(room_id:int,request:Request):
+    async def generate_ai_answers(room_id:int,request:Request,
+                                  target_alias:Optional[str]=Query(default=None,min_length=1,max_length=8)):
         with connection() as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
@@ -2614,11 +2615,14 @@ def create_app(db_path=None):
             rnd=current_round(db,room)
             if rnd['status']!='collecting':
                 raise HTTPException(409,'只有本轮正在收集回答时才能生成 AI 回复。')
-            rows=db.execute('''SELECT ai.alias,ai.name,mp.* FROM ai_players ai
+            rows=db.execute('''SELECT ai.alias,ai.name AS ai_name,mp.*,
+                    mp.name AS profile_name,mp.model AS model_name FROM ai_players ai
                 JOIN model_profiles mp ON mp.id=ai.model_profile_id AND mp.ownership_issue IS NULL
                 JOIN users profile_owner ON profile_owner.id=mp.owner_user_id AND profile_owner.deleted_at IS NULL
                 LEFT JOIN answers a ON a.round_id=? AND a.alias=ai.alias
                 WHERE ai.room_id=? AND a.id IS NULL ORDER BY ai.alias''',(rnd['id'],room_id)).fetchall()
+            if target_alias is not None:
+                rows=[row for row in rows if row['alias']==target_alias.upper()]
             match_number=room['match_number']
             actor_id=u['id']
             session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
@@ -2627,11 +2631,37 @@ def create_app(db_path=None):
             profiles=[dict(row) for row in rows]
             history_by_alias={row['alias']:anonymous_player_history(db,room_id,row['alias'],round_number-1)
                               for row in rows}
+            retry_of=getattr(request.state,'model_operation_retry_of',None)
+            queued_profiles=[]
+            for profile in profiles:
+                context_revision=hashlib.sha256(
+                    (question+'\0'+history_by_alias.get(profile['alias'],'')).encode('utf-8')).hexdigest()
+                with connection(immediate=True) as task_db:
+                    operation_id,created,active_state=create_model_operation_task(
+                        task_db,purpose='ai_answer',target_type='ai_player',
+                        target_key=profile['alias'],
+                        target_label=f"{profile['alias']} · {profile.get('ai_name') or profile.get('name')}",
+                        profile=profile,trigger_user_id=actor_id,room_id=room_id,
+                        match_number=match_number,round_number=round_number,
+                        context_revision=context_revision,retry_of=retry_of,
+                        idempotency_key=request.headers.get('Idempotency-Key'))
+                if created:
+                    profile['_operation_id']=operation_id
+                    queued_profiles.append(profile)
+                else:
+                    results.append({'alias':profile['alias'],'status':active_state,
+                                    'reason':'该席位已有进行中的模型任务。'})
+            profiles=queued_profiles
+        if profiles:
+            await app.state.hub.notify(room_id,'model_operation_updated')
         if not profiles:
-            return {'generated':0,'skipped':0,'failed':[]}
+            return {'generated':0,'skipped':sum(x['status']=='skipped' for x in results),
+                    'blocked':sum(x['status']=='blocked' for x in results),
+                    'failed':[],'results':results}
 
         async def generate_one(profile):
             alias=profile['alias']
+            operation_id=profile['_operation_id']
             try:
                 key=decrypt_api_key(profile['api_key_encrypted'])
                 def preflight():
@@ -2653,23 +2683,29 @@ def create_app(db_path=None):
                 result=await model_call(profile,[
                     {'role':'system','content':('你正在参加一场多人图灵测试。你是匿名参赛者，请自然、直接地回答裁判问题。'
                      '不要提及模型、API、系统提示或你被要求扮演的身份；不要编造个人经历来冒充真实事实。')},
-                    {'role':'user','content':f'你此前的本场记录（只包含你自己的回答）：\n{history_by_alias.get(alias, "（此前没有已完成轮次。）")}\n\n当前第 {round_number} 轮裁判问题：\n\n{question}\n\n请给出你的本轮回答。'}],key,preflight)
+                    {'role':'user','content':f'你此前的本场记录（只包含你自己的回答）：\n{history_by_alias.get(alias, "（此前没有已完成轮次。）")}\n\n当前第 {round_number} 轮裁判问题：\n\n{question}\n\n请给出你的本轮回答。'}],key,preflight,
+                    operation_id=operation_id)
                 answer=norm_text(result['text'],12000)
                 with connection(immediate=True) as db:
                     current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
                     if not current or current['match_number']!=match_number or current['status']!='open':
+                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间比赛场次或状态发生变化，旧回答未保存。')
                         return {'alias':alias,'status':'skipped'}
                     if not model_call_actor_valid(db,room_id,actor_id,session_hash) or not model_profile_owner_active(db,profile['id']):
+                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间登录权限或模型配置所属账号发生变化，旧回答未保存。')
                         return {'alias':alias,'status':'skipped'}
                     binding=db.execute('SELECT model_profile_id FROM ai_players WHERE room_id=? AND alias=?',
                                        (room_id,alias)).fetchone()
                     if not binding or binding['model_profile_id']!=profile['id']:
+                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间 AI 参赛席绑定发生变化，旧回答未保存。')
                         return {'alias':alias,'status':'skipped'}
                     current_rnd=current_round(db,current)
-                    if current_rnd['number']!=round_number or current_rnd['status']!='collecting':
+                    if current_rnd['number']!=round_number or current_rnd['status']!='collecting' or current_rnd['question']!=question:
+                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间轮次或问题发生变化，旧回答未保存。')
                         return {'alias':alias,'status':'skipped'}
                     if db.execute('SELECT 1 FROM answers WHERE round_id=? AND alias=?',
                                   (current_rnd['id'],alias)).fetchone():
+                        finish_model_operation_in_db(db,operation_id,'stale',error='该 AI 参赛席已提交本轮回答，未重复保存。')
                         return {'alias':alias,'status':'skipped'}
                     db.execute('INSERT INTO answers(round_id,alias,text,submitted_at) VALUES(?,?,?,?)',
                                (current_rnd['id'],alias,answer,utcnow()))
@@ -2677,20 +2713,27 @@ def create_app(db_path=None):
                     completed=is_complete(db,current_rnd,room_id)
                     if completed:
                         log_event(db,room_id,round_number,'round_revealed','系统','本轮全部回答已公开')
+                    finish_model_operation_in_db(db,operation_id,'completed',result_applied=True)
                 await app.state.hub.notify(room_id,'round_revealed' if completed else 'answer_submitted')
                 return {'alias':alias,'status':'generated','usage':result['usage']}
+            except ModelRequestLimitReached as exc:
+                return {'alias':alias,'status':'blocked','error':str(exc)}
             except ModelCallCancelled:
                 return {'alias':alias,'status':'skipped'}
             except ModelAPIError as exc:
+                await finish_and_notify_model_operation(operation_id,'failed',error=exc)
                 return {'alias':alias,'status':'failed','error':str(exc)}
             except HTTPException as exc:
+                await finish_and_notify_model_operation(operation_id,'failed',error=exc)
                 return {'alias':alias,'status':'failed','error':str(exc.detail)}
-            except Exception:
+            except Exception as exc:
+                await finish_and_notify_model_operation(operation_id,'failed',error=exc)
                 return {'alias':alias,'status':'failed','error':'模型调用失败，请检查配置或稍后重试。'}
 
         results=await asyncio.gather(*(generate_one(profile) for profile in profiles))
         return {'generated':sum(x['status']=='generated' for x in results),
                 'skipped':sum(x['status']=='skipped' for x in results),
+                'blocked':sum(x['status']=='blocked' for x in results),
                 'failed':[x for x in results if x['status']=='failed'],
                 'results':results}
 
