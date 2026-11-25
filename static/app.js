@@ -1,13 +1,13 @@
 'use strict';
 const $ = (selector) => document.querySelector(selector);
 const app = $('#app');
-const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{}};
+const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelEpoch:0};
 const esc = (v) => String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const shortDate = s => s ? new Date(s).toLocaleString('zh-CN',{hour12:false}) : '';
 const val = (id) => document.getElementById(id)?.value??'';
 const D = (txt='暂无记录') => `<p class="muted hint">${esc(txt)}</p>`;
 let toastTimer;
-function clearPersonalModelState(){state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};}
+function clearPersonalModelState(){state.personalModelEpoch=(state.personalModelEpoch||0)+1;state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};state.personalModelTestVersions={};state.personalModelTestPending={};}
 function toast(message){const el=$('#toast');el.textContent=message;el.classList.add('visible');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('visible'),4200)}
 function setConnection(txt,online){const el=$('#connection');el.textContent=(online?'● ':'○ ')+txt;el.className='connection'+(online?' online':'')}
 function applyPrefs(){let theme=localStorage.getItem('turing_theme')||'light';document.body.dataset.theme=theme;$('#themeBtn').textContent=theme==='light'?'☾ 深色':'☀ 日间';let f=Number(localStorage.getItem('turing_font')||15);if(f<12||f>22)f=15;document.documentElement.style.setProperty('--font',f+'px');$('#fontSize').value=f;$('#fontValue').textContent=f;}
@@ -89,7 +89,16 @@ async function openRoom(id,options={}){state.roomId=id;state.selectedRound=optio
 async function loadLobby(){state.me=await api('/api/me');state.chat=[];state.chatDraft='';state.personalReturn=null;renderLobby()}
 
 async function loadPersonalModels(){
- const data=await api('/api/me/models');state.personalModels=data.models||[];state.modelApiEnabled=data.model_api_enabled!==false;return state.personalModels;
+ const data=await api('/api/me/models'),next=data.models||[];
+ for(const previous of state.personalModels||[]){
+  const current=next.find(p=>Number(p.id)===Number(previous.id));
+  if(!current||personalModelTestFingerprint(previous)!==personalModelTestFingerprint(current))invalidatePersonalModelTest(previous.id);
+ }
+ for(const [id,result] of Object.entries(state.modelTestResults)){
+  const current=next.find(p=>Number(p.id)===Number(id));
+  if(!current||result.profileSnapshot!==personalModelTestFingerprint(current))invalidatePersonalModelTest(Number(id));
+ }
+ state.personalModels=next;state.modelApiEnabled=data.model_api_enabled!==false;return state.personalModels;
 }
 async function loadRoomChat(){
  const r=state.room;if(!r||r.is_judge||r.status!=='open'){state.chat=[];return;}
@@ -196,15 +205,50 @@ function personalModelFields(p={},draft={}){
  '<div class="grid2"><div><label class="field">采样温度</label><input name="temperature" type="number" min="0" max="2" step="0.1" value="'+esc(field('temperature',p.temperature??0.7))+'" required></div><div><label class="field">最大输出 Token</label><input name="max_tokens" type="number" min="64" max="8192" step="1" value="'+esc(field('max_tokens',p.max_tokens??2048))+'" required></div></div>'+
  '<label class="field">请求超时（秒）</label><input name="timeout_seconds" type="number" min="10" max="120" step="1" value="'+esc(field('timeout_seconds',p.timeout_seconds??60))+'" required>';
 }
+function personalModelTestFingerprint(profile){
+ if(!profile)return '';
+ return JSON.stringify([profile.id,profile.name,profile.base_url,profile.model,profile.temperature,
+  profile.max_tokens,profile.timeout_seconds,profile.has_api_key,profile.credential_status]);
+}
+function nextPersonalModelTestVersion(id){
+ const key=String(id),version=(state.personalModelTestVersions[key]||0)+1;
+ state.personalModelTestVersions[key]=version;return version;
+}
+function invalidatePersonalModelTest(id){
+ const key=String(id);nextPersonalModelTestVersion(key);
+ delete state.personalModelTestPending[key];delete state.modelTestResults[key];
+ const result=app.querySelector('[data-model-test-result="'+Number(id)+'"]');
+ if(result){result.textContent='';result.className='model-test-result';}
+ const button=app.querySelector('[data-action="test-personal-model"][data-id="'+Number(id)+'"]');
+ if(button){const profile=state.personalModels.find(p=>Number(p.id)===Number(id));button.disabled=profile?.credential_status!=='ok';button.textContent='测试连接';}
+}
+function beginPersonalModelTest(id){
+ const profile=state.personalModels.find(p=>Number(p.id)===Number(id));
+ if(!profile)return null;
+ const key=String(id),version=nextPersonalModelTestVersion(key);
+ const request={version,epoch:state.personalModelEpoch,uid:state.me?.user?.uid,
+  profileSnapshot:personalModelTestFingerprint(profile)};
+ state.personalModelTestPending[key]=version;return request;
+}
+function isCurrentPersonalModelTest(id,request){
+ if(!request)return false;
+ const key=String(id),profile=state.personalModels.find(p=>Number(p.id)===Number(id));
+ return state.personalModelEpoch===request.epoch&&state.personalModelTestVersions[key]===request.version&&
+  state.personalModelTestPending[key]===request.version&&state.me?.user?.uid===request.uid&&
+  !!profile&&personalModelTestFingerprint(profile)===request.profileSnapshot;
+}
 function modelTestResultText(result){
  if(!result)return '';
  return result.ok?'已保存配置连接测试成功 · '+esc(result.model)+' · '+esc(result.latency_ms)+' ms':'已保存配置连接测试失败：'+esc(result.error);
 }
-function updateModelTestResult(id,result){
- state.modelTestResults[id]=result;
+function updateModelTestResult(id,result,request){
+ if(!isCurrentPersonalModelTest(id,request))return false;
+ const stored={...result,profileSnapshot:request.profileSnapshot};
+ state.modelTestResults[id]=stored;
  const node=app.querySelector('[data-model-test-result="'+id+'"]');
- if(node){node.textContent=result.ok?'已保存配置连接测试成功 · '+result.model+' · '+result.latency_ms+' ms':'已保存配置连接测试失败：'+result.error;
-  node.className='model-test-result '+(result.ok?'success':'failed');}
+ if(node){node.textContent=stored.ok?'已保存配置连接测试成功 · '+stored.model+' · '+stored.latency_ms+' ms':'已保存配置连接测试失败：'+stored.error;
+  node.className='model-test-result '+(stored.ok?'success':'failed');}
+ return true;
 }
 function renderPersonalModelManager(){
  if(!state.modelApiEnabled)return '<section class="notice"><strong>模型 API 暂不可用，请联系管理员。</strong></section>';
@@ -213,7 +257,9 @@ function renderPersonalModelManager(){
  html+='<div class="divider"></div><h3>已有配置</h3>';
  if(!state.personalModels.length)return html+D('尚无个人模型配置。');
  html+=state.personalModels.map(p=>{
-  const test=state.modelTestResults[p.id];
+  const storedTest=state.modelTestResults[p.id];
+  const test=storedTest?.profileSnapshot===personalModelTestFingerprint(p)?storedTest:null;
+  const testing=state.personalModelTestPending[String(p.id)]!==undefined;
   const expanded=!!state.personalModelExpanded[p.id];
   let card='<details class="personal-model-card" data-model-config data-id="'+p.id+'" '+(expanded?'open':'')+'><summary class="model-config-summary"><strong>'+esc(p.name)+'</strong><span class="model-config-chevron" aria-hidden="true"></span></summary><div class="model-config-details">'+
    '<div class="label-line"><span class="pill '+(p.credential_status==='ok'?'ok':'warn')+'">'+credentialStatusLabel(p)+'</span></div>'+
@@ -221,7 +267,7 @@ function renderPersonalModelManager(){
   if(p.credential_status==='needs_repair')card+='<p class="hint">此配置无法解密，请重新录入服务商 API Key 并保存。</p>';
   if(p.credential_status==='missing')card+='<p class="hint">此配置缺少 API Key，请重新录入后保存。</p>';
   card+='<form data-form="personal-model-edit" data-id="'+p.id+'" class="spaced">'+personalModelFields(p,state.personalModelDrafts['model:'+p.id]||{})+'<div class="form-actions"><button type="submit">保存修改</button></div></form>'+
-   '<div class="buttonrow spaced"><button class="small" data-action="test-personal-model" data-id="'+p.id+'" '+(p.credential_status==='ok'?'':'disabled')+'>测试连接</button><button class="small danger" data-action="delete-personal-model" data-id="'+p.id+'">删除配置</button></div>'+
+   '<div class="buttonrow spaced"><button class="small" data-action="test-personal-model" data-id="'+p.id+'" '+(p.credential_status==='ok'&&!testing?'':'disabled')+'>'+(testing?'测试中…':'测试连接')+'</button><button class="small danger" data-action="delete-personal-model" data-id="'+p.id+'">删除配置</button></div>'+
    '<p class="model-test-result '+(test?(test.ok?'success':'failed'):'')+'" data-model-test-result="'+p.id+'" aria-live="polite">'+modelTestResultText(test)+'</p></div></details>';
   return card;
  }).join('');
@@ -415,7 +461,7 @@ app.addEventListener('toggle',e=>{
 },true);
 app.addEventListener('input',e=>{
  const modelForm=e.target.closest('form[data-form="personal-model-edit"]');
- if(modelForm){const id=Number(modelForm.dataset.id);if(state.modelTestResults[id]){delete state.modelTestResults[id];const result=app.querySelector('[data-model-test-result="'+id+'"]');if(result){result.textContent='';result.className='model-test-result';}}}
+ if(modelForm)invalidatePersonalModelTest(Number(modelForm.dataset.id));
  if(e.target.dataset?.chatDraft!==undefined){state.chatDraft=e.target.value;return;}
  if(e.target.dataset?.draft&&state.roomId){
   state.drafts[`${state.roomId}:${state.room?.match_number}:${state.selectedRound}:${e.target.dataset.draft}`]=e.target.value;
@@ -476,8 +522,28 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
   if(action==='generate-ai-questions'){b.disabled=true;b.textContent='模型正在出题…';const result=await api(`/api/rooms/${state.roomId}/ai-judges/questions/generate`,{method:'POST'});await refreshRoom();toast(aiQuestionFeedback(result))}
   if(action==='generate-ai-answers'){b.disabled=true;b.textContent='模型正在回答…';const result=await api(`/api/rooms/${state.roomId}/ai/answers/generate`,{method:'POST'});await refreshRoom();const detail=result.failed?.length?'；失败：'+result.failed.map(x=>x.alias+' '+x.error).join('；'):'';toast(`模型 AI 已提交 ${result.generated||0} 个回答${detail}`)}
   if(action==='generate-ai-verdicts'){b.disabled=true;b.textContent='模型正在判断…';const result=await api(`/api/rooms/${state.roomId}/ai-judges/verdicts/generate`,{method:'POST'});await refreshRoom();const detail=result.failed?.length?'；失败：'+result.failed.map(x=>x.error).join('；'):'';toast(`AI 裁判已锁定 ${result.generated||0} 份最终判断${detail}`)}
-  if(action==='test-personal-model'){const id=Number(b.dataset.id);b.disabled=true;b.textContent='测试中…';try{const result=await api(`/api/me/models/${id}/test`,{method:'POST'});updateModelTestResult(id,{ok:true,model:result.model,latency_ms:result.latency_ms});toast(`连接测试成功 · ${result.model} · ${result.latency_ms} ms`)}catch(err){updateModelTestResult(id,{ok:false,error:err.message});toast(err.message)}finally{b.disabled=false;b.textContent='测试连接'}return;}
-  if(action==='delete-personal-model'){const id=Number(b.dataset.id),draftKey='model:'+id;if(confirm('删除此个人模型配置？所有房间中引用它的 AI 席位会解除模型绑定并转为手动转录；席位、匿名代号和比赛历史都会保留。')){await api(`/api/me/models/${id}`,{method:'DELETE'});delete state.personalModelExpanded[id];delete state.modelTestResults[id];await loadPersonalModels();renderPersonalCenter({skipModelDraftKey:draftKey});toast('个人模型配置已删除，关联席位已解除绑定')}}
+  if(action==='test-personal-model'){
+   const id=Number(b.dataset.id),request=beginPersonalModelTest(id);
+   if(!request)throw new Error('模型配置已不存在，请刷新后重试。');
+   b.disabled=true;b.textContent='测试中…';
+   try{
+    const result=await api(`/api/me/models/${id}/test`,{method:'POST'});
+    if(!isCurrentPersonalModelTest(id,request))return;
+    updateModelTestResult(id,{ok:true,model:result.model,latency_ms:result.latency_ms},request);
+    toast(`连接测试成功 · ${result.model} · ${result.latency_ms} ms`);
+   }catch(err){
+    if(!isCurrentPersonalModelTest(id,request))return;
+    updateModelTestResult(id,{ok:false,error:err.message},request);toast(err.message);
+   }finally{
+    if(isCurrentPersonalModelTest(id,request)){
+     delete state.personalModelTestPending[String(id)];
+     const currentButton=app.querySelector('[data-action="test-personal-model"][data-id="'+id+'"]');
+     if(currentButton){currentButton.disabled=false;currentButton.textContent='测试连接';}
+    }
+   }
+   return;
+  }
+  if(action==='delete-personal-model'){const id=Number(b.dataset.id),draftKey='model:'+id;if(confirm('删除此个人模型配置？所有房间中引用它的 AI 席位会解除模型绑定并转为手动转录；席位、匿名代号和比赛历史都会保留。')){invalidatePersonalModelTest(id);delete state.personalModelExpanded[id];await api(`/api/me/models/${id}`,{method:'DELETE'});await loadPersonalModels();renderPersonalCenter({skipModelDraftKey:draftKey});toast('个人模型配置已删除，关联席位已解除绑定')}}
   if(action==='delete-model'){const id=Number(b.dataset.id);if(confirm('删除此模型配置？关联的 AI 参赛者和 AI 裁判将改为手动转录，比赛记录不会删除。')){await api(`/api/rooms/${state.roomId}/models/${id}`,{method:'DELETE'});await refreshRoom();toast('模型配置已删除')}}
   if(action==='download-log')await downloadLog();
   if(action==='download-full-log')await downloadFullLog();
@@ -495,7 +561,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
   if(action==='view-packet'){const pack=await api(`/api/rooms/${state.roomId}/packets/${b.dataset.id}`);const win=window.open('','_blank');if(win){win.document.title='裁判匿名消息包';const pre=win.document.createElement('pre');pre.style.cssText='white-space:pre-wrap;overflow-wrap:anywhere;font:15px/1.7 sans-serif;padding:24px';pre.textContent=pack.content;win.document.body.appendChild(pre);}else{await navigator.clipboard.writeText(pack.content);toast('弹窗被阻止，已复制裁判包');}}
   if(action==='mark-sent'){if(confirm('确认已亲自发送此版本到裁判窗口？标记并不代表系统已自动发送。')){await api(`/api/rooms/${state.roomId}/packets/${b.dataset.id}/sent`,{method:'POST'});await refreshRoom();toast('已记录手动发送时间')}}
   if(action==='reveal'){if(confirm('裁判结论锁定后将向全部玩家公开身份和计分。确定结束比赛并揭晓？')){await api(`/api/rooms/${state.roomId}/reveal`,{method:'POST'});await refreshRoom();toast('已结束并揭晓比赛')}}
- }catch(err){if(action==='test-personal-model'&&b){b.disabled=false;b.textContent='测试连接';}toast(err.message)}
+ }catch(err){toast(err.message)}
 });
 app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-form]');if(!form)return;e.preventDefault();const type=form.dataset.form;const data=Object.fromEntries(new FormData(form));const btn=form.querySelector('[type=submit]');if(btn)btn.disabled=true;
  try{
@@ -516,6 +582,7 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
   if(type==='personal-model-create'||type==='personal-model-edit'){
    const payload={name:data.name,base_url:data.base_url,model:data.model,api_key:data.api_key||'',temperature:Number(data.temperature),max_tokens:Number(data.max_tokens),timeout_seconds:Number(data.timeout_seconds)};
    const draftKey=personalModelDraftKey(form),profileId=Number(form.dataset.id||0);
+   if(type==='personal-model-edit')invalidatePersonalModelTest(profileId);
    if(type==='personal-model-create')await api('/api/me/models',{method:'POST',body:payload});
    else await api('/api/me/models/'+profileId,{method:'PUT',body:payload});
    if(type==='personal-model-edit')delete state.modelTestResults[profileId];
