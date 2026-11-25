@@ -76,10 +76,16 @@ async function registerPlayer(browser, username, displayName) {
     await first.locator('summary').focus();
     await page.keyboard.press('Enter');
     assert.equal(await first.evaluate(el => el.open), true);
-    assert.equal(await first.locator('summary').getAttribute('aria-expanded'), 'true');
+    await page.waitForFunction(id => {
+      const summary = document.querySelector('details[data-personal-model][data-id="' + id + '"] summary');
+      return summary?.getAttribute('aria-expanded') === 'true';
+    }, profileOne.id);
     await page.keyboard.press('Space');
     assert.equal(await first.evaluate(el => el.open), false);
-    assert.equal(await first.locator('summary').getAttribute('aria-expanded'), 'false');
+    await page.waitForFunction(id => {
+      const summary = document.querySelector('details[data-personal-model][data-id="' + id + '"] summary');
+      return summary?.getAttribute('aria-expanded') === 'false';
+    }, profileOne.id);
 
     await first.locator('summary').click();
     await first.locator('[name="name"]').fill('正在编辑的配置');
