@@ -216,12 +216,14 @@ async function registerPlayer(browser, username, displayName) {
 
     await mutate(playerOne, '/api/join', { code: roomAuto.code, role: 'player' });
     await page.locator('[data-action="sync"]').click();
+    await page.waitForFunction(() => state.room?.humans?.length === 1);
     await page.locator('[data-action="room-view"][data-view="admin"]').click();
     startButton = page.locator('[data-action="start-round"]');
     assert.equal(await startButton.isDisabled(), true);
 
     await mutate(playerTwo, '/api/join', { code: roomAuto.code, role: 'player' });
     await page.locator('[data-action="sync"]').click();
+    await page.waitForFunction(() => state.room?.humans?.length === 2);
     await page.locator('[data-action="room-view"][data-view="admin"]').click();
     startButton = page.locator('[data-action="start-round"]');
     assert.equal(await startButton.isEnabled(), true);
