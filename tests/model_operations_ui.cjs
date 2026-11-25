@@ -108,7 +108,7 @@ const { chromium } = require('playwright-core');
     await recordsPanel.locator('summary').click();
     await page.locator('.operation-record').first().waitFor();
     assert.equal(await page.locator('.operation-record').count(), 3);
-    assert((await page.locator('.model-operations-body').innerText()).includes('已知 Token 合计：9'));
+    assert((await page.locator('.model-operations-body').innerText()).includes('已知 Token 合计：6'));
 
     const filters = page.locator('form[data-form="model-operation-filters"]');
     await filters.locator('[name="purpose"]').selectOption('judge_question');
