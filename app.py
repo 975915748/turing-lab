@@ -1357,15 +1357,93 @@ def create_app(db_path=None):
     app = FastAPI(title='图灵测试多人主持台', docs_url=None, redoc_url=None)
     app.state.path = path
     app.state.hub = Hub(path)
-    async def model_call(profile, messages, api_key, preflight=None):
+    async def model_call(profile, messages, api_key, preflight=None, operation_id=None):
         loop = asyncio.get_running_loop()
         if getattr(app.state, 'model_semaphore_loop', None) is not loop:
             app.state.model_semaphore = asyncio.Semaphore(4)
             app.state.model_semaphore_loop = loop
         async with app.state.model_semaphore:
-            if preflight is not None and not preflight():
-                raise ModelCallCancelled()
-            return await chat_completion(profile, messages, api_key)
+            if operation_id is None:
+                if preflight is not None and not preflight():
+                    raise ModelCallCancelled()
+            else:
+                outcome=None
+                room_id=None
+                with connection(immediate=True) as db:
+                    task=db.execute('SELECT * FROM model_operation_tasks WHERE id=?',(operation_id,)).fetchone()
+                    if not task or task['state']!='queued':
+                        outcome='stale'
+                    else:
+                        room_id=task['room_id']
+                        if preflight is not None and not preflight():
+                            finish_model_operation_in_db(db,operation_id,'stale',
+                                error='排队期间权限、配置或比赛上下文发生变化；未向服务商发送请求。')
+                            outcome='stale'
+                        else:
+                            room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone() if room_id is not None else None
+                            if room_id is not None and (not room or room['match_number']!=task['match_number']):
+                                finish_model_operation_in_db(db,operation_id,'stale',
+                                    error='房间或比赛场次已变化；未向服务商发送请求。')
+                                outcome='stale'
+                            else:
+                                if room_id is not None:
+                                    attempts=model_request_count(db,room_id,task['match_number'])
+                                    limit=room['model_request_limit']
+                                    if limit is not None and attempts>=limit:
+                                        finish_model_operation_in_db(db,operation_id,'blocked',
+                                            error='本场模型请求次数已达上限；请提高上限或手动转录。')
+                                        outcome='blocked'
+                                if outcome is None:
+                                    now=operation_timestamp()
+                                    try:
+                                        queued=datetime.fromisoformat(task['queued_at'])
+                                        wait_ms=max(0,int((datetime.now(timezone.utc)-queued).total_seconds()*1000))
+                                    except (TypeError,ValueError):
+                                        wait_ms=0
+                                    db.execute("""UPDATE model_operation_tasks SET state='requesting',
+                                        request_started_at=?,queue_ms=?,updated_at=?
+                                        WHERE id=? AND state='queued'""",(now,wait_ms,now,operation_id))
+                if outcome is not None:
+                    if room_id is not None:
+                        await app.state.hub.notify(room_id,'model_operation_updated')
+                    if outcome=='blocked':
+                        raise ModelRequestLimitReached('本场模型请求次数已达上限；请提高上限或手动转录。')
+                    raise ModelCallCancelled()
+                await notify_model_operation(operation_id)
+
+            started=time.perf_counter()
+            try:
+                result=await chat_completion(profile,messages,api_key)
+            except Exception as exc:
+                if operation_id is not None:
+                    now=operation_timestamp()
+                    with connection(immediate=True) as db:
+                        db.execute("""UPDATE model_operation_tasks SET state='failed',
+                            request_finished_at=?,finished_at=?,duration_ms=?,request_succeeded=0,
+                            error_message=?,result_applied=0,updated_at=?
+                            WHERE id=? AND state='requesting'""",
+                            (now,now,round((time.perf_counter()-started)*1000),
+                             operation_error_message(exc),now,operation_id))
+                    await notify_model_operation(operation_id)
+                raise
+
+            if operation_id is not None:
+                now=operation_timestamp()
+                usage=result.get('usage') if isinstance(result,dict) else {}
+                usage=usage if isinstance(usage,dict) else {}
+                prompt=usage.get('prompt_tokens')
+                completion=usage.get('completion_tokens')
+                total=usage.get('total_tokens')
+                known=any(value is not None for value in (prompt,completion,total))
+                with connection(immediate=True) as db:
+                    db.execute("""UPDATE model_operation_tasks SET request_finished_at=?,
+                        duration_ms=?,request_succeeded=1,usage_known=?,
+                        prompt_tokens=?,completion_tokens=?,total_tokens=?,updated_at=?
+                        WHERE id=? AND state='requesting'""",
+                        (now,round((time.perf_counter()-started)*1000),1 if known else 0,
+                         prompt,completion,total,now,operation_id))
+                await notify_model_operation(operation_id)
+            return result
 
     app.mount('/static', StaticFiles(directory=ROOT/'static'), name='static')
 
@@ -1392,6 +1470,78 @@ def create_app(db_path=None):
             raise
         finally:
             db.close()
+
+
+    def operation_timestamp():
+        return datetime.now(timezone.utc).isoformat(timespec='milliseconds')
+
+    def operation_error_message(error):
+        if isinstance(error, ModelAPIError):
+            message=str(error)
+        elif isinstance(error, HTTPException):
+            message=str(error.detail)
+        else:
+            message='模型调用失败，请检查配置或稍后重试。'
+        return message.replace('\n',' ')[:500]
+
+    def create_model_operation_task(db, *, purpose, target_type, target_key, target_label,
+                                    profile, trigger_user_id, room_id=None, match_number=None,
+                                    round_number=None, context_revision=None, retry_of=None,
+                                    idempotency_key=None):
+        if room_id is None:
+            active=db.execute("""SELECT id,state FROM model_operation_tasks
+                WHERE purpose='connection_test' AND profile_owner_user_id=? AND profile_id=?
+                  AND state IN ('queued','requesting') ORDER BY id DESC LIMIT 1""",
+                (profile['owner_user_id'],profile['id'])).fetchone()
+        else:
+            active=db.execute("""SELECT id,state FROM model_operation_tasks
+                WHERE room_id=? AND match_number=? AND round_number=? AND purpose=?
+                  AND target_type=? AND target_key=? AND state IN ('queued','requesting')
+                ORDER BY id DESC LIMIT 1""",
+                (room_id,match_number,round_number,purpose,target_type,str(target_key))).fetchone()
+        if active:
+            return int(active['id']),False,active['state']
+        now=operation_timestamp()
+        profile_name=profile.get('profile_name') or profile.get('name') or '个人模型配置'
+        model_name=profile.get('model_name') or profile.get('model') or '未知模型'
+        cur=db.execute('''INSERT INTO model_operation_tasks(
+            room_id,match_number,round_number,purpose,target_type,target_key,target_label,
+            profile_id,profile_owner_user_id,trigger_user_id,profile_name,model_name,
+            profile_snapshot_hash,context_revision,state,retry_of,idempotency_key,queued_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'queued',?,?,?,?)''',
+            (room_id,match_number,round_number,purpose,target_type,str(target_key),target_label,
+             profile['id'],profile['owner_user_id'],trigger_user_id,profile_name,model_name,
+             model_profile_snapshot_hash(profile),context_revision,retry_of,
+             (idempotency_key or secrets.token_urlsafe(18))[:128],now,now))
+        return int(cur.lastrowid),True,'queued'
+
+    def finish_model_operation_in_db(db, operation_id, state, *, error=None, result_applied=False):
+        now=operation_timestamp()
+        db.execute('''UPDATE model_operation_tasks SET state=?,finished_at=?,updated_at=?,
+            error_message=?,result_applied=?
+            WHERE id=? AND state IN ('queued','requesting')''',
+            (state,now,now,operation_error_message(error) if error else None,
+             1 if result_applied else 0,operation_id))
+
+    def finish_model_operation(operation_id, state, *, error=None, result_applied=False):
+        with connection(immediate=True) as db:
+            row=db.execute('SELECT room_id FROM model_operation_tasks WHERE id=?',(operation_id,)).fetchone()
+            if not row:
+                return None
+            room_id=row['room_id']
+            finish_model_operation_in_db(db,operation_id,state,error=error,result_applied=result_applied)
+        return room_id
+
+    async def finish_and_notify_model_operation(operation_id, state, *, error=None, result_applied=False):
+        room_id=finish_model_operation(operation_id,state,error=error,result_applied=result_applied)
+        if room_id is not None:
+            await app.state.hub.notify(room_id,'model_operation_updated')
+
+    async def notify_model_operation(operation_id):
+        with connection() as db:
+            row=db.execute('SELECT room_id FROM model_operation_tasks WHERE id=?',(operation_id,)).fetchone()
+        if row and row['room_id'] is not None:
+            await app.state.hub.notify(row['room_id'],'model_operation_updated')
 
     def caller(request, db, mutate=False):
         if mutate:
