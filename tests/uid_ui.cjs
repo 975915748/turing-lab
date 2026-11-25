@@ -326,8 +326,6 @@ async function logout(page) {
 
       assert.equal(await firstAfterSave.evaluate(el => el.open), true, '保存后应保留第一条配置的展开状态');
       assert.equal(await secondAfterSave.evaluate(el => el.open), true, '保存其他配置时不应折叠第二条配置');
-      assert.equal(await firstAfterSave.evaluate(el => el.open), true, '保存后应保留第一条配置的展开状态');
-      assert.equal(await secondAfterSave.evaluate(el => el.open), true, '保存其他配置时不应折叠第二条配置');
       assert.equal(await firstAfterSave.locator('[name="model"]').inputValue(), 'saved-model-first');
       assert.equal(await secondAfterSave.locator('[name="model"]').inputValue(), 'second-unsaved-model');
       assert.equal(await secondAfterSave.locator('[name="api_key"]').inputValue(), 'sk-second-draft');
