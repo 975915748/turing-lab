@@ -121,13 +121,94 @@ async function registerPlayer(browser, username, displayName) {
     await first.locator('[name="name"]').fill('已保存的配置');
     await first.locator('[name="model"]').fill('saved-model-one');
     await first.locator('[name="api_key"]').fill('sk-saved-browser-key');
+
+    let releaseProfileSave;
+    let signalProfileSaveStarted;
+    const profileSaveStarted = new Promise(resolve => { signalProfileSaveStarted = resolve; });
+    const profileSaveRoute = '**/api/me/models/' + profileOne.id;
+    await page.route(profileSaveRoute, async route => {
+      if (route.request().method() === 'PUT') {
+        signalProfileSaveStarted();
+        await new Promise(resolve => { releaseProfileSave = resolve; });
+      }
+      await route.continue();
+    });
+    const profileSaveResponsePromise = page.waitForResponse(response =>
+      response.url().endsWith('/api/me/models/' + profileOne.id) &&
+      response.request().method() === 'PUT');
     await first.locator('[type="submit"]').click();
+    await profileSaveStarted;
+    await second.locator('[name="model"]').fill('latest-model-two');
+    await second.locator('[name="api_key"]').fill('sk-latest-secret-two');
+    releaseProfileSave();
+    const profileSaveResponse = await profileSaveResponsePromise;
+    assert.equal(profileSaveResponse.status(), 200);
+    await page.unroute(profileSaveRoute);
     await page.locator('#toast').filter({ hasText: '个人模型配置已更新' }).waitFor();
     assert.equal(await first.locator('summary').innerText(), '已保存的配置');
     assert.equal(await first.locator('[name="model"]').inputValue(), 'saved-model-one');
     assert.equal(await second.evaluate(el => el.open), true);
-    assert.equal(await second.locator('[name="model"]').inputValue(), 'unsaved-model-two');
-    assert.equal(await second.locator('[name="api_key"]').inputValue(), 'sk-unsaved-second-secret');
+    assert.equal(await second.locator('[name="model"]').inputValue(), 'latest-model-two');
+    assert.equal(await second.locator('[name="api_key"]').inputValue(), 'sk-latest-secret-two');
+
+    let releaseOldTest;
+    let signalOldTestStarted;
+    const oldTestStarted = new Promise(resolve => { signalOldTestStarted = resolve; });
+    const testRoute = '**/api/me/models/' + profileOne.id + '/test';
+    await page.route(testRoute, async route => {
+      if (route.request().method() !== 'POST') {
+        await route.continue();
+        return;
+      }
+      signalOldTestStarted();
+      await new Promise(resolve => { releaseOldTest = resolve; });
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ model: 'saved-model-one', latency_ms: 1, preview: '旧密钥连接成功' }),
+      });
+    });
+    await first.locator('[data-action="test-personal-model"]').click();
+    await oldTestStarted;
+    await first.locator('[name="model"]').fill('fold-model-two');
+    await first.locator('[name="api_key"]').fill('sk-invalid-new-key');
+    const invalidSaveResponsePromise = page.waitForResponse(response =>
+      response.url().endsWith('/api/me/models/' + profileOne.id) &&
+      response.request().method() === 'PUT');
+    await first.locator('[type="submit"]').click();
+    const invalidSaveResponse = await invalidSaveResponsePromise;
+    assert.equal(invalidSaveResponse.status(), 200);
+    await page.locator('#toast').filter({ hasText: '个人模型配置已更新' }).waitFor();
+    releaseOldTest();
+    const oldTestResponse = await page.waitForResponse(response =>
+      response.url().endsWith('/api/me/models/' + profileOne.id + '/test') &&
+      response.request().method() === 'POST');
+    assert.equal(oldTestResponse.status(), 200);
+    await page.waitForTimeout(100);
+    assert.equal(await first.locator('[data-model-test-result]').innerText(), '');
+    assert.match(await page.locator('#toast').innerText(), /个人模型配置已更新/);
+    await page.unroute(testRoute);
+
+    await page.route(testRoute, async route => {
+      if (route.request().method() === 'POST') {
+        await route.fulfill({
+          status: 502,
+          contentType: 'application/json',
+          body: JSON.stringify({ detail: '模拟连接失败' }),
+        });
+      } else {
+        await route.continue();
+      }
+    });
+    const currentTestResponsePromise = page.waitForResponse(response =>
+      response.url().endsWith('/api/me/models/' + profileOne.id + '/test') &&
+      response.request().method() === 'POST');
+    await first.locator('[data-action="test-personal-model"]').click();
+    const currentTestResponse = await currentTestResponsePromise;
+    assert.equal(currentTestResponse.status(), 502);
+    await first.locator('[data-model-test-result]').filter({ hasText: '已保存配置连接测试失败：模拟连接失败' }).waitFor();
+    assert.equal(await first.locator('[data-action="test-personal-model"]').isEnabled(), true);
+    await page.unroute(testRoute);
 
     await second.locator('[data-action="delete-personal-model"]').click();
     await page.locator('#toast').filter({ hasText: '个人模型配置已删除' }).waitFor();
