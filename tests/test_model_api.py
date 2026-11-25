@@ -728,61 +728,97 @@ def test_ai_judge_question_generation_reports_provider_failure(model_lab, monkey
     assert room['rounds'][0]['questions'] == []
 
 
-def test_queued_ai_judge_question_is_discarded_when_roster_changes(model_lab, monkeypatch):
+@pytest.mark.parametrize('mutation', [
+    'roster_changed', 'seat_rebound', 'profile_deleted', 'session_revoked',
+])
+def test_queued_ai_judge_question_revalidates_context_before_provider_call(
+        model_lab, monkeypatch, mutation):
     admin, base = model_lab['admin'], model_lab['base']
+    judge_ids = []
     for index in range(5):
-        post(admin, base + '/ai-judges', {
+        result = post(admin, base + '/ai-judges', {
             'name': f'排队 AI 裁判 {index + 1}',
             'model_profile_id': model_lab['profile_id'],
         })
+        judge_ids.append(result['id'])
     room_info = admin.get(base).json()
     invite_code = room_info['invite_code']
     cookie = admin.cookies.get(app_module.COOKIE)
-    started = 0
+    started_judges = []
 
     async def scenario():
-        nonlocal started
         transport = httpx.ASGITransport(app=model_lab['app'], raise_app_exceptions=False)
         four_started = asyncio.Event()
         release = asyncio.Event()
 
-        async def blocked_provider(*args, **kwargs):
-            nonlocal started
-            started += 1
-            if started == 4:
+        async def blocked_provider(profile, messages, api_key):
+            started_judges.append(profile['judge_id'])
+            if len(started_judges) == 4:
                 four_started.set()
             await release.wait()
-            return {'text': '名单变化后不应保存的问题', 'usage': {}}
+            return {'text': '排队期间上下文变化后的问题', 'usage': {}}
 
         monkeypatch.setattr(app_module, 'chat_completion', blocked_provider)
         async with (
             httpx.AsyncClient(transport=transport, base_url='http://testserver',
                               cookies={app_module.COOKIE: cookie}) as async_admin,
+            httpx.AsyncClient(transport=transport, base_url='http://testserver',
+                              cookies={app_module.COOKIE: cookie}) as mutator,
             httpx.AsyncClient(transport=transport, base_url='http://testserver') as third_player,
         ):
             generate_task = asyncio.create_task(
                 async_post(async_admin, base + '/ai-judges/questions/generate'))
             await asyncio.wait_for(four_started.wait(), 3)
-            assert started == 4
-            registered = await async_post(third_player, '/api/register', {
-                'username': 'question_roster_change',
-                'display_name': '新增参赛者',
-                'password': 'question-player-password',
-                'code': invite_code,
-            })
-            assert registered.status_code == 200, registered.text
+            assert len(started_judges) == 4
+            queued_judge_id = next(judge_id for judge_id in judge_ids
+                                    if judge_id not in started_judges)
+
+            if mutation == 'roster_changed':
+                changed = await async_post(third_player, '/api/register', {
+                    'username': 'question_roster_change',
+                    'display_name': '新增参赛者',
+                    'password': 'question-player-password',
+                    'code': invite_code,
+                })
+            else:
+                me = (await mutator.get('/api/me')).json()['user']
+                headers = {'X-CSRF-Token': me['csrf']}
+                if mutation == 'seat_rebound':
+                    changed = await mutator.put(
+                        base + f'/ai-judges/{queued_judge_id}/model',
+                        json={'model_profile_id': None}, headers=headers)
+                elif mutation == 'profile_deleted':
+                    changed = await mutator.request(
+                        'DELETE', f"/api/me/models/{model_lab['profile_id']}",
+                        json={}, headers=headers)
+                else:
+                    changed = await mutator.post('/api/me/password', json={
+                        'current_password': 'model-admin-password',
+                        'new_password': 'model-admin-password-new',
+                        'confirm_password': 'model-admin-password-new',
+                    }, headers=headers)
+            assert changed.status_code == 200, changed.text
+
             release.set()
             response = await asyncio.wait_for(generate_task, 3)
             assert response.status_code == 200, response.text
             payload = response.json()
-            assert started == 4, '第五个排队任务在名单变化后不应触发服务商调用'
-            assert payload['generated'] == 0
-            assert payload['skipped'] == 5
+            assert len(started_judges) == 4, '第五个排队任务在状态失效后不应触发服务商调用'
+            if mutation == 'seat_rebound':
+                assert payload['generated'] == 4
+                assert payload['skipped'] == 1
+                assert queued_judge_id not in started_judges
+            else:
+                assert payload['generated'] == 0
+                assert payload['skipped'] == 5
             assert all(item.get('reason') for item in payload['results'] if item['status'] == 'skipped')
-            current = (await async_admin.get(base)).json()
-            assert current['rounds'][0]['questions'] == []
+            if mutation != 'session_revoked':
+                current = (await async_admin.get(base)).json()
+                expected_questions = 4 if mutation == 'seat_rebound' else 0
+                assert len(current['rounds'][0]['questions']) == expected_questions
 
     asyncio.run(scenario())
+
 
 @pytest.mark.parametrize('failure,expected_message', [
     ('http', 'HTTP 503'),
