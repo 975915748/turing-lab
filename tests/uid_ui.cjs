@@ -325,16 +325,15 @@ async function logout(page) {
 
       // Reproduce a request that slips into the save window through an already-
       // queued caller. Its server-side test uses the old credential and returns late.
-      const saveWindowTestPromise = page.evaluate(async id => {
+      const saveWindowRequest = await page.evaluate(id => {
         const key = String(id), version = nextPersonalModelTestVersion(key);
         const request = { version, epoch: state.personalModelEpoch, uid: state.me?.user?.uid,
           profileSnapshot: personalModelTestFingerprint(state.personalModels.find(p => Number(p.id) === Number(id))) };
         state.personalModelTestPending[key] = version;
-        const result = await api('/api/me/models/' + id + '/test', { method: 'POST' });
-        const accepted = updateModelTestResult(id,
-          { ok: true, model: result.model, latency_ms: result.latency_ms }, request);
-        return { accepted, model: result.model };
+        return request;
       }, ids[0]);
+      const saveWindowTestApiPromise = page.evaluate(id =>
+        api('/api/me/models/' + id + '/test', { method: 'POST' }), ids[0]);
       await saveWindowTestStarted;
       assert.equal(testRequestCount, 2, '竞态探针应在保存请求尚未提交时发起第二个模型测试');
 
@@ -361,8 +360,11 @@ async function logout(page) {
       const oldTestResponse = await oldTestResponsePromise;
       assert.equal(oldTestResponse.status(), 200);
       releaseSaveWindowTest();
-      const saveWindowTestResult = await saveWindowTestPromise;
-      assert.equal(saveWindowTestResult.accepted, false,
+      const saveWindowTestResult = await saveWindowTestApiPromise;
+      const saveWindowAccepted = await page.evaluate(({id, request, result}) =>
+        updateModelTestResult(id, { ok: true, model: result.model, latency_ms: result.latency_ms }, request),
+        { id: ids[0], request: saveWindowRequest, result: saveWindowTestResult });
+      assert.equal(saveWindowAccepted, false,
         '保存期间发起的旧凭据测试结果必须被保存完成后的失效标记拒绝');
       await page.waitForTimeout(30);
       assert.equal(await page.evaluate(id => state.modelTestResults[id] ?? null, ids[0]), null,
