@@ -433,17 +433,56 @@ function judgeAdminPanel(r){
  }
  return html+'</section>';
 }
+
+function renderReadinessPanel(r){
+ const x=r.readiness;if(!x)return '';
+ const limit=x.model_request_limit===null?'不限':x.model_request_limit;
+ const blockers=(x.blockers||[]).map(message=>'<li>'+esc(message)+'</li>').join('');
+ const notices=(x.notices||[]).map(message=>'<li>'+esc(message)+'</li>').join('');
+ let actions='';
+ if(x.can_generate_and_start)actions+='<button class="primary" data-action="start-round" data-generate-questions="true">生成问题并开始</button>';
+ if(x.can_start)actions+='<button data-action="start-round" data-generate-questions="false">按已提交问题开始</button>';
+ if(!x.can_start&&!x.can_generate_and_start){
+  if(x.manual_question_required)actions+='<button class="small" data-action="focus-manual-question">前往外部裁判问题录入</button>';
+  else if(x.suggested_view&&x.suggested_view!=='admin')actions+='<button class="small" data-action="room-view" data-view="'+esc(x.suggested_view)+'">前往裁判管理</button>';
+ }
+ return '<section class="card compact readiness-card"><div class="label-line"><h2>本轮准备</h2><span class="pill">'+(x.can_start?'可以开始':'尚未就绪')+'</span></div>'+
+  '<div class="readiness-grid"><div><span class="tiny muted">参赛者</span><strong>'+x.participant_count+' 人已加入</strong></div>'+
+  '<div><span class="tiny muted">裁判问题</span><strong>已提交 '+x.submitted_judges+' / '+x.total_judges+' 位裁判 · '+x.question_count+' 份</strong></div>'+
+  '<div><span class="tiny muted">自动席位</span><strong>'+x.auto_pending+' 位 AI 裁判待出题</strong></div>'+
+  '<div><span class="tiny muted">本场请求</span><strong>已尝试 '+x.model_request_count+' / '+limit+'</strong></div></div>'+
+  (blockers?'<ul class="readiness-messages danger-text">'+blockers+'</ul>':'')+
+  (notices?'<ul class="readiness-messages">'+notices+'</ul>':'')+
+  '<div class="buttonrow spaced">'+actions+'</div>'+
+  '<div class="divider"></div><div class="label-line"><div><strong>本场模型请求上限</strong><p class="hint">每个实际进入模型请求阶段的席位尝试计 1 次；失败和超时也计入。留空表示不限。</p></div></div>'+
+  '<form data-form="model-request-limit" class="operation-limit-form"><input name="limit" type="number" min="1" max="1000000" step="1" value="'+(x.model_request_limit===null?'':esc(x.model_request_limit))+'" placeholder="留空表示不限"><button class="small" type="submit">保存上限</button></form>'+
+  '</section>';
+}
+function renderModelOperationPanel(r){
+ const tasks=r.model_operations||[];
+ if(!tasks.length)return '';
+ const items=tasks.map(t=>{
+  const retryable=['failed','interrupted','blocked'].includes(t.state);
+  const request=t.request_succeeded===true?'请求成功':t.request_succeeded===false?'请求失败':t.request_started_at?'请求结果待确认':'尚未开始请求';
+  const applied=t.result_applied?'已写入比赛':t.request_succeeded===true?'结果未应用':'未写入比赛';
+  const usage=t.usage_known?'Token：'+operationTokens(t.total_tokens):'Token：未返回';
+  return '<article class="operation-record"><div class="label-line"><strong>'+esc(t.target_label)+' · '+operationPurposeLabel(t.purpose)+'</strong><span class="operation-status '+esc(t.state)+'">'+operationStateLabel(t.state)+'</span></div>'+
+   '<div class="tiny muted">'+esc(t.profile_name)+' · '+esc(t.model_name)+'</div>'+
+   '<div class="operation-meta"><span>'+request+'</span><span>'+applied+'</span></div>'+
+   '<div class="tiny muted">等待 '+(t.queue_ms===null?'—':esc(t.queue_ms)+' ms')+' · 请求 '+(t.duration_ms===null?'—':esc(t.duration_ms)+' ms')+' · '+usage+'</div>'+
+   (t.retry_of?'<div class="tiny muted">重试自任务 #'+esc(t.retry_of)+'</div>':'')+
+   (t.error_message?'<p class="operation-error">'+esc(t.error_message)+'</p>':'')+
+   (retryable?'<div class="buttonrow spaced"><button class="small" data-action="retry-model-operation" data-id="'+t.id+'">重试此席位</button></div>':'')+
+   '</article>';
+ }).join('');
+ return '<section class="card compact"><div class="label-line"><h2>模型调用状态</h2><span class="pill">'+tasks.length+' 个任务</span></div><p class="hint">显示本场当前轮次的模型任务。请求成功与结果写入比赛分别记录。</p><div class="operation-list">'+items+'</div></section>';
+}
 function renderJudgeWorkflowPanel(r){
  const judges=r.judges||[];
  const pending=r.rounds.find(x=>x.number===r.current_round);if(!judges.length&&!pending?.questions?.length)return '';
  const allDone=judges.every(j=>j.locked);
  const allRoundsDone=r.rounds.length>0&&r.rounds.every(x=>x.status==='revealed');
  let html='<section class="card compact"><div class="label-line"><h2>统一作答与揭晓</h2><span class="pill">'+judges.filter(j=>j.locked).length+'/'+judges.length+' 位裁判已锁定</span></div>';
- if(pending?.status==='draft'&&(judges.length||pending.questions?.length)){
-  const participantCount=(r.humans||[]).length+(r.ais||[]).length;
-  if(participantCount<2)html+='<p class="hint">当前仅有 '+participantCount+' 位参赛者；至少需要两名在场参赛者才能开始统一作答。</p><button class="primary" data-action="start-round" disabled>开始统一作答</button>';
-  else html+='<button class="primary" data-action="start-round">开始统一作答</button>';
- }
  if(!r.revealed_at&&allDone&&allRoundsDone)html+='<button class="danger" data-action="reveal">全部裁判已锁定 · 正式揭晓</button>';
  return html+'</section>';
 }
@@ -492,7 +531,7 @@ function renderRoom(){
    `<div class="notice">🔒 回答暂时隐藏。已提交 ${round.submitted.length} / ${roster.length}；全部参赛者（含 AI）提交后，服务器会自动向所有在线玩家公布。</div>${round.answers[r.mine]?.text?`<div class="answer-card"><strong>我已提交的回答</strong><div class="answer-content">${esc(round.answers[r.mine].text)}</div></div>`:''}`;
  const canAnswer=active&&!finished&&round.status==='collecting'&&r.mine&&!submitted.has(r.mine);
  const judgeBox= canManage?`<section class="card compact"><div class="label-line"><h2>房主管理台</h2><span class="pill">${r.is_owner?'房主':'管理员'}</span></div>
- ${active&&round.status==='draft'&&!finished&&!round.questions?.length&&!(r.judges||[]).length?`<div class="divider"></div><form data-form="question"><label class="field">录入裁判的第 ${n} 轮问题</label><textarea name="question" data-draft="question" maxlength="6000" required placeholder="从裁判聊天窗口复制原文…">${myDraft('question')}</textarea><div class="form-actions"><button class="primary" type="submit">向所有玩家发布问题</button></div></form>`:''}
+ ${active&&round.status==='draft'&&!finished&&!round.questions?.length&&!(r.judges||[]).length?`<div class="divider"></div><form id="manual-question-form" data-form="question"><label class="field">录入裁判的第 ${n} 轮问题</label><textarea name="question" data-draft="question" maxlength="6000" required placeholder="从裁判聊天窗口复制原文…">${myDraft('question')}</textarea><div class="form-actions"><button class="primary" type="submit">向所有玩家发布问题</button></div></form>`:''}
  ${active&&round.status==='collecting'&&!finished&&r.ais.some(a=>a.model_profile_id&&a.model_profile?.credential_status==='ok'&&!submitted.has(a.alias))?`<div class="divider"></div><button class="primary" data-action="generate-ai-answers">自动生成模型 AI 回复</button>`:''}
   ${active&&round.status==='collecting'&&!finished&&r.ais.some(a=>(!a.model_profile_id||a.model_profile?.credential_status!=='ok')&&!submitted.has(a.alias))?`<div class="divider"></div><form data-form="ai-answer"><label class="field">录入 AI 原始回答</label><select name="alias">${r.ais.filter(a=>(!a.model_profile_id||a.model_profile?.credential_status!=='ok')&&!submitted.has(a.alias)).map(a=>`<option value="${a.alias}">${a.alias} · ${esc(a.name)}</option>`).join('')}</select><label class="field">AI 回答（复制原文）</label><textarea name="answer" data-draft="ai-answer" maxlength="12000" required placeholder="请粘贴 AI 原样回答，不做修改…">${myDraft('ai-answer')}</textarea><div class="fom-actions"><button class="primary" type="submit">录入 AI 回答</button></div></form>`:''}
  ${r.invite_code?`<div class="notice"><div class="muted tiny">房间邀请码（房主 / 管理员可见）</div><div class="label-line"><strong class="code">${esc(r.invite_code)}</strong><button class="small" data-action="copy-code">复制</button></div></div>`:''}
@@ -507,7 +546,7 @@ function renderRoom(){
  const scored=r.verdict&&finished?roster.filter(p=>r.verdict.predictions[p.alias]===(p.role==='AI'?'AI':'Human')).length:null;
  app.innerHTML=`<div class="pagehead"><div><div class="overline">ROOM ${r.id} / REAL-TIME MATCH</div><h1>${esc(r.title)}</h1><div class="stat-row"><span class="pill ${finished?'ok':'warn'}">${finished?'比赛已结束':'比赛进行中'}</span><span cass="pill">${humans} 位人类 · ${ais} 位 AI</span><span class="pill">${r.judges?.length?`${r.judges.length} 位裁判（真人 / AI）`:`外部裁判：${esc(r.judge)}`}</span></div></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button class="ghost" data-action="back">← 比赛大厅</button><button data-action="sync">↻ 刷新</button></div></div>
  ${finishedActions(r)}<div class="room-layout ${canManage?'admin-room-layout':''}"><aside class="aside"><section class="card flat"><h2>参赛者身份</h2><div class="roster">${makeRoster(r)}</div></section><section class="card flat"><h2>比赛轮次</h2><div class="round-tags">${rtab}</div></section></aside>
- <div class="stack">${canManage&&state.roomView==='human-judges'?renderHumanJudgeAdminPanel(r):canManage&&state.roomView==='ai-judges'?judgeAdminPanel(r):canManage&&state.roomView==='admin'?judgeBox+renderJudgeWorkflowPanel(r):''}
+ <div class="stack">${canManage&&state.roomView==='human-judges'?renderHumanJudgeAdminPanel(r):canManage&&state.roomView==='ai-judges'?judgeAdminPanel(r)+renderModelOperationPanel(r):canManage&&state.roomView==='admin'?judgeBox+renderReadinessPanel(r)+renderJudgeWorkflowPanel(r)+renderModelOperationPanel(r):''}
  <div class="${canManage&&state.roomView!=='match'?'hide':'stack'}"><section class="card"><div class="label-line"><div><div class="overline">JUDGE / ROUND ${n}</div><h2 style="margin:5px 0 0">裁判问题</h2></div><span class="pill ${round.status==='revealed'?'ok':'warn'}">${round.status==='draft'?'等待发布':round.status==='collecting'?'正在收集回答':'本轮已揭晓'}</span></div><div class="question spaced">${esc(round.question||'管理员尚未开启本轮作答。')}</div>${round.status==='draft'&&round.questions?.length?`<div class="feed spaced">${round.questions.map(q=>`<div class="feed-item"><strong>${esc(q.judge)}</strong><div class="feed-text">${esc(q.text)}</div></div>`).join('')}</div>`:''}<div class="buttonrow spaced"><button class="small" data-action="download-log">↓ 下载本轮 Log (.md)</button>${finished?'<button class="small" data-action="download-full-log">↓ 下载整场 Log (.md)</button>':''}</div></section>
  <section class="card"><div class="label-line"><h2>参赛者回答</h2><span class="pill">${round.submitted.length}/${roster.length} 已提交</span></div>${answerView}
  ${canAnswer?`<form data-form="answer" class="spaced"><label class="field">我的本轮回答 · ${esc(r.mine)}</label><textarea name="answer" data-draft="answer" maxlength="12000" required placeholder="在这里回答裁判的问题。提交后不可修改，直到全员提交才统一公开。">${myDraft('answer')}</textarea><div class="form-actions"><button class="primary" type="submit">提交本轮回答</button></div></form>`:''}
