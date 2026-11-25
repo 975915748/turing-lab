@@ -70,13 +70,16 @@ async function registerPlayer(browser, username, displayName) {
     assert.equal(await second.locator('summary').innerText(), '同名配置');
     assert.equal(await first.evaluate(el => el.open), false);
     assert.equal(await second.evaluate(el => el.open), false);
-    assert.equal(await page.getByRole('button', { name: '同名配置' }).count(), 2);
+    assert.equal(await page.getByText('同名配置', { exact: true }).count(), 2);
+    assert.equal(await first.locator('summary').getAttribute('aria-expanded'), 'false');
     assert.equal(await first.locator('form[data-form="personal-model-edit"]').isVisible(), false);
     await first.locator('summary').focus();
     await page.keyboard.press('Enter');
     assert.equal(await first.evaluate(el => el.open), true);
+    assert.equal(await first.locator('summary').getAttribute('aria-expanded'), 'true');
     await page.keyboard.press('Space');
     assert.equal(await first.evaluate(el => el.open), false);
+    assert.equal(await first.locator('summary').getAttribute('aria-expanded'), 'false');
 
     await first.locator('summary').click();
     await first.locator('[name="name"]').fill('正在编辑的配置');
@@ -149,6 +152,8 @@ async function registerPlayer(browser, username, displayName) {
     assert.equal(stored.includes('sk-unsaved-browser-secret'), false);
     assert.equal(stored.includes('sk-unsaved-second-secret'), false);
 
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.locator('#themeBtn').click();
     const roomAuto = await mutate(hostContext, '/api/rooms', { title: '自动出题 UI 验收' });
     const roomManual = await mutate(hostContext, '/api/rooms', { title: '手动生成 UI 验收' });
     await mutate(hostContext, '/api/rooms/' + roomAuto.room_id + '/ai-judges', {
@@ -162,7 +167,35 @@ async function registerPlayer(browser, username, displayName) {
     const playerTwo = await registerPlayer(browser, 'question_player_two', '问题玩家二');
 
     await page.goto(site + '#room=' + roomAuto.room_id);
+    assert.equal(await page.getByText('人类玩家互相可见真实账号身份；裁判包仅含匿名代号。', { exact: true }).count(), 0);
+    assert.equal(await page.getByText('在房主管理台选择以人类身份加入。', { exact: true }).count(), 1);
+    await page.screenshot({ path: path.join(artifacts, 'room-player-p5-p6.png'), fullPage: true });
+
+    await page.locator('[data-action="room-view"][data-view="human-judges"]').click();
+    assert.equal(await page.getByText('0 位真人裁判', { exact: true }).count(), 1);
+    assert.equal(await page.getByText('尚无真人裁判。', { exact: true }).count(), 0);
+    assert.equal(await page.getByText(/真人裁判自行注册并使用 UID 登录/).count(), 0);
+    assert.equal(await page.getByText(/同一 UID 同时只能担任一个未完赛房间/).count(), 0);
+    await page.screenshot({ path: path.join(artifacts, 'room-human-judges-p7.png'), fullPage: true });
+
     await page.locator('[data-action="room-view"][data-view="admin"]').click();
+    const removedCopy = [
+      '模型接入的 AI 参赛者可自动回答；AI 裁判可自动出题和判断。未接入模型的 AI 席位仍可手动转录。',
+      '可以添加手动 AI 席位，也可以先在个人中心配置自己的模型 API。',
+      '房主也可使用邀请码加入，以人类身份回答。',
+      '点击轮次可查看历史记录。',
+      '查看本轮问题与回答',
+      '查看真人裁判名单',
+      '配置 AI 裁判席位',
+      '管理参赛者与比赛',
+      '管理名字、密码和个人模型 API',
+      '仍需完成全部轮次。等待所有裁判锁定最终判断。',
+      '所有真人 / AI 裁判的问题会统一汇总；由房主在此开启作答。',
+    ];
+    for (const copy of removedCopy) {
+      assert.equal(await page.getByText(copy, { exact: true }).count(), 0, 'stale copy remains: ' + copy);
+    }
+    await page.screenshot({ path: path.join(artifacts, 'room-admin-p2-p3-p4.png'), fullPage: true });
     let startButton = page.locator('[data-action="start-round"]');
     await startButton.waitFor();
     assert.equal(await startButton.isDisabled(), true);
