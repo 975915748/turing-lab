@@ -38,6 +38,10 @@ class ModelCallCancelled(Exception):
     """Queued model work became unauthorized or stale before the provider call began."""
 
 
+class ModelRequestLimitReached(Exception):
+    """A room has no remaining model-request attempts."""
+
+
 def utcnow():
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
@@ -135,6 +139,7 @@ def init_db(path):
             judge TEXT NOT NULL DEFAULT '裁判', status TEXT NOT NULL DEFAULT 'open',
             current_round INTEGER NOT NULL DEFAULT 1,
             verdict_json TEXT, verdict_locked_at TEXT, revealed_at TEXT,
+            model_request_limit INTEGER,
             created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS members (
             room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
@@ -220,6 +225,36 @@ def init_db(path):
             through_round INTEGER NOT NULL, version INTEGER NOT NULL, content TEXT NOT NULL,
             sha256 TEXT NOT NULL, created_at TEXT NOT NULL, sent_at TEXT,
             UNIQUE(room_id,through_round,version));
+        CREATE TABLE IF NOT EXISTS model_operation_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            room_id INTEGER REFERENCES rooms(id) ON DELETE CASCADE,
+            match_number INTEGER, round_number INTEGER,
+            purpose TEXT NOT NULL, target_type TEXT NOT NULL, target_key TEXT NOT NULL,
+            target_label TEXT NOT NULL,
+            profile_id INTEGER, profile_owner_user_id INTEGER NOT NULL, trigger_user_id INTEGER NOT NULL,
+            profile_name TEXT NOT NULL, model_name TEXT NOT NULL, profile_snapshot_hash TEXT NOT NULL,
+            context_revision TEXT,
+            state TEXT NOT NULL CHECK(state IN
+                ('queued','requesting','completed','failed','blocked','stale','interrupted')),
+            retry_of INTEGER REFERENCES model_operation_tasks(id) ON DELETE SET NULL,
+            idempotency_key TEXT,
+            queued_at TEXT NOT NULL, request_started_at TEXT, request_finished_at TEXT,
+            finished_at TEXT, queue_ms INTEGER, duration_ms INTEGER,
+            request_succeeded INTEGER, result_applied INTEGER NOT NULL DEFAULT 0,
+            usage_known INTEGER NOT NULL DEFAULT 0,
+            prompt_tokens INTEGER, completion_tokens INTEGER, total_tokens INTEGER,
+            error_message TEXT, updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_model_operations_room_match_round
+            ON model_operation_tasks(room_id,match_number,round_number,id DESC);
+        CREATE INDEX IF NOT EXISTS idx_model_operations_owner
+            ON model_operation_tasks(profile_owner_user_id,id DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_model_operations_active_room_target
+            ON model_operation_tasks(room_id,match_number,round_number,purpose,target_type,target_key)
+            WHERE room_id IS NOT NULL AND state IN ('queued','requesting');
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_model_operations_active_profile_test
+            ON model_operation_tasks(profile_owner_user_id,profile_id)
+            WHERE purpose='connection_test' AND state IN ('queued','requesting');
         ''')
         if 'model_profile_id' not in {x['name'] for x in db.execute('PRAGMA table_info(ai_players)')}:
             db.execute('ALTER TABLE ai_players ADD COLUMN model_profile_id INTEGER REFERENCES model_profiles(id) ON DELETE SET NULL')
@@ -238,12 +273,21 @@ def init_db(path):
             db.execute('ALTER TABLE rooms ADD COLUMN match_number INTEGER NOT NULL DEFAULT 1')
         if 'records_deleted' not in {x['name'] for x in db.execute('PRAGMA table_info(rooms)')}:
             db.execute('ALTER TABLE rooms ADD COLUMN records_deleted INTEGER NOT NULL DEFAULT 0')
+        if 'model_request_limit' not in {x['name'] for x in db.execute('PRAGMA table_info(rooms)')}:
+            db.execute('ALTER TABLE rooms ADD COLUMN model_request_limit INTEGER')
         if 'deleted_at' not in {x['name'] for x in db.execute('PRAGMA table_info(users)')}:
             db.execute('ALTER TABLE users ADD COLUMN deleted_at TEXT')
         room_sql = db.execute("SELECT sql FROM sqlite_master WHERE name='rooms'").fetchone()['sql']
         if 'AUTOINCREMENT' not in room_sql.upper():
             migrate_room_ids(db,room_sql)
         migrate_model_profiles(db)
+        # A process restart cannot determine whether an in-flight provider request
+        # completed. Preserve its quota reservation and require an explicit retry.
+        interrupted_at=datetime.now(timezone.utc).isoformat(timespec='milliseconds')
+        db.execute("""UPDATE model_operation_tasks SET state='interrupted',
+            finished_at=COALESCE(finished_at,?),updated_at=?,
+            error_message='服务重启，无法确认请求是否完成；请先核对比赛内容再重试。'
+            WHERE state IN ('queued','requesting')""",(interrupted_at,interrupted_at))
 
 
 
@@ -449,6 +493,10 @@ class ModelBindingData(BaseModel, extra='forbid'):
     keep_existing: bool = False
 
 
+class ModelRequestLimitData(BaseModel, extra='forbid'):
+    limit: Optional[int] = Field(default=None, ge=1, le=1000000)
+
+
 class ChatMessageData(BaseModel, extra='forbid'):
     match_number: int = Field(ge=1)
     text: str = Field(min_length=1, max_length=2000)
@@ -555,6 +603,13 @@ def model_profile_snapshot_valid(db, profile):
         return False
     fields=('owner_user_id','base_url','model','api_key_encrypted','temperature','max_tokens','timeout_seconds','updated_at')
     return all(current.get(field)==profile.get(field) for field in fields)
+
+
+def model_profile_snapshot_hash(profile):
+    fields=('id','owner_user_id','base_url','model','api_key_encrypted','temperature',
+            'max_tokens','timeout_seconds','updated_at')
+    payload=[profile.get(field) for field in fields]
+    return hashlib.sha256(json.dumps(payload,ensure_ascii=False,separators=(',',':')).encode('utf-8')).hexdigest()
 
 
 def model_actor_session_valid(db, user_id, session_hash):
@@ -747,7 +802,8 @@ def check_judge_registration(db, room, user_id, viewer=None):
 
 def aliases(db, room_id):
     humans = db.execute('''SELECT m.alias,m.user_id,u.display_name,u.username FROM members m
-        JOIN users u ON u.id=m.user_id WHERE m.room_id=? AND m.removed_at IS NULL ORDER BY m.alias''', (room_id,)).fetchall()
+        JOIN users u ON u.id=m.user_id WHERE m.room_id=? AND m.removed_at IS NULL
+        AND u.deleted_at IS NULL ORDER BY m.alias''', (room_id,)).fetchall()
     ais = db.execute('SELECT alias,name,model_profile_id FROM ai_players WHERE room_id=? ORDER BY alias', (room_id,)).fetchall()
     all_aliases = sorted([r['alias'] for r in humans] + [r['alias'] for r in ais])
     return humans, ais, all_aliases
@@ -795,7 +851,7 @@ def current_round(db, room, number=None):
 
 def clear_match_records(db, room_id):
     # 只清除比赛内容，房间、成员、AI 参赛位及裁判配置保留。
-    for table in ('rounds', 'suggestions', 'events', 'judge_questions', 'judge_verdicts',
+    for table in ('model_operation_tasks', 'rounds', 'suggestions', 'events', 'judge_questions', 'judge_verdicts',
                   'ai_judge_questions', 'ai_judge_verdicts', 'ai_answer_revisions', 'packets', 'chat_messages'):
         db.execute(f'DELETE FROM {table} WHERE room_id=?', (room_id,))
     db.execute('''UPDATE rooms SET verdict_json=NULL,verdict_locked_at=NULL,
@@ -805,6 +861,150 @@ def clear_match_records(db, room_id):
 def check_match_number(room, number):
     if str(room['match_number']) != str(number):
         raise HTTPException(409, '房间已开始另一场比赛，请刷新后重试。')
+
+
+def active_participant_count(db, room_id):
+    humans=db.execute('''SELECT COUNT(*) FROM members m JOIN users u ON u.id=m.user_id
+        WHERE m.room_id=? AND m.removed_at IS NULL AND u.deleted_at IS NULL''',(room_id,)).fetchone()[0]
+    ais=db.execute('SELECT COUNT(*) FROM ai_players WHERE room_id=?',(room_id,)).fetchone()[0]
+    return int(humans)+int(ais)
+
+
+def round_question_rows(db, room_id, round_number):
+    return db.execute('''SELECT q.text,q.created_at,j.label,'human' AS kind,q.id
+        FROM judge_questions q JOIN room_judges j
+        ON j.room_id=q.room_id AND j.user_id=q.judge_user_id
+        WHERE q.room_id=? AND q.round_number=?
+        UNION ALL
+        SELECT q.text,q.created_at,j.label,'ai' AS kind,q.id
+        FROM ai_judge_questions q JOIN ai_judges j ON j.id=q.ai_judge_id
+        WHERE q.room_id=? AND q.round_number=?
+        ORDER BY 2,4,5''',(room_id,round_number,room_id,round_number)).fetchall()
+
+
+def combined_round_question(rows):
+    return '\n\n'.join(f'【裁判问题 {i}】\n{row["text"]}' for i,row in enumerate(rows,1))
+
+
+def inspect_round_start(db, room):
+    rnd=current_round(db,room)
+    participant_count=active_participant_count(db,room['id'])
+    rows=round_question_rows(db,room['id'],rnd['number'])
+    question=combined_round_question(rows)
+    reason=None
+    if room['status']!='open' or room['verdict_locked_at']:
+        reason='比赛已结束或裁判判断已锁定。'
+    elif rnd['status']!='draft':
+        reason='本轮已经开始。'
+    elif participant_count<2:
+        reason='至少需要两名在场参赛者，才能开始统一作答。'
+    elif not rows:
+        reason='还没有裁判提交问题。'
+    elif len(question)>6000:
+        reason='裁判问题合计超过 6000 字，请减少内容后重新开局。'
+    return {'round':rnd,'participant_count':participant_count,'questions':rows,
+            'question':question,'reason':reason,'question_chars':len(question)}
+
+
+def model_request_count(db, room_id, match_number):
+    return int(db.execute('''SELECT COUNT(*) FROM model_operation_tasks
+        WHERE room_id=? AND match_number=? AND request_started_at IS NOT NULL''',
+        (room_id,match_number)).fetchone()[0])
+
+
+def match_readiness(db, room):
+    rnd=current_round(db,room)
+    validation=inspect_round_start(db,room)
+    judges=judge_records(db,room['id'])
+    question_count=len(validation['questions'])
+    human_pending=0
+    for judge in judges:
+        if judge['kind']=='human' and not db.execute('''SELECT 1 FROM judge_questions
+            WHERE room_id=? AND round_number=? AND judge_user_id=?''',
+            (room['id'],rnd['number'],judge['user_id'])).fetchone():
+            human_pending+=1
+    ai_rows=db.execute('''SELECT j.id,j.model_profile_id,q.id AS question_id,
+            mp.*,u.deleted_at AS owner_deleted_at
+        FROM ai_judges j
+        LEFT JOIN model_profiles mp ON mp.id=j.model_profile_id
+        LEFT JOIN users u ON u.id=mp.owner_user_id
+        LEFT JOIN ai_judge_questions q ON q.room_id=j.room_id AND q.round_number=? AND q.ai_judge_id=j.id
+        WHERE j.room_id=? ORDER BY j.id''',(rnd['number'],room['id'])).fetchall()
+    auto_pending=0
+    manual_ai_pending=0
+    for row in ai_rows:
+        if row['question_id'] is not None:
+            continue
+        if row['model_profile_id'] is not None and model_profile_credential_status(dict(row))=='ok':
+            auto_pending+=1
+        else:
+            manual_ai_pending+=1
+    manual_pending=human_pending+manual_ai_pending
+    attempts=model_request_count(db,room['id'],room['match_number'])
+    limit=room['model_request_limit']
+    limit_reached=limit is not None and attempts>=limit
+    can_generate=(room['status']=='open' and rnd['status']=='draft' and
+                  validation['participant_count']>=2 and auto_pending>0 and
+                  not limit_reached and validation['question_chars']<=6000)
+    blockers=[]
+    if validation['participant_count']<2:
+        blockers.append('至少需要两名在场参赛者。')
+    if room['status']!='open':
+        blockers.append('本场比赛已结束。')
+    elif rnd['status']!='draft':
+        blockers.append('当前轮次已开始作答。')
+    elif not question_count and not auto_pending:
+        blockers.append('本轮尚无裁判问题。')
+    if validation['question_chars']>6000:
+        blockers.append('裁判问题合计超过 6000 字。')
+    notices=[]
+    if manual_pending:
+        notices.append(f'{manual_pending} 位真人 / 手动 AI 裁判尚未交题；已有至少一份合规问题时，房主仍可按现有规则确认开局。')
+    if limit_reached and auto_pending:
+        notices.append('本场模型请求次数已达上限；可调整上限或手动转录。')
+    elif auto_pending:
+        notices.append(f'{auto_pending} 位可用模型 AI 裁判尚未交题。')
+    if not judges:
+        notices.append('当前使用外部裁判流程，不需要配置模型 API；可手动录入并发布问题。')
+    return {
+        'participant_count':validation['participant_count'],
+        'question_count':question_count,
+        'question_chars':validation['question_chars'],
+        'total_judges':len(judges),
+        'submitted_judges':sum(1 for j in judges if
+            (j['kind']=='human' and db.execute('''SELECT 1 FROM judge_questions
+                WHERE room_id=? AND round_number=? AND judge_user_id=?''',
+                (room['id'],rnd['number'],j['user_id'])).fetchone()) or
+            (j['kind']=='ai' and db.execute('''SELECT 1 FROM ai_judge_questions
+                WHERE room_id=? AND round_number=? AND ai_judge_id=?''',
+                (room['id'],rnd['number'],j['id'])).fetchone())),
+        'auto_pending':auto_pending,'manual_pending':manual_pending,
+        'independent_judges':len(judges),'external_judge':not judges,
+        'phase':rnd['status'],'can_start':validation['reason'] is None,
+        'can_generate_and_start':can_generate,
+        'model_request_count':attempts,'model_request_limit':limit,
+        'model_request_remaining':None if limit is None else max(0,int(limit)-attempts),
+        'model_limit_reached':limit_reached,'blockers':blockers,'notices':notices,
+        'manual_question_required':not judges and rnd['status']=='draft' and not question_count,
+        'suggested_view':('human-judges' if human_pending else
+                          'ai-judges' if manual_ai_pending or auto_pending else 'admin'),
+    }
+
+
+def model_operation_view(row):
+    return {
+        'id':row['id'],'purpose':row['purpose'],'target_type':row['target_type'],
+        'target_key':row['target_key'],'target_label':row['target_label'],
+        'profile_name':row['profile_name'],'model_name':row['model_name'],
+        'state':row['state'],'retry_of':row['retry_of'],
+        'queued_at':row['queued_at'],'request_started_at':row['request_started_at'],
+        'request_finished_at':row['request_finished_at'],'finished_at':row['finished_at'],
+        'queue_ms':row['queue_ms'],'duration_ms':row['duration_ms'],
+        'request_succeeded':None if row['request_succeeded'] is None else bool(row['request_succeeded']),
+        'result_applied':bool(row['result_applied']),'usage_known':bool(row['usage_known']),
+        'prompt_tokens':row['prompt_tokens'],'completion_tokens':row['completion_tokens'],
+        'total_tokens':row['total_tokens'],'error_message':row['error_message'],
+    }
 
 
 def public_room(db, room, user, mine):
@@ -903,7 +1103,7 @@ def public_room(db, room, user, mine):
         ai_edits = {row['alias']:row['text'] for row in db.execute('''SELECT a.alias,a.text FROM answers a
             JOIN ai_players ai ON ai.room_id=? AND ai.alias=a.alias
             WHERE a.round_id=?''',(room['id'],now_round['id']))}
-    return {'id':room['id'],'title':room['title'],'judge':room['judge'],
+    result={'id':room['id'],'title':room['title'],'judge':room['judge'],
             'match_number':room['match_number'],'records_deleted':bool(room['records_deleted']),
             'can_manage':manager,'is_owner':room['owner_id']==user['id'],
             'roster_recovery':manager and needs_roster_recovery(db,room),
@@ -927,6 +1127,18 @@ def public_room(db, room, user, mine):
             'rounds':body,'suggestions':[dict(s) for s in suggestions],
             'ai_edits':ai_edits,'packets':[dict(p) for p in pkts],
             'model_profiles':model_profiles,'model_api_enabled':has_valid_credential_key()}
+    if manager:
+        operations=db.execute('''SELECT * FROM model_operation_tasks
+            WHERE room_id=? AND match_number=? AND round_number=?
+            ORDER BY id DESC LIMIT 30''',
+            (room['id'],room['match_number'],room['current_round'])).fetchall()
+        result.update({
+            'readiness':match_readiness(db,room),
+            'model_operations':[model_operation_view(row) for row in operations],
+            'model_request_count':model_request_count(db,room['id'],room['match_number']),
+            'model_request_limit':room['model_request_limit'],
+        })
+    return result
 
 
 def anonymous_match_packet(db, room_id, through_round=None):
