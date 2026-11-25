@@ -1,6 +1,9 @@
-import pytest
+import json
 
-from points import calculate_account_result, calculate_streak_reward
+import pytest
+from fastapi import HTTPException
+
+from points import _load_predictions, calculate_account_result, calculate_streak_reward
 
 
 def test_streak_rewards_match_required_half_up_schedule():
@@ -28,3 +31,20 @@ def test_large_streak_uses_integer_arithmetic():
 def test_invalid_streak_is_rejected(streak):
     with pytest.raises(ValueError):
         calculate_streak_reward(streak)
+
+
+def test_removed_member_predictions_are_allowed_only_when_historically_known():
+    raw = json.dumps({
+        "predictions": {"A": "AI", "B": "Human", "C": "AI"}
+    })
+    assert _load_predictions(raw, ["A", "B"], {"A", "B", "C"}) == {
+        "A": "AI", "B": "Human", "C": "AI"
+    }
+    with pytest.raises(HTTPException):
+        _load_predictions(raw, ["A", "B"], {"A", "B"})
+    with pytest.raises(HTTPException):
+        _load_predictions(
+            json.dumps({"predictions": {"A": "AI", "C": "Human"}}),
+            ["A", "B"],
+            {"A", "B", "C"},
+        )

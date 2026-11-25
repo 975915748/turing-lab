@@ -901,6 +901,29 @@ def check_match_number(room, number):
         raise HTTPException(409, '房间已开始另一场比赛，请刷新后重试。')
 
 
+def name_change_status(db, user_id):
+    """Lock names for every retained account role in an opened, unfinished match."""
+    active = db.execute('''SELECT r.id FROM rooms r
+        WHERE r.status='open' AND r.match_started_at IS NOT NULL AND (
+            r.owner_id=? OR
+            EXISTS(SELECT 1 FROM room_judges j WHERE j.room_id=r.id AND j.user_id=?) OR
+            EXISTS(SELECT 1 FROM members m WHERE m.room_id=r.id AND m.user_id=?)
+        ) LIMIT 1''', (user_id, user_id, user_id)).fetchone()
+    locked = bool(active)
+    return {
+        'name_change_locked': locked,
+        'name_change_reason': '比赛进行中，暂不能修改名字。' if locked else None,
+    }
+
+
+def room_lock_user_ids(db, room_id):
+    rows = db.execute('''SELECT owner_id AS user_id FROM rooms WHERE id=?
+        UNION SELECT user_id FROM members WHERE room_id=?
+        UNION SELECT user_id FROM room_judges WHERE room_id=?''',
+        (room_id, room_id, room_id)).fetchall()
+    return [int(row['user_id']) for row in rows if row['user_id'] is not None]
+
+
 def active_participant_count(db, room_id):
     humans=db.execute('''SELECT COUNT(*) FROM members m JOIN users u ON u.id=m.user_id
         WHERE m.room_id=? AND m.removed_at IS NULL AND u.deleted_at IS NULL''',(room_id,)).fetchone()[0]
@@ -1155,8 +1178,16 @@ def public_room(db, room, user, mine):
         ai_edits = {row['alias']:row['text'] for row in db.execute('''SELECT a.alias,a.text FROM answers a
             JOIN ai_players ai ON ai.room_id=? AND ai.alias=a.alias
             WHERE a.round_id=?''',(room['id'],now_round['id']))}
+    my_points_result=None
+    if room['status']=='finished' and not is_judge_view:
+        points_row=db.execute('''SELECT outcome,delta,points_after,streak_after,settled_at
+            FROM points_ledger WHERE room_id=? AND match_number=? AND user_id=?''',
+            (room['id'],room['match_number'],user['id'])).fetchone()
+        if points_row:
+            my_points_result=dict(points_row)
     result={'id':room['id'],'title':room['title'],'judge':room['judge'],
             'match_number':room['match_number'],'records_deleted':bool(room['records_deleted']),
+            'my_points_result':my_points_result,
             'can_manage':manager,'is_owner':room['owner_id']==user['id'],
             'roster_recovery':manager and needs_roster_recovery(db,room),
             'status':room['status'],'current_round':room['current_round'],
@@ -1333,17 +1364,52 @@ class Hub:
         self.account_groups: dict[int, set[WebSocket]] = {}
 
     async def notify_account(self, user_id, payload):
-        for ws in list(self.account_groups.get(int(user_id), set())):
+        user_id = int(user_id)
+        sockets = self.account_groups.get(user_id)
+        if not sockets:
+            return
+        for ws in list(sockets):
             try:
                 with db_open(self.path) as db:
-                    auth(db, ws.cookies.get(COOKIE))
+                    current = auth(db, ws.cookies.get(COOKIE))
+                if int(current['id']) != user_id:
+                    raise HTTPException(401, '登录会话已失效。')
                 await ws.send_json(payload)
             except Exception:
-                self.account_groups.get(int(user_id), set()).discard(ws)
+                sockets.discard(ws)
                 try:
-                    await ws.close(code=1008)
+                    await ws.close(code=1008, reason='登录会话已失效，请重新登录。')
                 except Exception:
                     pass
+        if not sockets and self.account_groups.get(user_id) is sockets:
+            self.account_groups.pop(user_id, None)
+
+    async def notify_accounts(self, user_ids, payload):
+        for user_id in sorted({int(value) for value in user_ids if value is not None}):
+            await self.notify_account(user_id, payload)
+
+    async def revoke_session(self, token):
+        if not token:
+            return
+        for user_id, sockets in list(self.account_groups.items()):
+            for ws in list(sockets):
+                if ws.cookies.get(COOKIE) == token:
+                    sockets.discard(ws)
+                    try:
+                        await ws.close(code=1008, reason='登录已退出。')
+                    except Exception:
+                        pass
+            if not sockets and self.account_groups.get(user_id) is sockets:
+                self.account_groups.pop(user_id, None)
+        for room_id, sockets in list(self.groups.items()):
+            for ws in list(sockets):
+                if ws.cookies.get(COOKIE) == token:
+                    sockets.discard(ws)
+                    self.typing.get(room_id, {}).pop(ws, None)
+                    try:
+                        await ws.close(code=1008, reason='登录已退出。')
+                    except Exception:
+                        pass
 
     async def notify(self, room_id, reason):
         for ws in list(self.groups.get(room_id, set())):
@@ -1395,20 +1461,36 @@ class Hub:
                 self.groups.get(room_id,set()).discard(ws)
 
     async def revoke_user(self, user_id):
-        for room_id in list(self.groups):
-            for ws in list(self.groups.get(room_id,set())):
+        user_id = int(user_id)
+        account_sockets = self.account_groups.get(user_id)
+        if account_sockets:
+            for ws in list(account_sockets):
+                account_sockets.discard(ws)
+                try:
+                    await ws.close(code=1008, reason='登录会话已失效，请重新登录。')
+                except Exception:
+                    pass
+            if self.account_groups.get(user_id) is account_sockets:
+                self.account_groups.pop(user_id, None)
+        for room_id, sockets in list(self.groups.items()):
+            for ws in list(sockets):
                 try:
                     with db_open(self.path) as db:
-                        user=auth(db,ws.cookies.get(COOKIE))
-                    if user['id']==user_id:
-                        await ws.close(code=1008,reason='密码已修改，请重新登录。')
-                        self.groups.get(room_id,set()).discard(ws)
+                        user = auth(db, ws.cookies.get(COOKIE))
+                    if int(user['id']) == user_id:
+                        sockets.discard(ws)
+                        self.typing.get(room_id, {}).pop(ws, None)
+                        await ws.close(code=1008, reason='密码已修改，请重新登录。')
                 except HTTPException:
-                    self.groups.get(room_id,set()).discard(ws)
-                    try: await ws.close(code=1008,reason='登录会话已失效')
-                    except Exception: pass
+                    sockets.discard(ws)
+                    self.typing.get(room_id, {}).pop(ws, None)
+                    try:
+                        await ws.close(code=1008, reason='登录会话已失效')
+                    except Exception:
+                        pass
                 except Exception:
-                    self.groups.get(room_id,set()).discard(ws)
+                    sockets.discard(ws)
+                    self.typing.get(room_id, {}).pop(ws, None)
 
     async def typing_status(self, room_id):
         # Only active human contestants receive typing info; never judges, AI or admin observers.
@@ -1667,7 +1749,8 @@ def create_app(db_path=None):
                 (u['is_admin'],u['id'],u['id'],u['id'],u['id'],u['id'],u['is_admin'])).fetchall()
             finished = db.execute('''SELECT id,title,match_number,records_deleted FROM rooms
                 WHERE status='finished' AND records_deleted=0 ORDER BY id DESC''').fetchall()
-            return {'user':u, 'rooms':[dict(x,can_manage=x['role'] in ('owner','admin')) for x in rooms],
+            user_data = dict(u, **name_change_status(db, u['id']))
+            return {'user':user_data, 'rooms':[dict(x,can_manage=x['role'] in ('owner','admin')) for x in rooms],
                     'finished_rooms':[dict(x) for x in finished]}
 
     @app.get('/api/me/models')
@@ -1955,14 +2038,9 @@ def create_app(db_path=None):
     async def update_my_profile(body:ProfileNameData,request:Request):
         with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
-            active=db.execute('''SELECT r.id FROM rooms r WHERE r.status='open'
-                AND r.match_started_at IS NOT NULL AND (
-                    EXISTS(SELECT 1 FROM members m WHERE m.room_id=r.id AND m.user_id=?)
-                    OR EXISTS(SELECT 1 FROM room_judges j WHERE j.room_id=r.id AND j.user_id=?)
-                    OR r.owner_id=?
-                ) LIMIT 1''',(u['id'],u['id'],u['id'])).fetchone()
-            if active:
-                raise HTTPException(409,'比赛进行中，暂不能修改名字。')
+            lock_status=name_change_status(db,u['id'])
+            if lock_status['name_change_locked']:
+                raise HTTPException(409,lock_status['name_change_reason'])
             name=norm_text(body.display_name,40)
             db.execute('UPDATE users SET username=?,display_name=? WHERE id=? AND deleted_at IS NULL',(name,name,u['id']))
             row=db.execute('SELECT id,username,display_name,is_admin FROM users WHERE id=?',(u['id'],)).fetchone()
@@ -1972,7 +2050,8 @@ def create_app(db_path=None):
                 room_ids=[r['room_id'] for r in db.execute('''SELECT room_id FROM members WHERE user_id=? AND removed_at IS NULL
                     UNION SELECT room_id FROM room_judges WHERE user_id=?
                     UNION SELECT id AS room_id FROM rooms WHERE owner_id=?''',(u['id'],u['id'],u['id']))]
-            result={'ok':True,'user':dict(row,uid=user_uid(row['id']),csrf=u['csrf'])}
+            result={'ok':True,'user':dict(row,uid=user_uid(row['id']),csrf=u['csrf'],
+                                           **name_change_status(db,u['id']))}
         for room_id in room_ids:
             await app.state.hub.notify(room_id,'profile_updated')
         return result
@@ -2001,12 +2080,13 @@ def create_app(db_path=None):
         return {'ok':True,'signed_out':True}
 
     @app.post('/api/logout')
-    def logout(request:Request, response:Response):
+    async def logout(request:Request, response:Response):
         with connection() as db:
             u=caller(request,db,mutate=True)
             tok=request.cookies.get(COOKIE,'')
             db.execute('DELETE FROM sessions WHERE token_hash=?',(hashlib.sha256(tok.encode()).hexdigest(),))
         response.delete_cookie(COOKIE)
+        await app.state.hub.revoke_session(tok)
         return {'ok':True}
 
     @app.post('/api/rooms')
@@ -2042,6 +2122,7 @@ def create_app(db_path=None):
             db.execute('DELETE FROM sessions WHERE user_id=?',(target['id'],))
             for key in (':uid:'+user_uid(target['id']), ':legacy:'+(target['legacy_username'] or '').lower()):
                 db.execute('DELETE FROM login_attempts WHERE substr(identity,-length(?))=?',(key,key))
+        await app.state.hub.revoke_user(target['id'])
         for room_id in list(app.state.hub.groups):
             await app.state.hub.notify(room_id,'account_sessions_revoked')
         return {'ok':True,'signed_out':target['id']==u['id']}
@@ -2061,7 +2142,7 @@ def create_app(db_path=None):
             db.execute('UPDATE users SET deleted_at=?,pw_hash=?,legacy_username=NULL WHERE id=?',
                        (utcnow(),'',target['id']))
             db.execute('DELETE FROM sessions WHERE user_id=?',(target['id'],))
-            cleanup_deleted_account(db,target['id'])
+            deleted_friend_ids=cleanup_deleted_account(db,target['id'])
             active=db.execute("SELECT * FROM rooms WHERE status='open'").fetchall()
             for room in active:
                 member=db.execute('''SELECT alias FROM members WHERE room_id=? AND user_id=?
@@ -2074,6 +2155,8 @@ def create_app(db_path=None):
                     rnd=current_round(db,room)
                     if rnd['status']=='collecting' and is_complete(db,rnd,room['id']):
                         log_event(db,room['id'],rnd['number'],'round_revealed','系统','在场参赛者已全部提交，统一公开')
+        await app.state.hub.revoke_user(target['id'])
+        await app.state.hub.notify_accounts(deleted_friend_ids, {'type':'social_updated'})
         for room_id in list(app.state.hub.groups):
             app.state.hub.typing.pop(room_id,None)
             await app.state.hub.notify(room_id,'account_deleted')
@@ -2301,9 +2384,11 @@ def create_app(db_path=None):
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
             check_match_number(room,body.match_number)
+            name_lock_user_ids=room_lock_user_ids(db,room_id)
             db.execute('DELETE FROM rooms WHERE id=?',(room_id,))
         app.state.hub.typing.pop(room_id,None)
         await app.state.hub.notify(room_id,'room_deleted')
+        await app.state.hub.notify_accounts(name_lock_user_ids, {'type':'name_lock_updated'})
         return {'ok':True}
 
     @app.delete('/api/rooms/{room_id}/records')
@@ -2691,8 +2776,10 @@ def create_app(db_path=None):
             db.execute('UPDATE rounds SET question=?,status=? WHERE id=?',(question,'collecting',rnd['id']))
             db.execute('UPDATE rooms SET match_started_at=COALESCE(match_started_at,?) WHERE id=?',
                        (utcnow(),room_id))
+            name_lock_user_ids=room_lock_user_ids(db,room_id)
             log_event(db,room_id,rnd['number'],'judge_question','独立裁判组','主持人已开启统一作答')
         await app.state.hub.notify(room_id,'judge_question')
+        await app.state.hub.notify_accounts(name_lock_user_ids, {'type':'name_lock_updated'})
         return {'ok':True}
 
     @app.post('/api/rooms/{room_id}/ai')
@@ -2748,8 +2835,12 @@ def create_app(db_path=None):
                 raise HTTPException(409,'至少要有两名参赛者才能开始。')
             question=norm_text(body.text,6000)
             db.execute('UPDATE rounds SET question=?,status=? WHERE id=?',(question,'collecting',rnd['id']))
+            db.execute('UPDATE rooms SET match_started_at=COALESCE(match_started_at,?) WHERE id=?',
+                       (utcnow(),room_id))
+            name_lock_user_ids=room_lock_user_ids(db,room_id)
             log_event(db,room_id,rnd['number'],'judge_question',room['judge'],question)
         await app.state.hub.notify(room_id,'judge_question')
+        await app.state.hub.notify_accounts(name_lock_user_ids, {'type':'name_lock_updated'})
         return {'ok':True}
 
     @app.post('/api/rooms/{room_id}/suggestions')
@@ -3454,6 +3545,7 @@ def create_app(db_path=None):
                 JOIN users u ON u.id=m.user_id
                 WHERE m.room_id=? AND m.removed_at IS NULL AND u.deleted_at IS NULL
                 ORDER BY m.user_id''',(room_id,)).fetchall()
+            name_lock_user_ids=room_lock_user_ids(db,room_id)
             roster=aliases(db,room_id)[2]
             settlement=settle_match_points(db,room,human_rows,roster,judges,utcnow())
             db.execute('UPDATE rooms SET status=?,revealed_at=? WHERE id=?',('finished',utcnow(),room_id))
@@ -3462,6 +3554,8 @@ def create_app(db_path=None):
             log_event(db,room_id,room['current_round'],'identity_revealed','管理员','已揭晓真实身份与裁判得分')
         await app.state.hub.notify(room_id,'identity_revealed')
         await app.state.hub.clear_chat(room_id,finished_match)
+        await app.state.hub.notify_accounts(name_lock_user_ids, {'type':'name_lock_updated'})
+        await app.state.hub.notify_accounts(settlement.keys(), {'type':'points_updated'})
         return {'ok':True}
 
     @app.websocket('/ws/rooms/{room_id}')

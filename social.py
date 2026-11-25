@@ -691,11 +691,17 @@ def register_social_routes(
             active_friend = bool(
                 other and other["deleted_at"] is None and friendship_exists(db, user["id"], other_id)
             )
+            last_received = db.execute(
+                """SELECT MAX(id) FROM dm_messages
+                   WHERE conversation_id=? AND recipient_user_id=?""",
+                (conv["id"], user["id"]),
+            ).fetchone()[0]
             return {
                 "conversation_id": int(conv["id"]),
                 "other_uid": user_uid(other_id),
                 "other_name": "账号已删除" if not other or other["deleted_at"] is not None else other["display_name"],
                 "can_send": active_friend,
+                "last_received_message_id": int(last_received) if last_received is not None else None,
                 "messages": messages,
                 "has_more": has_more,
                 "next_before_id": messages[0]["id"] if messages and has_more else None,
@@ -755,23 +761,24 @@ def register_social_routes(
                 "sender_uid": user_uid(int(message_row["sender_user_id"])),
                 "recipient_uid": user_uid(int(message_row["recipient_user_id"])),
                 "sender_name": "账号已删除" if not sender or sender["deleted_at"] is not None else sender["display_name"],
-                "mine": int(message_row["sender_user_id"]) == int(user["id"]),
                 "text": message_row["text"],
                 "created_at": message_row["created_at"],
             }
+        sender_payload = {**payload, "mine": True}
         if not duplicate:
+            recipient_payload = {**payload, "mine": False}
             await hub.notify_account(
                 notify_recipient,
-                {"type": "dm_message", "other_uid": user_uid(notify_sender), "message": payload},
+                {"type": "dm_message", "other_uid": user_uid(notify_sender), "message": recipient_payload},
             )
             await hub.notify_account(
                 notify_sender,
-                {"type": "dm_message", "other_uid": user_uid(notify_recipient), "message": payload},
+                {"type": "dm_message", "other_uid": user_uid(notify_recipient), "message": sender_payload},
             )
-        return {"ok": True, "duplicate": duplicate, "message": payload}
+        return {"ok": True, "duplicate": duplicate, "message": sender_payload}
 
     @app.post("/api/messages/{uid}/read")
-    def mark_direct_messages_read(uid: str, body: ReadPositionData, request: Request):
+    async def mark_direct_messages_read(uid: str, body: ReadPositionData, request: Request):
         other_id = uid_to_id(uid, user_uid)
         if other_id is None:
             raise HTTPException(404, "会话不存在。")
@@ -807,6 +814,8 @@ def register_social_routes(
                    WHERE conversation_id=? AND recipient_user_id=? AND id>?""",
                 (conv["id"], user["id"], effective_id),
             ).fetchone()[0]
+            user_id = int(user["id"])
+        await hub.notify_account(user_id, {"type": "social_updated"})
         return {"ok": True, "unread_count": int(unread)}
 
     @app.get("/api/me/points/ledger")
@@ -860,5 +869,5 @@ def register_social_routes(
             pass
         finally:
             clients.discard(websocket)
-            if not clients:
+            if not clients and hub.account_groups.get(user_id) is clients:
                 hub.account_groups.pop(user_id, None)

@@ -1,13 +1,13 @@
 'use strict';
 const $ = (selector) => document.querySelector(selector);
 const app = $('#app');
-const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelSavePending:{},social:null,dmMessages:[],dmBeforeId:null,dmHasMore:false,dmSocket:null,personalModelEpoch:0,modelOperationRecords:[],modelOperationStats:{},modelOperationProfileOptions:[],modelOperationTotal:0,modelOperationOffset:0,modelOperationFilters:{profile_id:'',purpose:'',status:''},modelOperationsExpanded:false,modelOperationRequestVersion:0,modelOperationHistoryPanels:{}};
+const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelSavePending:{},social:null,dmMessages:[],dmBeforeId:null,dmHasMore:false,dmSocket:null,personalModelEpoch:0,modelOperationRecords:[],modelOperationStats:{},modelOperationProfileOptions:[],modelOperationTotal:0,modelOperationOffset:0,modelOperationFilters:{profile_id:'',purpose:'',status:''},modelOperationsExpanded:false,modelOperationRequestVersion:0,modelOperationHistoryPanels:{},dmUid:null,dmOtherName:'',dmCanSend:false,dmPending:null,dmReconnect:null,dmLoadVersion:0,socialEpoch:0,pointsLedgerEntries:[],pointsLedgerBeforeId:null,pointsLedgerHasMore:false,pointsLedgerLoaded:false};
 const esc = (v) => String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const shortDate = s => s ? new Date(s).toLocaleString('zh-CN',{hour12:false}) : '';
 const val = (id) => document.getElementById(id)?.value??'';
 const D = (txt='暂无记录') => `<p class="muted hint">${esc(txt)}</p>`;
 let toastTimer;
-function clearPersonalModelState(){state.social=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;if(state.dmSocket){state.dmSocket.close();state.dmSocket=null;}state.personalModelEpoch=(state.personalModelEpoch||0)+1;state.modelOperationRequestVersion=(state.modelOperationRequestVersion||0)+1;state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};state.personalModelTestVersions={};state.personalModelTestPending={};state.personalModelSavePending={};state.modelOperationRecords=[];state.modelOperationStats={};state.modelOperationProfileOptions=[];state.modelOperationTotal=0;state.modelOperationOffset=0;state.modelOperationFilters={profile_id:'',purpose:'',status:''};state.modelOperationsExpanded=false;state.modelOperationHistoryPanels={};}
+function clearPersonalModelState(){stopDmWs();state.social=null;state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;state.dmOtherName='';state.dmCanSend=false;state.dmPending=null;state.dmLoadVersion++;state.socialEpoch++;state.pointsLedgerEntries=[];state.pointsLedgerBeforeId=null;state.pointsLedgerHasMore=false;state.pointsLedgerLoaded=false;state.personalModelEpoch=(state.personalModelEpoch||0)+1;state.modelOperationRequestVersion=(state.modelOperationRequestVersion||0)+1;state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};state.personalModelTestVersions={};state.personalModelTestPending={};state.personalModelSavePending={};state.modelOperationRecords=[];state.modelOperationStats={};state.modelOperationProfileOptions=[];state.modelOperationTotal=0;state.modelOperationOffset=0;state.modelOperationFilters={profile_id:'',purpose:'',status:''};state.modelOperationsExpanded=false;state.modelOperationHistoryPanels={};}
 function toast(message){const el=$('#toast');el.textContent=message;el.classList.add('visible');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('visible'),4200)}
 function setConnection(txt,online){const el=$('#connection');el.textContent=(online?'● ':'○ ')+txt;el.className='connection'+(online?' online':'')}
 function applyPrefs(){let theme=localStorage.getItem('turing_theme')||'light';document.body.dataset.theme=theme;$('#themeBtn').textContent=theme==='light'?'☾ 深色':'☀ 日间';let f=Number(localStorage.getItem('turing_font')||15);if(f<12||f>22)f=15;document.documentElement.style.setProperty('--font',f+'px');$('#fontSize').value=f;$('#fontValue').textContent=f;}
@@ -46,7 +46,7 @@ async function refreshRoom(){if(!state.roomId||location.hash.startsWith('#profil
  renderRoom();maybeNotifyJudge();}catch(e){if(/不属于这个房间|公共聊天/.test(e.message)){state.roomId=null;state.room=null;state.chat=[];await loadLobby();toast('你已不在该房间');}else toast(e.message)}}
 async function init(){applyPrefs();try{const previousUid=state.me?.user?.uid;state.me=await api('/api/me');if(previousUid&&previousUid!==state.me?.user?.uid)clearPersonalModelState();$('#logoutBtn').classList.remove('hide');const q=/^#room=(\d+)$/.exec(location.hash);if(location.hash.startsWith('#profile')){state.personalReturn=profileReturnFromHash();await openPersonalCenter({fromHash:true});}else if(q){await openRoom(Number(q[1]));}else renderLobby()}catch(e){state.me=null;state.roomId=null;state.personalModels=[];state.chat=[];$('#logoutBtn').classList.add('hide');renderAuth();}}
 function renderAuth(){
- stopWs();$('#logoutBtn').classList.add('hide');setConnection('未登录',false);
+ clearDmState();state.social=null;stopWs();$('#logoutBtn').classList.add('hide');setConnection('未登录',false);
  const reg=state.tab==='register',legacy=!!state.legacyLogin;
  app.innerHTML=`<div class="auth"><div class="intro"><div class="hero-mark">T.</div><div class="overline">HUMAN × AI / ANONYMOUS JUDGING</div><h1>在同一个房间里，<br>验证谁更像人类。</h1><p class="muted">支持真人裁判独立登录与 AI 裁判由房主手动转录；各裁判独立判断。AI 回答仍由房主手动录入；全部参赛者提交后统一公布回答。</p><div class="stat-row"><div class="stat">◈ 自由注册</div><div class="stat">◈ 匿名裁判包</div><div class="stat">◈ 完整轮次日志</div></div></div>
  <section class="card"><div class="overline">欢迎加入</div><h2 style="margin:7px 0 0">${reg?'创建你的账号':'登录图灵实验室'}</h2>
@@ -82,11 +82,16 @@ function finishedActions(r){
  if(r.status!=='finished')return '';
  return `<div class="buttonrow spaced" style="margin-bottom:20px">${r.can_manage?'<button class="primary" data-action="restart-match">再次开赛</button>':''}${r.records_deleted?'':`<button class="danger" data-action="delete-records" data-id="${r.id}" data-match="${r.match_number}">删除所有人的比赛记录</button>`}</div>`;
 }
-function renderReadyRoom(r){
- app.innerHTML=`<div class="pagehead"><div><div class="overline">ROOM ${r.id} · 第 ${r.match_number} 场</div><h1>${esc(r.title)}</h1></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button data-action="back">← 返回大厅</button></div></div><section class="card"><h2>${r.can_manage?'开始下一场比赛':'等待再次开赛'}</h2>${finishedActions(r)}</section>`;
+function renderMyPointsResult(r){
+ const x=r.my_points_result;if(!x)return '';
+ const delta=String(x.delta),change=delta==='0'?'0':delta.startsWith('-')?delta:'+'+delta;
+ return \`<section class="card compact account-points-result"><div class="overline">ACCOUNT POINTS / MATCH RESULT</div><h2>本场账号积分</h2><div class="label-line"><strong>\${x.outcome==='win'?'胜利':'失败'}</strong><span class="pill \${x.outcome==='win'?'ok':'warn'}">\${esc(change)} 分</span></div><div class="stat-row"><div class="stat">更新后总积分 <strong>\${esc(x.points_after)}</strong></div><div class="stat">当前连胜 <strong>\${esc(x.streak_after)}</strong></div></div></section>\`;
 }
-async function openRoom(id,options={}){state.roomId=id;state.selectedRound=options.round||null;state.roomView=options.view||'match';state.chat=[];state.chatDraft='';try{const r=await api(`/api/rooms/${id}`);state.room=r;state.typing={};state.selectedRound=options.round&&r.rounds.some(x=>x.number===options.round)?options.round:r.current_round;history.replaceState(null,'',`#room=${id}`);await loadPersonalModels().catch(()=>{});if(!r.is_judge&&r.status==='open')await loadRoomChat().catch(()=>{});renderRoom();connectWs(id);maybeNotifyJudge();}catch(e){state.roomId=null;state.room=null;state.chat=[];history.replaceState(null,'',location.pathname);toast(e.message);await loadLobby()}}
-async function loadLobby(){state.me=await api('/api/me');state.chat=[];state.chatDraft='';state.personalReturn=null;renderLobby()}
+function renderReadyRoom(r){
+ app.innerHTML=\`<div class="pagehead"><div><div class="overline">ROOM \${r.id} · 第 \${r.match_number} 场</div><h1>\${esc(r.title)}</h1></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button data-action="back">← 返回大厅</button></div></div>\${renderMyPointsResult(r)}<section class="card"><h2>\${r.can_manage?'开始下一场比赛':'等待再次开赛'}</h2>\${finishedActions(r)}</section>\`;
+}
+async function openRoom(id,options={}){clearDmState();state.roomId=id;state.selectedRound=options.round||null;state.roomView=options.view||'match';state.chat=[];state.chatDraft='';try{const r=await api(`/api/rooms/${id}`);state.room=r;state.typing={};state.selectedRound=options.round&&r.rounds.some(x=>x.number===options.round)?options.round:r.current_round;history.replaceState(null,'',`#room=${id}`);await loadPersonalModels().catch(()=>{});if(!r.is_judge&&r.status==='open')await loadRoomChat().catch(()=>{});renderRoom();connectWs(id);maybeNotifyJudge();}catch(e){state.roomId=null;state.room=null;state.chat=[];history.replaceState(null,'',location.pathname);toast(e.message);await loadLobby()}}
+async function loadLobby(){clearDmState();state.me=await api('/api/me');state.chat=[];state.chatDraft='';state.personalReturn=null;renderLobby()}
 
 async function loadPersonalModels(){
  const data=await api('/api/me/models'),next=data.models||[];
@@ -129,7 +134,7 @@ function addChatMessage(message){
 function renderPublicChat(r){
  const messages=state.chat||[];
  return `<section class="card chat-card"><div class="label-line"><div><div class="overline">ROOM CHAT / MATCH ${r.match_number}</div><h2>公共聊天</h2></div><span class="pill">${messages.length} 条消息</span></div>
- <p class="hint">仅本房间的人类参赛者、房主和管理员可见。真人裁判不参与此聊天。</p>
+ 
  <div id="chatMessages" class="chat-list" aria-live="polite" aria-relevant="additions text">${messages.map(chatMessageHtml).join('')||D('暂无聊天消息')}</div>
  ${r.status==='open'?`<form data-form="chat" class="chat-compose"><label class="field" for="roomChatInput">发送消息</label><textarea id="roomChatInput" name="text" data-chat-draft maxlength="2000" required placeholder="输入纯文本消息（最多 2000 字）">${esc(state.chatDraft)}</textarea><div class="form-actions"><span class="hint">纯文本 · 2000 字以内</span><button class="primary" type="submit">发送</button></div></form>`:'<p class="hint spaced">本场比赛已完赛，公共聊天已关闭。</p>'}
  </section>`;
@@ -183,20 +188,167 @@ function maybeNotifyJudge(){
   sessionStorage.setItem(key,'1');
  }catch(e){toast(message);}
 }
-function makeRoster(r){const submitted=new Set(r.rounds.find(x=>x.number===state.selectedRound)?.submitted||[]);
+function makeRoster(r){
+ const submitted=new Set(r.rounds.find(x=>x.number===state.selectedRound)?.submitted||[]);
  const people=[...r.humans.map(h=>({...h,role:'人类',label:h.name})),...r.ais.map(a=>({...a,role:'AI',label:a.name}))].sort((a,b)=>a.alias.localeCompare(b.alias));
- return people.map(p=>`<div class="roster-person"><div class="person-left"><span class="alias">${esc(p.alias)}</span><div style="min-width:0"><span class="person-name" title="${esc(p.label)}">${esc(p.label)}</span><span class="roster-role">${p.role==='人类'?'人类 · '+esc(p.uid):'AI 参赛位'}${p.alias===r.mine?' · 我':''}</span></div></div><span class="pill ${submitted.has(p.alias)?'ok':''}" ${p.role==='人类'&&r.mine?`data-typing-alias="${esc(p.alias)}"`:''} title="本轮提交状态">${submitted.has(p.alias)?'√':p.role==='人类'&&r.mine?(state.selectedRound===r.current_round&&state.typing[p.alias]?'....':'X'):'—'}</span></div>`).join('')||D('等待人类玩家加入');}
-
+ return people.map(p=>\`<div class="roster-person"><div class="person-left"><span class="alias">\${esc(p.alias)}</span><div style="min-width:0"><span class="person-name" title="\${esc(p.label)}">\${esc(p.label)}</span><span class="roster-role">\${p.role==='人类'?'人类 · '+esc(p.uid):'AI 参赛位'}\${p.alias===r.mine?' · 我':''}</span></div></div><span class="pill \${submitted.has(p.alias)?'ok':''}" \${p.role==='人类'&&p.alias===r.mine?\`data-typing-alias="\${esc(p.alias)}"\`:''} title="本轮提交状态">\${submitted.has(p.alias)?'√':p.role==='人类'&&p.alias===r.mine?(state.selectedRound===r.current_round&&state.typing[p.alias]?'....':'X'):'—'}</span>\${p.role==='人类'&&p.alias!==r.mine?\`<button class="small" data-action="friend-from-room" data-uid="\${esc(p.uid)}">加好友</button>\`:''}</div>\`).join('')||D('等待人类玩家加入');
+}
 function profileReturnFromHash(){const m=/^#profile\?room=(\d+)&view=([^&]+)&round=(\d+)$/.exec(location.hash);return m?{roomId:Number(m[1]),view:decodeURIComponent(m[2]),round:Number(m[3])}:null;}
-async function loadSocial(){state.social=await api('/api/me/social');}
+function stopDmWs(){
+ if(state.dmReconnect)clearTimeout(state.dmReconnect);state.dmReconnect=null;
+ if(state.dmSocket){const ws=state.dmSocket;state.dmSocket=null;ws.onclose=null;try{ws.close();}catch{}}
+}
+function clearDmState(){
+ stopDmWs();state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;
+ state.dmOtherName='';state.dmCanSend=false;state.dmPending=null;state.dmLoadVersion++;
+}
+async function loadSocial(){
+ const uid=state.me?.user?.uid,version=++state.socialEpoch;
+ const data=await api('/api/me/social');
+ if(state.socialEpoch!==version||state.me?.user?.uid!==uid)return state.social;
+ state.social=data;
+ if(state.dmUid){
+  const conv=state.social.conversations?.find(x=>x.uid===state.dmUid);
+  if(conv){state.dmCanSend=!!conv.can_send;if(conv.display_name)state.dmOtherName=conv.display_name;if(!conv.can_send)state.dmPending=null;}
+  else {state.dmCanSend=false;state.dmPending=null;}
+ }
+ return state.social;
+}
+function mergeDmMessages(...groups){
+ const map=new Map();for(const group of groups)for(const message of group||[])map.set(Number(message.id),message);
+ return [...map.values()].sort((a,b)=>Number(a.id)-Number(b.id));
+}
+function mergeLedgerEntries(...groups){
+ const map=new Map();for(const group of groups)for(const entry of group||[])map.set(Number(entry.id),entry);
+ return [...map.values()].sort((a,b)=>Number(b.id)-Number(a.id));
+}
+function dmMessageHtml(m){
+ return \`<div class="feed-item dm-message \${m.mine?'mine':''}"><strong>\${m.mine?'我':esc(m.sender_name)}</strong><div class="feed-text">\${esc(m.text)}</div><div class="tiny muted">\${esc(shortDate(m.created_at))}</div></div>\`;
+}
+function renderDmPanel(){
+ const box=$('#dmPanel');if(!box)return;
+ const uid=state.dmUid;if(!uid){box.innerHTML='';return;}
+ const friend=state.social?.friends?.find(x=>x.uid===uid);
+ const conv=state.social?.conversations?.find(x=>x.uid===uid);
+ const title=friend?.note||conv?.note||state.dmOtherName||uid;
+ const canSend=conv?!!conv.can_send:state.dmCanSend;
+ const pending=state.dmPending?.uid===uid?state.dmPending:null;
+ box.innerHTML=\`<div class="divider"></div><div class="label-line"><h3>与 \${esc(title)}（\${esc(uid)}）私信</h3><button class="small" data-action="dm-close">收起</button></div><div class="feed" id="dmFeed" aria-live="polite">\${state.dmMessages.map(dmMessageHtml).join('')||D('暂无消息')}</div>\${state.dmHasMore?\`<button class="small" data-action="dm-older" data-uid="\${esc(uid)}">加载更早消息</button>\`:''}\${canSend?\`<form data-form="dm-send" data-uid="\${esc(uid)}"><textarea name="text" maxlength="2000" required placeholder="输入私信">\${esc(pending?.text||'')}</textarea><div class="form-actions"><span class="hint">纯文本 · 最多 2000 字</span><button class="primary" type="submit">发送</button></div></form>\`:D('好友关系已解除，只能查看历史消息。')}\`;
+ const feed=$('#dmFeed');if(feed)feed.scrollTop=feed.scrollHeight;
+}
+async function markDmRead(uid,messageId,{refresh=true,accountUid=state.me?.user?.uid}={}){
+ if(!messageId)return;
+ await api('/api/messages/'+encodeURIComponent(uid)+'/read',{method:'POST',body:{last_read_message_id:Number(messageId)}});
+ if(state.me?.user?.uid!==accountUid)return;
+ if(refresh){await loadSocial();if(location.hash.startsWith('#profile')){renderPersonalCenter();renderDmPanel();}}
+}
+async function openDm(uid){
+ const version=++state.dmLoadVersion,accountUid=state.me?.user?.uid;
+ state.dmUid=uid;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;
+ renderDmPanel();
+ const data=await api('/api/messages/'+encodeURIComponent(uid));
+ if(version!==state.dmLoadVersion||state.dmUid!==uid||state.me?.user?.uid!==accountUid)return;
+ state.dmOtherName=data.other_name;state.dmCanSend=!!data.can_send;
+ state.dmMessages=mergeDmMessages(data.messages,state.dmMessages);
+ state.dmBeforeId=data.next_before_id;state.dmHasMore=!!data.has_more;
+ renderDmPanel();
+ if(data.last_received_message_id)await markDmRead(uid,data.last_received_message_id,{refresh:false,accountUid}).catch(()=>{});
+ await loadSocial();
+ if(location.hash.startsWith('#profile')&&state.me?.user?.uid===accountUid){renderPersonalCenter();renderDmPanel();}
+}
+async function loadOlderDm(uid){
+ if(uid!==state.dmUid||!state.dmBeforeId)return;
+ const accountUid=state.me?.user?.uid,first=state.dmMessages[0]?.id;if(!first)return;
+ const feed=$('#dmFeed'),oldHeight=feed?.scrollHeight||0,oldTop=feed?.scrollTop||0;
+ const page=await api('/api/messages/'+encodeURIComponent(uid)+'?before_id='+encodeURIComponent(state.dmBeforeId));
+ if(uid!==state.dmUid||state.me?.user?.uid!==accountUid)return;
+ state.dmMessages=mergeDmMessages(page.messages,state.dmMessages);
+ state.dmBeforeId=page.next_before_id;state.dmHasMore=!!page.has_more;
+ renderDmPanel();
+ const next=$('#dmFeed');if(next)next.scrollTop=next.scrollHeight-oldHeight+oldTop;
+}
+async function loadPointsLedger({reset=false}={}){
+ const accountUid=state.me?.user?.uid,before=reset?null:state.pointsLedgerBeforeId;
+ const params=new URLSearchParams({limit:'20'});if(before)params.set('before_id',String(before));
+ const data=await api('/api/me/points/ledger?'+params.toString());
+ if(state.me?.user?.uid!==accountUid)return;
+ state.pointsLedgerEntries=reset?data.entries:mergeLedgerEntries(state.pointsLedgerEntries,data.entries);
+ state.pointsLedgerBeforeId=data.next_before_id;state.pointsLedgerHasMore=!!data.has_more;state.pointsLedgerLoaded=true;
+ renderPointsLedger();
+}
+function renderPointsLedger(){
+ const el=$('#pointsLedger');if(!el)return;
+ if(!state.pointsLedgerLoaded){el.innerHTML='';return;}
+ const rows=state.pointsLedgerEntries.map(x=>{
+  const delta=String(x.delta),sign=delta==='0'||delta.startsWith('-')?'':'+'; 
+  return \`<div class="feed-item">\${x.outcome==='win'?'胜利':'失败'} · 房间 \${esc(x.room_id)} 第 \${esc(x.match_number)} 场 · \${sign}\${esc(delta)} · 积分 \${esc(x.points_after)} · 连胜 \${esc(x.streak_after)} · \${esc(shortDate(x.settled_at))}</div>\`;
+ }).join('')||D('暂无积分流水');
+ el.innerHTML=rows+(state.pointsLedgerHasMore?'<button class="small spaced" data-action="points-ledger-more">加载更多</button>':'');
+}
+async function refreshSocialUi(){
+ await loadSocial();
+ if(location.hash.startsWith('#profile')){renderPersonalCenter();renderDmPanel();}
+}
+function connectDmWs(){
+ stopDmWs();const uid=state.me?.user?.uid;if(!uid||!location.hash.startsWith('#profile'))return;
+ const proto=location.protocol==='https:'?'wss:':'ws:';
+ const ws=new WebSocket(\`\${proto}//\${location.host}/ws/messages\`);state.dmSocket=ws;
+ ws.onopen=async()=>{
+  if(state.dmSocket!==ws||state.me?.user?.uid!==uid)return;
+  try{await loadSocial();if(state.dmUid)await openDm(state.dmUid);else renderPersonalCenter();}catch{}
+ };
+ ws.onmessage=async event=>{
+  if(state.dmSocket!==ws||state.me?.user?.uid!==uid)return;
+  let message;try{message=JSON.parse(event.data)}catch{return;}
+  if(message.type==='social_updated'){await refreshSocialUi();return;}
+  if(message.type==='points_updated'){
+   await refreshSocialUi();
+   if(state.pointsLedgerLoaded)await loadPointsLedger({reset:true});
+   return;
+  }
+  if(message.type==='name_lock_updated'){
+   try{state.me=await api('/api/me');if(location.hash.startsWith('#profile'))renderPersonalCenter();}catch{}
+   return;
+  }
+  if(message.type==='dm_message'){
+   const otherUid=message.other_uid,entry=message.message;
+   if(!otherUid||!entry)return;
+   if(state.dmUid===otherUid){
+    state.dmMessages=mergeDmMessages(state.dmMessages,[entry]);renderDmPanel();
+    if(!entry.mine)await markDmRead(otherUid,entry.id,{refresh:false,accountUid:uid}).catch(()=>{});
+   }
+   await refreshSocialUi();
+  }
+ };
+ ws.onclose=async event=>{
+  if(state.dmSocket!==ws)return;state.dmSocket=null;
+  if(event.code===1008){
+   try{
+    const current=await api('/api/me');
+    if(current.user?.uid!==uid){state.me=current;clearPersonalModelState();await init();}
+    else{
+     state.me=current;
+     state.dmReconnect=setTimeout(()=>{if(location.hash.startsWith('#profile')&&state.me?.user?.uid===uid)connectDmWs();},1000);
+    }
+   }catch{
+    state.me=null;clearPersonalModelState();renderAuth();
+   }
+   return;
+  }
+  if(!location.hash.startsWith('#profile')||state.me?.user?.uid!==uid)return;
+  state.dmReconnect=setTimeout(()=>{if(location.hash.startsWith('#profile')&&state.me?.user?.uid===uid)connectDmWs();},3000);
+ };
+ ws.onerror=()=>{};
+}
 async function openPersonalCenter(options={}){
  if(!options.fromHash){state.personalReturn=state.roomId&&state.room?{roomId:state.roomId,view:state.roomView,round:state.selectedRound}:null;}
  else if(!state.personalReturn)state.personalReturn=profileReturnFromHash();
- stopWs();const back=state.personalReturn;const hash=back?.roomId?`#profile?room=${back.roomId}&view=${encodeURIComponent(back.view)}&round=${back.round||1}`:'#profile';history.replaceState(null,'',hash);
- await loadPersonalModels();await loadModelOperationRecords();await loadSocial();renderPersonalCenter();
+ stopWs();const back=state.personalReturn;const hash=back?.roomId?\`#profile?room=\${back.roomId}&view=\${encodeURIComponent(back.view)}&round=\${back.round||1}\`:'#profile';history.replaceState(null,'',hash);
+ state.me=await api('/api/me');
+ await loadPersonalModels();await loadModelOperationRecords();await loadSocial();renderPersonalCenter();connectDmWs();
 }
 async function returnFromPersonalCenter(){
- const back=state.personalReturn;state.personalReturn=null;
+ const back=state.personalReturn;state.personalReturn=null;clearDmState();
  if(back?.roomId){await openRoom(back.roomId,{view:back.view,round:back.round});return;}
  history.replaceState(null,'',location.pathname);state.roomId=null;state.room=null;await loadLobby();
 }
@@ -356,11 +508,11 @@ async function openDm(uid){
 }
 function renderSocialPanel(){
  const x=state.social||{friends:[],incoming:[],outgoing:[],conversations:[],points:{total_points:'0',current_streak:'0'}};
- const friendRows=x.friends.map(f=>`<div class="feed-item"><strong>${esc(f.note)}</strong> <span class="code">${esc(f.uid)}</span><div class="hint">${esc(f.display_name)} · 积分 ${esc(f.total_points)} · 连胜 ${esc(f.current_streak)}</div><div class="buttonrow"><button class="small" data-action="dm-open" data-uid="${esc(f.uid)}">私信</button><button class="small" data-action="friend-note" data-uid="${esc(f.uid)}">修改备注</button><button class="small danger" data-action="friend-delete" data-uid="${esc(f.uid)}">删除好友</button></div></div>`).join('')||D('暂无好友');
+ const friendRows=x.friends.map(f=>`<div class="feed-item"><strong>${esc(f.note)}</strong> <span class="code">${esc(f.uid)}</span><div class="hint">${esc(f.display_name)} · 积分 ${esc(f.total_points)} · 连胜 ${esc(f.current_streak)}</div><div class="buttonrow"><button class="small" data-action="dm-open" data-uid="${esc(f.uid)}">私信</button><button class="small" data-action="friend-note" data-uid="${esc(f.uid)}">修改备注</button><button class="small" data-action="friend-reset-note" data-uid="${esc(f.uid)}">恢复默认</button><button class="small danger" data-action="friend-delete" data-uid="${esc(f.uid)}">删除好友</button></div></div>`).join('')||D('暂无好友');
  const incoming=x.incoming.map(f=>`<div class="feed-item">${esc(f.display_name)} · ${esc(f.uid)} <button class="small" data-action="friend-accept" data-id="${f.id}">接受</button> <button class="small" data-action="friend-reject" data-id="${f.id}">拒绝</button></div>`).join('')||D('没有收到的申请');
  const outgoing=x.outgoing.map(f=>`<div class="feed-item">${esc(f.display_name)} · ${esc(f.uid)} <button class="small" data-action="friend-withdraw" data-id="${f.id}">撤回</button></div>`).join('')||D('没有发出的申请');
  const conversations=x.conversations.map(c=>`<button class="room-view-link" data-action="dm-open" data-uid="${esc(c.uid)}"><strong>${esc(c.note||c.display_name)}</strong> · ${esc(c.uid)} ${c.unread_count?`<span class="pill">${c.unread_count} 未读</span>`:''}</button>`).join('')||D('暂无私信会话');
- return `<section class="card"><h2>账号积分</h2><div class="stat-row"><div class="stat">总积分 <strong>${esc(x.points.total_points)}</strong></div><div class="stat">当前连胜 <strong>${esc(x.points.current_streak)}</strong></div></div><div id="pointsLedger" class="feed spaced"></div><button class="small" data-action="points-ledger">查看积分流水</button></section>
+ return `<section class="card"><h2>账号积分</h2><div class="stat-row"><div class="stat">总积分 <strong>${esc(x.points.total_points)}</strong></div><div class="stat">当前连胜 <strong>${esc(x.points.current_streak)}</strong></div></div><div id="pointsLedger" class="feed spaced"></div><button class="small" data-action="points-ledger">${state.pointsLedgerLoaded?'刷新积分流水':'查看积分流水'}</button></section>
  <section class="card"><h2>好友与私信</h2><form data-form="friend-search"><label class="field">通过 UID 搜索</label><input name="uid" maxlength="40" required placeholder="TL00000001"><div class="form-actions"><button class="primary" type="submit">搜索</button></div></form><div id="friendSearchResult"></div><h3 class="spaced">好友</h3>${friendRows}<h3 class="spaced">收到的申请</h3>${incoming}<h3 class="spaced">发出的申请</h3>${outgoing}<h3 class="spaced">私信会话</h3>${conversations}<div id="dmPanel"></div></section>`;
 }
 function renderPersonalCenter({skipModelDraftKey=null}={}){
@@ -370,9 +522,10 @@ function renderPersonalCenter({skipModelDraftKey=null}={}){
  stopWs();
  app.innerHTML='<div class="pagehead"><div><div class="overline">ACCOUNT / PERSONAL CENTER</div><h1>个人中心</h1><p class="muted">管理当前账号的基本资料、登录密码和个人模型 API 配置。</p></div><div class="buttonrow"><button data-action="personal-back">← 返回'+(state.personalReturn?.roomId?'房间':'大厅')+'</button></div></div>'+
  '<div class="personal-layout"><div class="stack">'+
- '<section class="card"><h2>基本资料</h2><div class="uid-row"><div><label class="field">UID（不可修改）</label><div class="code"> '+esc(u.uid)+'</div></div><button class="small" data-action="copy-uid" data-uid="'+esc(u.uid)+'">复制 UID</button></div><form data-form="profile-name" class="spaced"><label class="field">名字</label><input name="display_name" type="text" maxlength="40" required value="'+esc(u.display_name)+'"><div class="form-actions"><button class="primary" type="submit">保存名字</button></div></form></section>'+
+ '<section class="card"><h2>基本资料</h2><div class="uid-row"><div><label class="field">UID（不可修改）</label><div class="code"> '+esc(u.uid)+'</div></div><button class="small" data-action="copy-uid" data-uid="'+esc(u.uid)+'">复制 UID</button></div><form data-form="profile-name" class="spaced"><label class="field">名字</label><input name="display_name" type="text" maxlength="40" required value="'+esc(u.display_name)+'"'+(u.name_change_locked?' disabled':'')+'><div class="form-actions"><button class="primary" type="submit"'+(u.name_change_locked?' disabled':'')+'>保存名字</button></div>'+(u.name_change_locked?'<p class="hint">比赛进行中，暂不能修改名字</p>':'')+'</form></section>'+
  renderSocialPanel()+ '<section class="card"><h2>修改密码</h2><p class="hint">修改成功后，当前账号的所有登录会话都会退出，需要使用新密码重新登录。</p><form data-form="change-password"><label class="field">当前密码</label><input name="current_password" type="password" autocomplete="current-password" maxlength="200" required><label class="field">新密码（8～200 位）</label><input name="new_password" type="password" autocomplete="new-password" minlength="8" maxlength="200" required><label class="field">确认新密码</label><input name="confirm_password" type="password" autocomplete="new-password" minlength="8" maxlength="200" required><div class="form-actions"><button class="primary" type="submit">修改密码并退出登录</button></div></form></section>'+
  '</div><div class="stack"><section class="card"><h2>个人模型 API</h2>'+renderPersonalModelManager()+'</section>'+renderModelOperationRecords()+'</div></div>';
+ renderDmPanel();renderPointsLedger();
 }
 function modelProfileOptions(r){
  const profiles=(state.personalModels||[]).filter(p=>p.credential_status==='ok');
@@ -531,16 +684,16 @@ function renderJudgeRoom(r){
  const buttons=r.rounds.map(x=>`<button class="small ${x.number===n?'active':''}" data-action="round" data-id="${x.number}">第 ${x.number} 轮 ${x.status==='revealed'?'✓':''}</button>`).join('');
  const form=canLock?`<form data-form="judge-verdict"><p class="hint">只根据匿名回答判断。所有预测只保存在你的独立记录中，其他裁判始终无法通过网站读取。</p>${aliases.map(a=>`<div class="label-line" style="margin:8px 0"><label>参与者 ${esc(a)}</label><select name="pred-${esc(a)}" required><option value="">选择</option><option value="Human">人类</option><option value="AI">AI</option></select></div>`).join('')}<label class="field">判断依据</label><textarea name="evidence" data-draft="judge-evidence" required maxlength="5000">${myDraft('judge-evidence')}</textarea><label class="field">置信度 (0-100)</label><input name="confidence" type="number" min="0" max="100" value="50" required><label class="field">最弱环节（可选）</label><textarea name="weakness" maxlength="5000"></textarea><label class="field">可能误判原因（可选）</label><textarea name="possible_error" maxlength="5000"></textarea><div class="form-actions"><button class="primary" type="submit">锁定我自己的判断</button></div></form>`:
  r.my_verdict?`<div class="locked">🔒 你的判决已锁定，不能修改。其他裁判的判断对你保密。</div><div class="answer-card"><strong>我的判断</strong><div class="answer-content">${aliases.map(a=>a+'：'+(r.my_verdict.predictions[a]==='Human'?'人类':'AI')).join('\n')}</div><div class="hint">依据：${esc(r.my_verdict.evidence)}</div></div>`:
- D('待所有轮次的参赛者回答全部公开后才可提交最终判断。');
+ '';
  app.innerHTML=`<div class="pagehead"><div><div class="overline">INDEPENDENT JUDGE / ROOM ${r.id}</div><h1>${esc(r.title)}</h1><div class="stat-row"><span class="pill">独立裁判 · ${esc(r.my_judge_label)}</span><span class="pill">${aliases.length} 位匿名参赛者</span><span class="pill">${finished?'比赛已结束':'匿名盲测中'}</span></div></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button data-action="back" class="ghost">← 返回大厅</button><button data-action="sync">↻ 刷新</button></div></div>
  ${finishedActions(r)}<div class="room-layout"><aside class="aside"><section class="card flat"><h2>匿名参赛者</h2><p class="hint">仅显示固定代号，隐藏所有账号、昵称和真实身份。即使比赛结束，此视图也不显示真实身份。</p>${aliases.map(a=>`<div class="roster-person"><span class="alias">${esc(a)}</span><span>匿名参赛者</span></div>`).join('')}</section><section class="card flat"><h2>比赛轮次</h2><div class="round-tags">${buttons}</div></section></aside>
- <div class="stack"><section class="card"><div class="label-line"><h2>第 ${n} 轮问题</h2><span class="pill">${round.status==='draft'?'收集问题中':round.status==='collecting'?'等待答复':'回答已公开'}</span></div><p class="hint">当前独立裁判的题目将在房主开启本轮作答后汇总。</p><div class="feed">${questions}</div>${round.question?`<div class="question spaced">${esc(round.question)}</div>`:''}<div class="buttonrow spaced"><button data-action="download-log" class="small">↓ 下载匿名 Log</button>${finished?'<button data-action="download-full-log" class="small">↓ 下载整场匿名 Log</button>':''}</div></section>
+ <div class="stack"><section class="card"><div class="label-line"><h2>第 ${n} 轮问题</h2><span class="pill">${round.status==='draft'?'收集问题中':round.status==='collecting'?'等待答复':'回答已公开'}</span></div><div class="feed">${questions}</div>${round.question?`<div class="question spaced">${esc(round.question)}</div>`:''}<div class="buttonrow spaced"><button data-action="download-log" class="small">↓ 下载匿名 Log</button>${finished?'<button data-action="download-full-log" class="small">↓ 下载整场匿名 Log</button>':''}</div></section>
  <section class="card"><h2>匿名回答</h2>${answers}</section></div>
  <div class="right-panel"><section class="card"><h2>我的裁判操作</h2>${active&&pending&&!questionSubmitted?`<form data-form="judge-question"><p class="hint">每位裁判每轮最多提交一个问题，房主统一开启本轮作答。</p><textarea name="text" data-draft="judge-question" maxlength="3000" required placeholder="输入你要向所有参赛者提出的问题…">${myDraft('judge-queion')}</textarea><div class="form-actions"><button class="primary" type="submit">提交并实时同步问题</button></div></form>`:pending?D('你已提交本轮问题，等待房主开启作答。'):D('本轮已经开始作答，不能再添加新问题。')}
  <div class="divider"></div><h3>独立身份判决</h3>${form}</section></div></div>`;
 }
 function renderMultiResults(r,roster){
- return `<section class="card"><div class="overline">MULTI-JUDGE / RESULTS</div><h2>多裁判独立判决结果</h2><p class="hint">比赛结束后向人类参与者展示全部裁判判决及评分；各裁判登录时仍只能读取自己的判断。</p>${r.verdicts.map(v=>{const count=roster.filter(p=>v.predictions?.[p.alias]===(p.role==='AI'?'AI':'Human')).length;return `<div class="answer-card"><div class="label-line"><h3>${esc(v.judge)} <span class="tiny muted">${v.kind==='ai'?'AI 裁判':v.kind==='human'?'真人裁判':''}</span></h3><span class="pill ok">${count} / ${roster.length} 正确</span></div><div class="hint">置信度 ${v.confidence}%</div>${roster.map(p=>`<div class="hint">${esc(p.alias)} · ${p.role} · 判断：${v.predictions?.[p.alias]==='Human'?'人类':'AI'} ${v.predictions?.[p.alias]===(p.role==='AI'?'AI':'Human')?'✓':'✗'}</div>`).join('')}<div class="question spaced">${esc(v.evidence)}</div><p class="hint">最弱环节：${esc(v.weakness||'未填写')}</p><p class="hint">可能误判：${esc(v.possible_error||'未填写')}</p></div>`}).join('')}</section>`;
+ return `<section class="card"><div class="overline">MATCH ACCURACY / 比赛识别统计</div><h2>多裁判独立判决结果</h2><p class="hint">比赛结束后向人类参与者展示全部裁判判决及评分；各裁判登录时仍只能读取自己的判断。</p>${r.verdicts.map(v=>{const count=roster.filter(p=>v.predictions?.[p.alias]===(p.role==='AI'?'AI':'Human')).length;return `<div class="answer-card"><div class="label-line"><h3>${esc(v.judge)} <span class="tiny muted">${v.kind==='ai'?'AI 裁判':v.kind==='human'?'真人裁判':''}</span></h3><span class="pill ok">${count} / ${roster.length} 正确</span></div><div class="hint">置信度 ${v.confidence}%</div>${roster.map(p=>`<div class="hint">${esc(p.alias)} · ${p.role} · 判断：${v.predictions?.[p.alias]==='Human'?'人类':'AI'} ${v.predictions?.[p.alias]===(p.role==='AI'?'AI':'Human')?'✓':'✗'}</div>`).join('')}<div class="question spaced">${esc(v.evidence)}</div><p class="hint">最弱环节：${esc(v.weakness||'未填写')}</p><p class="hint">可能误判：${esc(v.possible_error||'未填写')}</p></div>`}).join('')}</section>`;
 }
 function renderAdminRoomNav(r,finished){
  const views=[['match','比赛现场'],['human-judges','真人裁判管理'],['ai-judges','AI 裁判管理'],['admin','参赛者管理']];
@@ -559,7 +712,7 @@ function renderRoom(){
  const answerView=round.status==='revealed'?roster.map(p=>`<div class="answer-card"><strong>${esc(p.alias)} · ${esc(p.label)}</strong><span class="pill" style="margin-left:7px">${p.role}</span><div class="tiny muted">${esc(shortDate(round.answers[p.alias]?.submitted_at))}</div>${round.answers[p.alias]?.edited_at?'<span class="pill">主持人已修订</span>':''}<div class="answer-content">${esc(round.answers[p.alias]?.text||'（无回答）')}</div></div>`).join(''):
    `<div class="notice">🔒 回答暂时隐藏。已提交 ${round.submitted.length} / ${roster.length}；全部参赛者（含 AI）提交后，服务器会自动向所有在线玩家公布。</div>${round.answers[r.mine]?.text?`<div class="answer-card"><strong>我已提交的回答</strong><div class="answer-content">${esc(round.answers[r.mine].text)}</div></div>`:''}`;
  const canAnswer=active&&!finished&&round.status==='collecting'&&r.mine&&!submitted.has(r.mine);
- const judgeBox= canManage?`<section class="card compact"><div class="label-line"><h2>房主管理台</h2><span class="pill">${r.is_owner?'房主':'管理员'}</span></div>
+ const judgeBox= canManage?`<section class="card compact"><div class="label-line"><h2>参赛者管理</h2><span class="pill">${r.is_owner?'房主':'管理员'}</span></div>
  ${active&&round.status==='draft'&&!finished&&!round.questions?.length&&!(r.judges||[]).length?`<div class="divider"></div><form id="manual-question-form" data-form="question"><label class="field">录入裁判的第 ${n} 轮问题</label><textarea name="question" data-draft="question" maxlength="6000" required placeholder="从裁判聊天窗口复制原文…">${myDraft('question')}</textarea><div class="form-actions"><button class="primary" type="submit">向所有玩家发布问题</button></div></form>`:''}
  ${active&&round.status==='collecting'&&!finished&&r.ais.some(a=>a.model_profile_id&&a.model_profile?.credential_status==='ok'&&!submitted.has(a.alias))?`<div class="divider"></div><button class="primary" data-action="generate-ai-answers">自动生成模型 AI 回复</button>`:''}
   ${active&&round.status==='collecting'&&!finished&&r.ais.some(a=>(!a.model_profile_id||a.model_profile?.credential_status!=='ok')&&!submitted.has(a.alias))?`<div class="divider"></div><form data-form="ai-answer"><label class="field">录入 AI 原始回答</label><select name="alias">${r.ais.filter(a=>(!a.model_profile_id||a.model_profile?.credential_status!=='ok')&&!submitted.has(a.alias)).map(a=>`<option value="${a.alias}">${a.alias} · ${esc(a.name)}</option>`).join('')}</select><label class="field">AI 回答（复制原文）</label><textarea name="answer" data-draft="ai-answer" maxlength="12000" required placeholder="请粘贴 AI 原样回答，不做修改…">${myDraft('ai-answer')}</textarea><div class="fom-actions"><button class="primary" type="submit">录入 AI 回答</button></div></form>`:''}
@@ -571,18 +724,18 @@ function renderRoom(){
  ${active&&!finished&&!locked&&r.humans.length&&roster.length>2?`<div class="divider"></div><h3>移除人类参赛者</h3><p class="hint">移除后该账号无法重新加入房间；历史已提交回答仍保留。</p>${r.humans.map(h=>`<div class="label-line" style="gap:8px;margin:8px 0"><span>${esc(h.alias)} · ${esc(h.name)}</span><button class="small danger" data-action="remove-human" data-id="${h.user_id}">移出房间</button></div>`).join('')}`:''}
  ${active&&round.status==='revealed'&&!finished&&!locked?`<div class="divider"></div><div class="buttonrow"><button class="primary" data-action="next-round">＋ 开启下一轮</button><button data-action="packet">生成匿名裁判包</button></div>`:''}
  ${r.packets.length?`<div class="divider"></div><details class="packet-panel" data-packet-panel data-key="${r.id}:${r.match_number}" ${state.packetPanels[`${r.id}:${r.match_number}`]?'open':''}><summary><strong>单轮裁判包快照</strong><span class="pill">${r.packets.length} 份</span></summary><div class="packet-panel-body"><p class="hint">每份快照仅包含该轮裁判问题和参赛者答复，生成后内容固定；修订回复后请重新生成快照。</p>${r.packets.slice(0,6).map(p=>`<div class="feed-item" style="margin-top:7px"><div class="label-line"><strong>仅第 ${p.through_round} 轮 · v${p.version}</strong><span class="pill ${p.sent_at?'ok':''}">${p.sent_at?'已确认发送':'待发送'}</span></div><div class="tiny muted">SHA256: ${esc(p.sha256.slice(0,16))}…</div><div class="buttonrow spaced"><button class="small" data-action="view-packet" data-id="${p.id}">查看 / 复制</button>${p.sent_at?'':`<button class="small" data-action="mark-sent" data-id="${p.id}">标记已发送</button>`}</div></div>`).join('')}</div></details>`:''}
- ${!finished&&!(r.judges||[]).length?`<div class="divider"></div><h3>裁判最终判断</h3>${locked?`<p class="locked">🔒 结论已锁定，揭晓后所有玩家都能查看。</p><button class="danger" data-action="reveal">揭晓身份与计分</button>`: (r.rounds.every(x=>x.status==='revealed')?`<form data-form="verdict"><p class="hint">手动录入裁判的最终判断。锁定前不能修改身份判决；请勿提前公布真实身份。</p>${roster.map(p=>`<div class="label-line" style="margin:8px 0"><label for="pred-${p.alias}">参与者 ${p.alias}</label><select required style="max-width:120px" name="pred-${p.alias}" id="pred-${p.alias}"><option value="">选择</option><option value="Human">人类</option><option value="AI">AI</option></select></div>`).join('')}<label class="field">裁判主要依据（必填）</label><textarea name="evidence" data-draft="evidence" required maxlength="5000" placeholder="裁判的判断依据…">${myDraft('evidence')}</textarea><label class="field">置信度（0–100）</label><input type="text" name="confidence" inputmode="numeric" pattern="[0-9]{1,3}" value="50" required><label class="field">最弱环节（可选）</label><textarea name="weakness" data-draft="weakness" maxlength="5000">${myDraft('weakness')}</textarea><label class="field">如果判断错误可能错在哪（可选）</label><textarea name="possible_error" data-draft="possible_error" maxlength="5000">${myDraft('possible_error')}</textarea><div class="form-actions"><button class="primary" type="submit">锁定裁判结论</button></div></form>`:`<p class="hint">所有轮次回答完成之后才可锁定裁判最终判断。</p>`)}`:''}</section>`:'';
+ ${!finished&&!(r.judges||[]).length?`<div class="divider"></div><h3>裁判最终判断</h3>${locked?`<p class="locked">🔒 结论已锁定，揭晓后所有玩家都能查看。</p><button class="danger" data-action="reveal">揭晓身份与计分</button>`: (r.rounds.every(x=>x.status==='revealed')?`<form data-form="verdict"><p class="hint">手动录入裁判的最终判断。锁定前不能修改身份判决；请勿提前公布真实身份。</p>${roster.map(p=>`<div class="label-line" style="margin:8px 0"><label for="pred-${p.alias}">参与者 ${p.alias}</label><select required style="max-width:120px" name="pred-${p.alias}" id="pred-${p.alias}"><option value="">选择</option><option value="Human">人类</option><option value="AI">AI</option></select></div>`).join('')}<label class="field">裁判主要依据（必填）</label><textarea name="evidence" data-draft="evidence" required maxlength="5000" placeholder="裁判的判断依据…">${myDraft('evidence')}</textarea><label class="field">置信度（0–100）</label><input type="text" name="confidence" inputmode="numeric" pattern="[0-9]{1,3}" value="50" required><label class="field">最弱环节（可选）</label><textarea name="weakness" data-draft="weakness" maxlength="5000">${myDraft('weakness')}</textarea><label class="field">如果判断错误可能错在哪（可选）</label><textarea name="possible_error" data-draft="possible_error" maxlength="5000">${myDraft('possible_error')}</textarea><div class="form-actions"><button class="primary" type="submit">锁定裁判结论</button></div></form>`:``)}`:''}</section>`:'';
  const scored=r.verdict&&finished?roster.filter(p=>r.verdict.predictions[p.alias]===(p.role==='AI'?'AI':'Human')).length:null;
  app.innerHTML=`<div class="pagehead"><div><div class="overline">ROOM ${r.id} / REAL-TIME MATCH</div><h1>${esc(r.title)}</h1><div class="stat-row"><span class="pill ${finished?'ok':'warn'}">${finished?'比赛已结束':'比赛进行中'}</span><span cass="pill">${humans} 位人类 · ${ais} 位 AI</span><span class="pill">${r.judges?.length?`${r.judges.length} 位裁判（真人 / AI）`:`外部裁判：${esc(r.judge)}`}</span></div></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button class="ghost" data-action="back">← 比赛大厅</button><button data-action="sync">↻ 刷新</button></div></div>
- ${finishedActions(r)}<div class="room-layout ${canManage?'admin-room-layout':''}"><aside class="aside"><section class="card flat"><h2>参赛者身份</h2><div class="roster">${makeRoster(r)}</div></section><section class="card flat"><h2>比赛轮次</h2><div class="round-tags">${rtab}</div></section></aside>
+ ${finishedActions(r)}${renderMyPointsResult(r)}<div class="room-layout ${canManage?'admin-room-layout':''}"><aside class="aside"><section class="card flat"><h2>参赛者身份</h2><div class="roster">${makeRoster(r)}</div></section><section class="card flat"><h2>比赛轮次</h2><div class="round-tags">${rtab}</div></section></aside>
  <div class="stack">${canManage&&state.roomView==='human-judges'?renderHumanJudgeAdminPanel(r):canManage&&state.roomView==='ai-judges'?judgeAdminPanel(r)+renderModelOperationPanel(r):canManage&&state.roomView==='admin'?judgeBox+renderReadinessPanel(r)+renderJudgeWorkflowPanel(r)+renderModelOperationPanel(r):''}
  <div class="${canManage&&state.roomView!=='match'?'hide':'stack'}"><section class="card"><div class="label-line"><div><div class="overline">JUDGE / ROUND ${n}</div><h2 style="margin:5px 0 0">裁判问题</h2></div><span class="pill ${round.status==='revealed'?'ok':'warn'}">${round.status==='draft'?'等待发布':round.status==='collecting'?'正在收集回答':'本轮已揭晓'}</span></div><div class="question spaced">${esc(round.question||'管理员尚未开启本轮作答。')}</div>${round.status==='draft'&&round.questions?.length?`<div class="feed spaced">${round.questions.map(q=>`<div class="feed-item"><strong>${esc(q.judge)}</strong><div class="feed-text">${esc(q.text)}</div></div>`).join('')}</div>`:''}<div class="buttonrow spaced"><button class="small" data-action="download-log">↓ 下载本轮 Log (.md)</button>${finished?'<button class="small" data-action="download-full-log">↓ 下载整场 Log (.md)</button>':''}</div></section>
  <section class="card"><div class="label-line"><h2>参赛者回答</h2><span class="pill">${round.submitted.length}/${roster.length} 已提交</span></div>${answerView}
  ${canAnswer?`<form data-form="answer" class="spaced"><label class="field">我的本轮回答 · ${esc(r.mine)}</label><textarea name="answer" data-draft="answer" maxlength="12000" required placeholder="在这里回答裁判的问题。提交后不可修改，直到全员提交才统一公开。">${myDraft('answer')}</textarea><div class="form-actions"><button class="primary" type="submit">提交本轮回答</button></div></form>`:''}
- ${!r.mine&&!finished?D('在房主管理台选择以人类身份加入。'):''}</section>
+ ${!r.mine&&!finished?D('在参赛者管理选择以人类身份加入。'):''}</section>
 ${renderPublicChat(r)}
  ${finished&&r.verdicts?.length?renderMultiResults(r,roster):''}
- ${finished&&!r.verdicts?.length?`<section class="card"><div class="overline">FINAL / RESULT</div><h2>最终判决与真实身份</h2><div class="score">${scored}/${roster.length}</div><p class="muted">裁判 ${esc(r.judge)} · 置信度 ${r.verdict?.confidence??'?'}%</p>${roster.map(p=>`<div class="answer-card"><strong>${p.alias} · ${esc(p.label)}</strong><div>真实身份：${p.role} / 裁判判断：${r.verdict?.predictions?.[p.alias]==='Human'?'人类':'AI'} ${r.verdict?.predictions?.[p.alias]===(p.role==='AI'?'AI':'Human')?'✓':'✗'}</div></div>`).join('')}<h3 class="spaced">判断依据</h3><div class="question">${esc(r.verdict?.evidence)}</div><p class="hint spaced">最弱环节：${esc(r.verdict?.weakness||'未填写')}</p><p class="hint">可能误判：${esc(r.verdict?.possible_error||'未填写')}</p></section>`:''}
+ ${finished&&!r.verdicts?.length?`<section class="card"><div class="overline">MATCH ACCURACY / 比赛识别统计</div><h2>最终判决与真实身份</h2><div class="score">${scored}/${roster.length}</div><p class="muted">裁判 ${esc(r.judge)} · 置信度 ${r.verdict?.confidence??'?'}%</p>${roster.map(p=>`<div class="answer-card"><strong>${p.alias} · ${esc(p.label)}</strong><div>真实身份：${p.role} / 裁判判断：${r.verdict?.predictions?.[p.alias]==='Human'?'人类':'AI'} ${r.verdict?.predictions?.[p.alias]===(p.role==='AI'?'AI':'Human')?'✓':'✗'}</div></div>`).join('')}<h3 class="spaced">判断依据</h3><div class="question">${esc(r.verdict?.evidence)}</div><p class="hint spaced">最弱环节：${esc(r.verdict?.weakness||'未填写')}</p><p class="hint">可能误判：${esc(r.verdict?.possible_error||'未填写')}</p></section>`:''}
  </div></div><div class="right-panel">${canManage?renderAdminRoomNav(r,finished):`<section class="card flat"><div class="overline">PARTICIPANT</div><h2>等待主持人推进比赛</h2><p class="hint">你的每次提交都会发送到服务器；全员提交完成后自动揭晓。若网络断开，请等待自动重连或手动刷新。</p></section>`}</div></div>`;
  updateTypingBadges();
  if(editingDraft){
@@ -619,9 +772,8 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
   if(action==='toggle-legacy-login'){state.legacyLogin=!state.legacyLogin;renderAuth()}
   if(action==='copy-uid'){if(!b.dataset.uid)throw new Error('UID 不可用');await navigator.clipboard.writeText(b.dataset.uid);toast('UID 已复制')}
   if(action==='dm-open')await openDm(b.dataset.uid);
-  if(action==='dm-older'){
-   const uid=b.dataset.uid,first=state.dmMessages[0]?.id;if(first){const page=await api('/api/messages/'+encodeURIComponent(uid)+'?before_id='+first);state.dmMessages=[...page.messages,...state.dmMessages];state.dmBeforeId=page.next_before_id;state.dmHasMore=page.has_more;await openDm(uid);}
-  }
+  if(action==='dm-close'){state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;state.dmPending=null;renderDmPanel();}
+  if(action==='dm-older')await loadOlderDm(b.dataset.uid);
   if(action==='friend-accept'||action==='friend-reject'||action==='friend-withdraw'){
    const id=Number(b.dataset.id),suffix=action==='friend-accept'?'accept':action==='friend-reject'?'reject':'withdraw';
    await api('/api/friends/requests/'+id+'/'+suffix,{method:'POST'});await loadSocial();renderPersonalCenter();toast('好友申请状态已更新');
@@ -633,11 +785,21 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
    const uid=b.dataset.uid,current=state.social?.friends?.find(x=>x.uid===uid)?.note||'';const note=prompt('设置仅自己可见的好友备注（1～40 字）',current);
    if(note!==null){await api('/api/friends/'+encodeURIComponent(uid)+'/note',{method:'PUT',body:{note}});await loadSocial();renderPersonalCenter();}
   }
-  if(action==='points-ledger'){
-   const data=await api('/api/me/points/ledger');const el=$('#pointsLedger');if(el)el.innerHTML=data.entries.map(x=>`<div class="feed-item">${x.outcome==='win'?'胜利':'失败'} · 房间 ${x.room_id} 第 ${x.match_number} 场 · ${Number(x.delta)>0?'+':''}${esc(x.delta)} · 积分 ${esc(x.points_after)} · 连胜 ${esc(x.streak_after)}</div>`).join('')||D('暂无积分流水');
+  if(action==='friend-reset-note'){
+   await api('/api/friends/'+encodeURIComponent(b.dataset.uid)+'/note',{method:'PUT',body:{reset_default:true}});
+   await loadSocial();renderPersonalCenter();toast('已恢复为对方当前名字');
   }
+  if(action==='points-ledger')await loadPointsLedger({reset:true});
+  if(action==='points-ledger-more')await loadPointsLedger();
   if(action==='friend-add'){
    await api('/api/friends/requests',{method:'POST',body:{uid:b.dataset.uid}});await loadSocial();renderPersonalCenter();toast('好友申请已发送');
+  }
+  if(action==='friend-from-room'){
+   const uid=b.dataset.uid,result=await api('/api/users/search?uid='+encodeURIComponent(uid));
+   if(result.status==='none'){await api('/api/friends/requests',{method:'POST',body:{uid}});await loadSocial();toast('好友申请已发送');}
+   else if(result.status==='friend')toast('已经是好友');
+   else if(result.status==='incoming')toast('对方已向你发送好友申请，请在个人中心处理');
+   else toast('好友申请已经发送');
   }
   if(action==='personal-center')await openPersonalCenter();
   if(action==='personal-back')await returnFromPersonalCenter();
@@ -648,7 +810,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
    const uid=b.dataset.uid;
    if(confirm(`确定删除账号 ${uid}？该账号将立即退出登录且无法再使用，未完赛参与者将退赛；已有比赛历史署名保留。`)){
     const result=await api(`/api/admin/users/${uid}`,{method:'DELETE',body:{confirm:true}});
-    if(result.signed_out){state.me=null;state.room=null;state.roomId=null;renderAuth();}else await loadAccounts();toast('账号已删除');
+    if(result.signed_out){state.me=null;state.room=null;state.roomId=null;clearPersonalModelState();renderAuth();}else await loadAccounts();toast('账号已删除');
    }
   }
   if(action==='delete-room'){
@@ -772,9 +934,15 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
    return;
   }
   if(type==='dm-send'){
-   const uid=form.dataset.uid;const client_message_id=(crypto.randomUUID?crypto.randomUUID():String(Date.now())+Math.random());
-   await api('/api/messages/'+encodeURIComponent(uid),{method:'POST',body:{text:data.text,client_message_id:client_message_id}});
-   await openDm(uid);form.reset();return;
+   const uid=form.dataset.uid,textValue=String(data.text||'');
+   if(!state.dmPending||state.dmPending.uid!==uid||state.dmPending.text!==textValue){
+    const client_message_id=crypto.randomUUID?crypto.randomUUID():Array.from(crypto.getRandomValues(new Uint8Array(16)),x=>x.toString(16).padStart(2,'0')).join('');
+    state.dmPending={uid,text:textValue,client_message_id};
+   }
+   const pending=state.dmPending;
+   await api('/api/messages/'+encodeURIComponent(uid),{method:'POST',body:{text:pending.text,client_message_id:pending.client_message_id}});
+   if(state.dmPending===pending)state.dmPending=null;
+   await openDm(uid);return;
   }
   if(type==='login'){await api('/api/login',{method:'POST',body:data});await init();toast('登录成功');return}
   if(type==='register'){const result=await api('/api/register',{method:'POST',body:data});history.replaceState(null,'',location.pathname);await loadLobby();toast(`注册成功，你的 UID 是 ${result.uid}`);return}

@@ -41,15 +41,18 @@ def points_state(db, user_id: int, now: str):
     return {"total_points": str(row["points"]), "current_streak": str(row["streak"])}
 
 
-def _load_predictions(raw, roster):
+def _load_predictions(raw, roster, known_roster=None):
     try:
         payload = json.loads(raw)
     except (TypeError, ValueError):
         raise HTTPException(409, "最终裁判判断数据损坏，无法结算积分。")
     predictions = payload.get("predictions") if isinstance(payload, dict) else None
+    required = set(roster)
+    allowed = set(known_roster if known_roster is not None else roster)
     if (
         not isinstance(predictions, dict)
-        or set(predictions) != set(roster)
+        or not required.issubset(set(predictions))
+        or not set(predictions).issubset(allowed)
         or any(value not in ("Human", "AI") for value in predictions.values())
     ):
         raise HTTPException(409, "最终裁判判断不完整或包含非法值，无法结算积分。")
@@ -66,6 +69,13 @@ def settle_match_points(db, room, human_rows, roster, judges, now: str):
     ).fetchone():
         raise HTTPException(409, "本场比赛已经结算过积分。")
 
+    historical_roster = {
+        row["alias"] for row in db.execute(
+            """SELECT alias FROM members WHERE room_id=?
+               UNION SELECT alias FROM ai_players WHERE room_id=?""",
+            (room_id, room_id),
+        ).fetchall()
+    }
     ballots = []
     if judges:
         for judge in judges:
@@ -84,11 +94,11 @@ def settle_match_points(db, room, human_rows, roster, judges, now: str):
                 ).fetchone()
             if not row:
                 raise HTTPException(409, "缺少裁判最终判断，无法结算积分。")
-            ballots.append(_load_predictions(row["verdict_json"], roster))
+            ballots.append(_load_predictions(row["verdict_json"], roster, historical_roster))
     else:
         if not room["verdict_json"]:
             raise HTTPException(409, "缺少最终裁判判断，无法结算积分。")
-        ballots.append(_load_predictions(room["verdict_json"], roster))
+        ballots.append(_load_predictions(room["verdict_json"], roster, historical_roster))
 
     if not ballots:
         raise HTTPException(409, "没有有效最终裁判判断，无法结算积分。")
