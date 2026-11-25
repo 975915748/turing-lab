@@ -211,6 +211,17 @@ async function registerPlayer(browser, username, displayName) {
     assert.equal(await first.locator('[data-action="test-personal-model"]').isEnabled(), true);
     await page.unroute(testRoute);
 
+    // Restore the known-good test profile for the remainder of the existing UI checks.
+    await first.locator('[name="model"]').fill('saved-model-one');
+    await first.locator('[name="api_key"]').fill('sk-saved-browser-key');
+    const restoreProfileResponsePromise = page.waitForResponse(response =>
+      response.url().endsWith('/api/me/models/' + profileOne.id) &&
+      response.request().method() === 'PUT');
+    await first.locator('[type="submit"]').click();
+    const restoreProfileResponse = await restoreProfileResponsePromise;
+    assert.equal(restoreProfileResponse.status(), 200);
+    await page.locator('#toast').filter({ hasText: '个人模型配置已更新' }).waitFor();
+
     await second.locator('[data-action="delete-personal-model"]').click();
     await page.locator('#toast').filter({ hasText: '个人模型配置已删除' }).waitFor();
     await page.waitForFunction(() => !document.querySelector('#toast')?.classList.contains('visible'));
