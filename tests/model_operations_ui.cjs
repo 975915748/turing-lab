@@ -93,6 +93,15 @@ const { chromium } = require('playwright-core');
     assert.equal(roomState.rounds[0].status, 'collecting');
     assert.equal(roomState.model_request_count, 2);
 
+    await page.locator('[data-action="room-view"][data-view="ai-judges"]').click();
+    const phaseHistory = page.locator('details[data-model-operation-history]');
+    await phaseHistory.waitFor();
+    assert.equal(await phaseHistory.evaluate(node => node.open), false,
+      'previous phase model calls should be collapsed by default');
+    assert.equal(await phaseHistory.locator('.operation-record').count(), 3);
+    assert.equal(await phaseHistory.locator('[data-action="retry-model-operation"]').count(), 0,
+      'previous phase tasks must not be retried from the current phase');
+
     await page.locator('[data-action="personal-center"]').click();
     const recordsPanel = page.locator('[data-model-operations-panel]');
     await recordsPanel.waitFor();
