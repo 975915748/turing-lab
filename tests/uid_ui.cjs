@@ -252,7 +252,7 @@ async function logout(page) {
       await second.locator('[name="api_key"]').fill('sk-second-draft');
       await first.locator('[name="model"]').fill('saved-model-first');
       await first.locator('[name="api_key"]').fill('');
-      await clickSubmit(page, 'personal-model-edit');
+      await first.locator('form[data-form="personal-model-edit"] [type="submit"]').click();
       await page.locator('#toast').filter({ hasText: '个人模型配置已更新' }).waitFor();
 
       const firstAfterSave = page.locator('details[data-model-config][data-id="' + ids[0] + '"]');
@@ -277,7 +277,7 @@ async function logout(page) {
       assert.equal(await repair.getByText('缺少 API Key', { exact: true }).count(), 1);
       assert.equal(await repair.locator('[name="api_key"]').getAttribute('required'), '');
       await repair.locator('[name="api_key"]').fill('sk-browser-repaired');
-      await clickSubmit(page, 'personal-model-edit');
+      await repair.locator('form[data-form="personal-model-edit"] [type="submit"]').click();
       await page.locator('#toast').filter({ hasText: '个人模型配置已更新' }).waitFor();
       const repaired = page.locator('details[data-model-config][data-id="' + ids[3] + '"]');
       assert.equal(await repaired.getByText('API Key 已保存（可解密）', { exact: true }).count(), 1);
