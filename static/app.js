@@ -665,7 +665,7 @@ function renderJudgeWorkflowPanel(r){
  const allDone=judges.every(j=>j.locked);
  const allRoundsDone=r.rounds.length>0&&r.rounds.every(x=>x.status==='revealed');
  let html='<section class="card compact"><div class="label-line"><h2>统一作答与揭晓</h2><span class="pill">'+judges.filter(j=>j.locked).length+'/'+judges.length+' 位裁判已锁定</span></div>';
- if(!r.revealed_at&&allDone&&allRoundsDone)html+='<button class="danger" data-action="reveal">全部裁判已锁定 · 正式揭晓</button>';
+ if(!r.revealed_at&&allDone&&allRoundsDone)html+='<button class="danger" data-action="reveal">正式揭晓</button>';
  return html+'</section>';
 }
 function renderJudgeRoom(r){

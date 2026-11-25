@@ -137,6 +137,31 @@ def test_lock_is_account_wide_across_rooms_until_last_room_finishes_or_is_delete
     assert admin.get("/api/me").json()["user"]["name_change_locked"] is False
 
 
+
+def test_admin_who_owns_and_plays_a_match_is_locked_but_observer_is_not(env):
+    _, _, admin, player, observer, _, _ = env
+    created, base = create_room(admin, "管理员实际参赛改名锁")
+    admin_alias = join_as_player(admin, created["code"])["alias"]
+    player_alias = join_as_player(player, created["code"])["alias"]
+
+    post(admin, base + "/question", {"text": "管理员作为参赛者开局"}, match=1)
+    assert admin.get("/api/me").json()["user"]["name_change_locked"] is True
+    assert player.get("/api/me").json()["user"]["name_change_locked"] is True
+    assert observer.get("/api/me").json()["user"]["name_change_locked"] is False
+    put(admin, "/api/me/profile", {"display_name": "管理员绕过锁名"}, status=409)
+
+    post(admin, base + "/answers", {"text": "管理员回答"}, match=1)
+    post(player, base + "/answers", {"text": "玩家回答"}, match=1)
+    post(admin, base + "/verdict", {
+        "predictions": {admin_alias: "Human", player_alias: "AI"},
+        "evidence": "管理员参赛锁名测试",
+        "confidence": 70,
+    }, match=1)
+    post(admin, base + "/reveal", match=1)
+
+    assert admin.get("/api/me").json()["user"]["name_change_locked"] is False
+    put(admin, "/api/me/profile", {"display_name": "管理员完赛后改名"})
+
 def test_profile_update_and_match_start_are_serialized(env):
     _, app, _, host, player, _, _ = env
     created, base = create_room(host, "改名开局并发")

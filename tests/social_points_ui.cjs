@@ -16,7 +16,7 @@ async function waitEnabled(page, locator) {
   throw new Error('Expected control to become enabled after match completion');
 }
 async function clickSubmit(page, form) {
-  await page.locator(\`form[data-form="\${form}"] button[type="submit"]\`).click();
+  await page.locator(`form[data-form="${form}"] button[type="submit"]`).click();
 }
 async function register(page, username) {
   await page.getByRole('button', { name: '注册账号', exact: true }).click();
@@ -42,7 +42,7 @@ async function api(page, method, route, body = {}, match = null) {
       body: method === 'GET' ? undefined : JSON.stringify(body ?? {}),
     });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(\`\${method} \${route}: \${response.status} \${JSON.stringify(data)}\`);
+    if (!response.ok) throw new Error(`${method} ${route}: ${response.status} ${JSON.stringify(data)}`);
     return data;
   }, { method, route, body, match });
 }
@@ -60,51 +60,73 @@ async function closePersonalCenter(page) {
   const browser = await chromium.launch(browserOptions);
   const contextA = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const contextB = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const contextC = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const pageA = await contextA.newPage();
   const pageB = await contextB.newPage();
-  for (const page of [pageA, pageB]) page.setDefaultTimeout(10000);
+  const pageC = await contextC.newPage();
+  for (const page of [pageA, pageB, pageC]) page.setDefaultTimeout(10000);
   const errors = [];
-  pageA.on('pageerror', error => errors.push(String(error)));
-  pageB.on('pageerror', error => errors.push(String(error)));
+  for (const page of [pageA, pageB, pageC]) page.on('pageerror', error => errors.push(String(error)));
   try {
     await pageA.goto(site);
     await pageB.goto(site);
+    await pageC.goto(site);
     const uidA = await register(pageA, '好友测试甲');
     const uidB = await register(pageB, '好友测试乙');
+    const uidC = await register(pageC, '独立裁判丙');
     assert.equal(uidA, 'TL00000002');
     assert.equal(uidB, 'TL00000003');
+    assert.equal(uidC, 'TL00000004');
 
     await pageA.locator('form[data-form="room"] [name="title"]').fill('好友与积分浏览器验收');
     await clickSubmit(pageA, 'room');
     const roomHash = await pageA.evaluate(() => location.hash);
     const roomId = Number(roomHash.match(/room=(\d+)/)?.[1]);
     assert(roomId > 0);
-    const room = await api(pageA, 'GET', \`/api/rooms/\${roomId}\`);
-    const base = \`/api/rooms/\${roomId}\`;
+    const room = await api(pageA, 'GET', `/api/rooms/${roomId}`);
+    const base = `/api/rooms/${roomId}`;
     const hostJoin = await api(pageA, 'POST', '/api/join', { code: room.invite_code, role: 'player' });
     const playerJoin = await api(pageB, 'POST', '/api/join', { code: room.invite_code, role: 'player' });
+    const judgeJoin = await api(pageC, 'POST', '/api/join', { code: room.invite_code, role: 'judge' });
     assert(hostJoin.alias && playerJoin.alias);
+    assert.equal(judgeJoin.role, 'judge');
 
     await pageA.locator('[data-action="friend-from-room"]').waitFor();
     assert.equal(await pageA.locator('[data-action="personal-center"]').count(), 1);
     assert(await pageA.getByText('参赛者管理', { exact: false }).count() > 0);
     assert.equal(await pageA.getByText('房主管理台', { exact: false }).count(), 0);
+    assert.equal(await pageA.getByText('人类玩家互相可见真实账号身份；裁判包仅含匿名代号。', { exact: false }).count(), 0);
+    assert.equal(await pageA.getByText('真人裁判自行注册并使用 UID 登录', { exact: false }).count(), 0);
+    assert.equal(await pageA.getByText('同一 UID 同时只能担任一个未完赛房间的真人裁判', { exact: false }).count(), 0);
+    assert.equal(await pageA.getByText('所有真人 / AI 裁判的问题会统一汇总', { exact: false }).count(), 0);
     assert.equal(await pageA.getByText('仅本房间的人类参赛者、房主和管理员可见', { exact: false }).count(), 0);
     assert.equal(await pageA.getByText('实时同步中', { exact: false }).count(), 0);
-    assert.equal(await pageA.getByText('所有轮次回答完成之后才可锁定裁判最终判断', { exact: false }).count(), 0);
+    assert.equal(await pageA.getByText('仍需完成全部轮次', { exact: false }).count(), 0);
+    assert.equal(await pageA.getByText('所有轮次已完成', { exact: false }).count(), 0);
+    assert.equal(await pageA.getByText('所有裁判均已锁定判断', { exact: false }).count(), 0);
+    assert.equal(await pageA.getByText('全部裁判已锁定', { exact: false }).count(), 0);
     assert.equal(await pageA.getByText('当前独立裁判的题目将在房主开启本轮作答后汇总', { exact: false }).count(), 0);
 
-    await api(pageA, 'POST', base + '/question', { text: '统一作答开始' }, 1);
+    await api(pageC, 'POST', base + '/judge-questions', { text: '独立裁判统一问题' }, 1);
+    await api(pageA, 'POST', base + '/start', {}, 1);
+    const judgeChatStatus = await pageC.evaluate(async roomId => {
+      const response = await fetch('/api/rooms/' + roomId + '/chat?match_number=1');
+      return response.status;
+    }, roomId);
+    assert.equal(judgeChatStatus, 403);
     await openPersonalCenter(pageA);
     await openPersonalCenter(pageB);
+    await openPersonalCenter(pageC);
     await pageA.waitForTimeout(500);
     await pageB.waitForTimeout(500);
+    await pageC.waitForTimeout(500);
     const nameA = pageA.locator('form[data-form="profile-name"] input[name="display_name"]');
     const nameB = pageB.locator('form[data-form="profile-name"] input[name="display_name"]');
-    await visible(pageA.getByText('比赛进行中，暂不能修改名字'));
-    await visible(pageB.getByText('比赛进行中，暂不能修改名字'));
+    const nameC = pageC.locator('form[data-form="profile-name"] input[name="display_name"]');
+    for (const page of [pageA, pageB, pageC]) await visible(page.getByText('比赛进行中，暂不能修改名字'));
     assert.equal(await nameA.isDisabled(), true);
     assert.equal(await nameB.isDisabled(), true);
+    assert.equal(await nameC.isDisabled(), true);
     assert.equal(await pageA.locator('form[data-form="profile-name"] button[type="submit"]').isDisabled(), true);
 
     await pageA.locator('form[data-form="friend-search"] input[name="uid"]').fill(uidB);
@@ -112,14 +134,14 @@ async function closePersonalCenter(page) {
     await pageA.locator('#friendSearchResult [data-action="friend-add"]').click();
     await pageB.locator('[data-action="friend-accept"]').waitFor();
     await pageB.locator('[data-action="friend-accept"]').click();
-    await pageA.locator(\`[data-action="friend-note"][data-uid="\${uidB}"]\`).waitFor();
+    await pageA.locator(`[data-action="friend-note"][data-uid="${uidB}"]`).waitFor();
     pageA.once('dialog', dialog => dialog.accept('仅我可见的备注'));
-    await pageA.locator(\`[data-action="friend-note"][data-uid="\${uidB}"]\`).click();
+    await pageA.locator(`[data-action="friend-note"][data-uid="${uidB}"]`).click();
     await visible(pageA.getByText('仅我可见的备注'));
-    await pageA.locator(\`[data-action="friend-reset-note"][data-uid="\${uidB}"]\`).click();
+    await pageA.locator(`[data-action="friend-reset-note"][data-uid="${uidB}"]`).click();
     await visible(pageA.getByText('好友测试乙'));
 
-    await pageA.locator(\`[data-action="dm-open"][data-uid="\${uidB}"]\`).first().click();
+    await pageA.locator(`[data-action="dm-open"][data-uid="${uidB}"]`).first().click();
     const dmFormA = pageA.locator('form[data-form="dm-send"]');
     await visible(dmFormA);
     const messageText = '<img src=x onerror=alert(1)>私信纯文本';
@@ -128,22 +150,24 @@ async function closePersonalCenter(page) {
     await pageA.locator('.dm-message.mine').filter({ hasText: '私信纯文本' }).waitFor();
     assert.equal(await pageA.locator('#dmPanel img').count(), 0);
 
-    await pageB.locator(\`[data-action="dm-open"][data-uid="\${uidA}"]\`).first().click();
+    await pageB.locator(`[data-action="dm-open"][data-uid="${uidA}"]`).first().click();
     await pageB.locator('.dm-message:not(.mine)').filter({ hasText: '私信纯文本' }).waitFor();
     assert.equal(await pageB.locator('#dmPanel img').count(), 0);
 
     await api(pageA, 'POST', base + '/answers', { text: '房主回答' }, 1);
     await api(pageB, 'POST', base + '/answers', { text: '玩家回答' }, 1);
-    await api(pageA, 'POST', base + '/verdict', {
+    await api(pageC, 'POST', base + '/judge-verdict', {
       predictions: { [hostJoin.alias]: 'AI', [playerJoin.alias]: 'Human' },
-      evidence: '浏览器验收判决',
+      evidence: '浏览器验收独立裁判判决',
       confidence: 75,
     }, 1);
     await api(pageA, 'POST', base + '/reveal', { match_number: 1 }, 1);
     await waitEnabled(pageA, nameA);
     await waitEnabled(pageB, nameB);
-    assert.equal(await pageA.getByText('比赛进行中，暂不能修改名字').count(), 0);
-    assert.equal(await pageB.getByText('比赛进行中，暂不能修改名字').count(), 0);
+    await waitEnabled(pageC, nameC);
+    for (const page of [pageA, pageB, pageC]) {
+      assert.equal(await page.getByText('比赛进行中，暂不能修改名字').count(), 0);
+    }
 
     await closePersonalCenter(pageA);
     await pageA.locator('[data-action="friend-from-room"]').click();
@@ -161,13 +185,22 @@ async function closePersonalCenter(page) {
     await pageA.getByRole('button', { name: '个人中心', exact: true }).click();
     await visible(pageA.locator('form[data-form="friend-search"]'));
     assert(await pageA.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    const themeButton = pageA.locator('#themeBtn');
+    await themeButton.click();
+    assert.equal(await pageA.locator('body').getAttribute('data-theme'), 'dark');
+    assert(await pageA.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await pageA.screenshot({ path: path.join(artifacts, 'social-points-mobile-dark.png'), fullPage: true, animations: 'disabled' });
+    await themeButton.click();
+    assert.equal(await pageA.locator('body').getAttribute('data-theme'), 'light');
     await pageA.screenshot({ path: path.join(artifacts, 'social-points-mobile.png'), fullPage: true, animations: 'disabled' });
     await pageB.screenshot({ path: path.join(artifacts, 'social-points-result-desktop.png'), fullPage: true, animations: 'disabled' });
+    await pageC.screenshot({ path: path.join(artifacts, 'social-points-independent-judge.png'), fullPage: true, animations: 'disabled' });
 
     assert.deepEqual(errors, []);
   } finally {
     await contextA.close();
     await contextB.close();
+    await contextC.close();
     await browser.close();
   }
 })().catch(error => {
