@@ -284,7 +284,11 @@ async function logout(page) {
       assert.equal(await repair.getByText('缺少 API Key', { exact: true }).count(), 1);
       assert.equal(await repair.locator('[name="api_key"]').getAttribute('required'), '');
       await repair.locator('[name="api_key"]').fill('sk-browser-repaired');
+      const repairSaved = page.waitForResponse(response =>
+        response.url().endsWith('/api/me/models/' + ids[3]) && response.request().method() === 'PUT');
       await repair.locator('form[data-form="personal-model-edit"] [type="submit"]').click();
+      const repairResponse = await repairSaved;
+      assert.equal(repairResponse.status(), 200, await repairResponse.text());
       await page.locator('#toast').filter({ hasText: '个人模型配置已更新' }).waitFor();
       const repaired = page.locator('details[data-model-config][data-id="' + ids[3] + '"]');
       const repairedState = await (await context.request.get(site + '/api/me/models')).json();
