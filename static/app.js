@@ -1,7 +1,7 @@
 'use strict';
 const $ = (selector) => document.querySelector(selector);
 const app = $('#app');
-const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelSavePending:{},personalModelEpoch:0};
+const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelSavePending:{},personalModelEpoch:0,modelOperationRecords:[],modelOperationStats:{},modelOperationProfileOptions:[],modelOperationTotal:0,modelOperationOffset:0,modelOperationFilters:{profile_id:'',purpose:'',status:''},modelOperationsExpanded:false};
 const esc = (v) => String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const shortDate = s => s ? new Date(s).toLocaleString('zh-CN',{hour12:false}) : '';
 const val = (id) => document.getElementById(id)?.value??'';
@@ -100,6 +100,16 @@ async function loadPersonalModels(){
  }
  state.personalModels=next;state.modelApiEnabled=data.model_api_enabled!==false;return state.personalModels;
 }
+
+async function loadModelOperationRecords(){
+ const params=new URLSearchParams({limit:'20',offset:String(state.modelOperationOffset)});
+ for(const [key,value] of Object.entries(state.modelOperationFilters||{}))if(value)params.set(key,value);
+ const data=await api('/api/me/model-operations?'+params.toString());
+ state.modelOperationRecords=data.records||[];
+ state.modelOperationStats=data.stats||{};
+ state.modelOperationProfileOptions=data.profile_options||[];
+ state.modelOperationTotal=data.total||0;
+}
 async function loadRoomChat(){
  const r=state.room;if(!r||r.is_judge||r.status!=='open'){state.chat=[];return;}
  const data=await api(`/api/rooms/${r.id}/chat?match_number=${r.match_number}`);
@@ -177,7 +187,7 @@ async function openPersonalCenter(options={}){
  if(!options.fromHash){state.personalReturn=state.roomId&&state.room?{roomId:state.roomId,view:state.roomView,round:state.selectedRound}:null;}
  else if(!state.personalReturn)state.personalReturn=profileReturnFromHash();
  stopWs();const back=state.personalReturn;const hash=back?.roomId?`#profile?room=${back.roomId}&view=${encodeURIComponent(back.view)}&round=${back.round||1}`:'#profile';history.replaceState(null,'',hash);
- await loadPersonalModels();renderPersonalCenter();
+ await loadPersonalModels();await loadModelOperationRecords();renderPersonalCenter();
 }
 async function returnFromPersonalCenter(){
  const back=state.personalReturn;state.personalReturn=null;
@@ -289,6 +299,49 @@ function renderPersonalModelManager(){
  }).join('');
  return html;
 }
+
+function operationPurposeLabel(purpose){
+ return ({connection_test:'连接测试',judge_question:'AI 裁判出题',ai_answer:'AI 参赛者回答',judge_verdict:'AI 裁判最终判断'})[purpose]||purpose;
+}
+function operationStateLabel(state){
+ return ({queued:'排队中',requesting:'请求中',completed:'已完成',failed:'失败',blocked:'已阻止',stale:'已作废',interrupted:'已中断'})[state]||state;
+}
+function operationTokens(value){return value===null||value===undefined?'未返回':Number(value).toLocaleString('zh-CN');}
+function renderModelOperationRecords(){
+ const stats=state.modelOperationStats||{},records=state.modelOperationRecords||[];
+ const known=Number(stats.known_usage_records||0);
+ const uniqueProfiles=[];
+ for(const p of state.modelOperationProfileOptions||[]){
+  if(!uniqueProfiles.some(x=>Number(x.profile_id)===Number(p.profile_id)))uniqueProfiles.push(p);
+ }
+ const profileOptions=uniqueProfiles.map(p=>'<option value="'+esc(p.profile_id)+'" '+(String(state.modelOperationFilters.profile_id)===String(p.profile_id)?'selected':'')+'>'+esc(p.profile_name)+' · '+esc(p.model_name)+'</option>').join('');
+ const purposeOptions=[['connection_test','连接测试'],['judge_question','AI 裁判出题'],['ai_answer','AI 参赛者回答'],['judge_verdict','AI 裁判最终判断']]
+  .map(([value,label])=>'<option value="'+value+'" '+(state.modelOperationFilters.purpose===value?'selected':'')+'>'+label+'</option>').join('');
+ const stateOptions=[['queued','排队中'],['requesting','请求中'],['completed','已完成'],['failed','失败'],['blocked','已阻止'],['stale','已作废'],['interrupted','已中断']]
+  .map(([value,label])=>'<option value="'+value+'" '+(state.modelOperationFilters.status===value?'selected':'')+'>'+label+'</option>').join('');
+ const recordHtml=records.map(r=>{
+  const requestStatus=r.request_succeeded===true?'请求成功':r.request_succeeded===false?'请求失败':r.request_started_at?'请求结果待确认':'未进入请求阶段';
+  const resultStatus=r.result_applied?'结果已写入比赛':r.request_succeeded===true?'请求成功但结果未应用':'结果未应用';
+  const location=r.room_id?'ROOM '+r.room_id+' · 第 '+r.match_number+' 场'+(r.round_number?' · 第 '+r.round_number+' 轮':''):'独立测试';
+  const usage=r.usage_known?'输入 '+operationTokens(r.prompt_tokens)+' · 输出 '+operationTokens(r.completion_tokens)+' · 总计 '+operationTokens(r.total_tokens):'服务商未返回 Token 用量';
+  return '<article class="operation-record"><div class="label-line"><strong>'+esc(r.profile_name)+' · '+esc(r.model_name)+'</strong><span class="operation-status '+esc(r.state)+'">'+operationStateLabel(r.state)+'</span></div>'+
+   '<div class="tiny muted">'+esc(shortDate(r.queued_at))+' · '+operationPurposeLabel(r.purpose)+' · '+esc(location)+'</div>'+
+   '<div class="operation-meta"><span>'+requestStatus+'</span><span>'+resultStatus+'</span></div>'+
+   '<div class="tiny muted">等待 '+(r.queue_ms===null?'—':esc(r.queue_ms)+' ms')+' · 请求 '+(r.duration_ms===null?'—':esc(r.duration_ms)+' ms')+'</div>'+
+   '<div class="tiny muted">'+usage+'</div>'+
+   (r.trigger_uid?'<div class="tiny muted">配置所有者：当前账号 · 触发者：'+esc(r.trigger_name||r.trigger_uid)+' ('+esc(r.trigger_uid)+')</div>':'')+
+   (r.retry_of?'<div class="tiny muted">重试自任务 #'+esc(r.retry_of)+'</div>':'')+
+   (r.error_message?'<p class="operation-error">'+esc(r.error_message)+'</p>':'')+'</article>';
+ }).join('');
+ const pages=Math.max(1,Math.ceil(state.modelOperationTotal/20)),page=Math.floor(state.modelOperationOffset/20)+1;
+ return '<section class="card"><details data-model-operations-panel '+(state.modelOperationsExpanded?'open':'')+'><summary class="label-line"><strong>模型调用记录</strong><span class="pill">'+state.modelOperationTotal+' 条</span></summary><div class="model-operations-body">'+
+  '<div class="stat-row operation-stats"><div class="stat">任务尝试 <strong>'+Number(stats.task_attempts||0)+'</strong></div><div class="stat">已发起请求 <strong>'+Number(stats.request_attempts||0)+'</strong></div><div class="stat">请求成功 <strong>'+Number(stats.request_successes||0)+'</strong></div><div class="stat">失败 <strong>'+Number(stats.failures||0)+'</strong></div><div class="stat">结果已应用 <strong>'+Number(stats.applied_results||0)+'</strong></div></div>'+
+  '<p class="hint">当前保留记录的用量。已知 Token 合计：'+(known?operationTokens(stats.total_tokens)+'（'+known+' 条记录有用量）':'服务商未返回可汇总的 Token 用量')+'；清理比赛记录后，相应用量会同步清除。</p>'+
+  '<form data-form="model-operation-filters" class="operation-filters"><select name="profile_id"><option value="">全部模型配置</option>'+profileOptions+'</select><select name="purpose"><option value="">全部用途</option>'+purposeOptions+'</select><select name="status"><option value="">全部状态</option>'+stateOptions+'</select><button class="small" type="submit">筛选</button></form>'+
+  '<div class="operation-list">'+(recordHtml||D('没有符合筛选条件的调用记录。'))+'</div>'+
+  '<div class="label-line operation-pagination"><span class="tiny muted">第 '+page+' / '+pages+' 页</span><div class="buttonrow"><button class="small" data-action="model-operations-page" data-direction="prev" '+(state.modelOperationOffset<=0?'disabled':'')+'>上一页</button><button class="small" data-action="model-operations-page" data-direction="next" '+(state.modelOperationOffset+20>=state.modelOperationTotal?'disabled':'')+'>下一页</button></div></div>'+
+  '</div></details></section>';
+}
 function renderPersonalCenter({skipModelDraftKey=null}={}){
  const u=state.me?.user;if(!u){clearPersonalModelState();renderAuth();return;}
  capturePersonalModelDrafts(skipModelDraftKey);
@@ -298,7 +351,7 @@ function renderPersonalCenter({skipModelDraftKey=null}={}){
  '<div class="personal-layout"><div class="stack">'+
  '<section class="card"><h2>基本资料</h2><div class="uid-row"><div><label class="field">UID（不可修改）</label><div class="code"> '+esc(u.uid)+'</div></div><button class="small" data-action="copy-uid" data-uid="'+esc(u.uid)+'">复制 UID</button></div><form data-form="profile-name" class="spaced"><label class="field">名字</label><input name="display_name" type="text" maxlength="40" required value="'+esc(u.display_name)+'"><div class="form-actions"><button class="primary" type="submit">保存名字</button></div></form></section>'+
  '<section class="card"><h2>修改密码</h2><p class="hint">修改成功后，当前账号的所有登录会话都会退出，需要使用新密码重新登录。</p><form data-form="change-password"><label class="field">当前密码</label><input name="current_password" type="password" autocomplete="current-password" maxlength="200" required><label class="field">新密码（8～200 位）</label><input name="new_password" type="password" autocomplete="new-password" minlength="8" maxlength="200" required><label class="field">确认新密码</label><input name="confirm_password" type="password" autocomplete="new-password" minlength="8" maxlength="200" required><div class="form-actions"><button class="primary" type="submit">修改密码并退出登录</button></div></form></section>'+
- '</div><div class="stack"><section class="card"><h2>个人模型 API</h2>'+renderPersonalModelManager()+'</section></div></div>';
+ '</div><div class="stack"><section class="card"><h2>个人模型 API</h2>'+renderPersonalModelManager()+'</section>'+renderModelOperationRecords()+'</div></div>';
 }
 function modelProfileOptions(r){
  const profiles=(state.personalModels||[]).filter(p=>p.credential_status==='ok');
