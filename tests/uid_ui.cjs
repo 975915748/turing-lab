@@ -264,11 +264,68 @@ async function logout(page) {
       await second.locator('[name="api_key"]').fill('sk-second-draft');
       await first.locator('[name="model"]').fill('saved-model-first');
       await first.locator('[name="api_key"]').fill('');
+
+      // A slow test of the old saved profile must not overwrite the new profile
+      // or a newer test started after the profile has been saved.
+      const testUrl = '**/api/me/models/' + ids[0] + '/test';
+      let releaseFirstTest, releaseSecondTest, firstTestStartedResolve, secondTestStartedResolve;
+      const firstTestGate = new Promise(resolve => { releaseFirstTest = resolve; });
+      const secondTestGate = new Promise(resolve => { releaseSecondTest = resolve; });
+      const firstTestStarted = new Promise(resolve => { firstTestStartedResolve = resolve; });
+      const secondTestStarted = new Promise(resolve => { secondTestStartedResolve = resolve; });
+      let testRequestCount = 0;
+      await page.route(testUrl, async route => {
+        const index = ++testRequestCount;
+        const response = await route.fetch();
+        if (index === 1) {
+          firstTestStartedResolve();
+          await firstTestGate;
+        } else if (index === 2) {
+          secondTestStartedResolve();
+          await secondTestGate;
+        }
+        await route.fulfill({ response });
+      });
+      const oldTestResponsePromise = page.waitForResponse(response =>
+        response.url().endsWith('/api/me/models/' + ids[0] + '/test') && response.request().method() === 'POST');
+      await first.locator('[data-action="test-personal-model"]').click();
+      await firstTestStarted;
+
+      const saveResponsePromise = page.waitForResponse(response =>
+        response.url().endsWith('/api/me/models/' + ids[0]) && response.request().method() === 'PUT');
       await first.locator('form[data-form="personal-model-edit"] [type="submit"]').click();
+      const saveResponse = await saveResponsePromise;
+      assert.equal(saveResponse.status(), 200, await saveResponse.text());
       await page.locator('#toast').filter({ hasText: '个人模型配置已更新' }).waitFor();
 
       const firstAfterSave = page.locator('details[data-model-config][data-id="' + ids[0] + '"]');
       const secondAfterSave = page.locator('details[data-model-config][data-id="' + ids[1] + '"]');
+      const newTestResponsePromise = page.waitForResponse(response =>
+        response.url().endsWith('/api/me/models/' + ids[0] + '/test') && response.request().method() === 'POST');
+      await firstAfterSave.locator('[data-action="test-personal-model"]').click();
+      await secondTestStarted;
+
+      // Resolve the old request while the newer test is still pending.
+      releaseFirstTest();
+      const oldTestResponse = await oldTestResponsePromise;
+      assert.equal(oldTestResponse.status(), 200);
+      await page.waitForTimeout(30);
+      assert.equal(await page.evaluate(id => state.modelTestResults[id] ?? null, ids[0]), null,
+        '旧配置的迟到测试结果不能写入新配置状态');
+      assert.equal(await firstAfterSave.locator('[data-action="test-personal-model"]').isDisabled(), true,
+        '旧请求结束不能提前解除新测试的加载状态');
+
+      releaseSecondTest();
+      const newTestResponse = await newTestResponsePromise;
+      assert.equal(newTestResponse.status(), 200);
+      await firstAfterSave.locator('[data-model-test-result]').getByText('已保存配置连接测试成功', { exact: false }).waitFor();
+      assert.equal(await page.evaluate(id => state.modelTestResults[id]?.profileSnapshot ===
+        JSON.stringify([id, 'saved-model-first', 'https://api.example.com/v1', 'saved-model-first', 0.7, 512, 30, true, 'ok']), ids[0]), true,
+        '最新测试结果必须绑定到已保存的新配置快照');
+      await page.unroute(testUrl);
+
+      assert.equal(await firstAfterSave.evaluate(el => el.open), true, '保存后应保留第一条配置的展开状态');
+      assert.equal(await secondAfterSave.evaluate(el => el.open), true, '保存其他配置时不应折叠第二条配置');
       assert.equal(await firstAfterSave.evaluate(el => el.open), true, '保存后应保留第一条配置的展开状态');
       assert.equal(await secondAfterSave.evaluate(el => el.open), true, '保存其他配置时不应折叠第二条配置');
       assert.equal(await firstAfterSave.locator('[name="model"]').inputValue(), 'saved-model-first');
@@ -337,8 +394,10 @@ async function logout(page) {
         drafts: state.personalModelDrafts,
         expanded: state.personalModelExpanded,
         tests: state.modelTestResults,
+        pending: state.personalModelTestPending,
+        versions: state.personalModelTestVersions,
       }));
-      assert.deepEqual(cleared, { drafts: {}, expanded: {}, tests: {} });
+      assert.deepEqual(cleared, { drafts: {}, expanded: {}, tests: {}, pending: {}, versions: {} });
     } else if (scenario === 'questions') {
       await page.getByRole('button', { name: '使用旧登录名', exact: true }).click();
       await page.locator('[name="username"]').fill('browser_admin');
