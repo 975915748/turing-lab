@@ -1163,8 +1163,12 @@ def public_room(db, room, user, mine):
             WHERE room_id=? AND match_number=? AND round_number=?
             ORDER BY id DESC LIMIT 30''',
             (room['id'],room['match_number'],room['current_round'])).fetchall()
+        has_current_round=bool(db.execute('SELECT 1 FROM rounds WHERE room_id=? AND number=?',
+                                           (room['id'],room['current_round'])).fetchone())
         result.update({
-            'readiness':match_readiness(db,room),
+            # Clearing completed records removes the old round rows as well; do not
+            # make a read-only room refresh fail while waiting for the next match.
+            'readiness':match_readiness(db,room) if has_current_round else None,
             'model_operations':[model_operation_view(row) for row in operations],
             'model_request_count':model_request_count(db,room['id'],room['match_number']),
             'model_request_limit':room['model_request_limit'],
