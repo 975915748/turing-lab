@@ -452,8 +452,9 @@ async function logout(page) {
         tests: state.modelTestResults,
         pending: state.personalModelTestPending,
         versions: state.personalModelTestVersions,
+        saving: state.personalModelSavePending,
       }));
-      assert.deepEqual(cleared, { drafts: {}, expanded: {}, tests: {}, pending: {}, versions: {} });
+      assert.deepEqual(cleared, { drafts: {}, expanded: {}, tests: {}, pending: {}, versions: {}, saving: {} });
     } else if (scenario === 'questions') {
       await page.getByRole('button', { name: '使用旧登录名', exact: true }).click();
       await page.locator('[name="username"]').fill('browser_admin');
