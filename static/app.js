@@ -187,10 +187,12 @@ function ensurePersonalModelEditorOwner(){
   state.personalModelDraftOwner=owner;
   state.personalModelExpanded={};
   state.personalModelDrafts={};
+  return true;
  }
+ return false;
 }
 function capturePersonalModelDrafts(){
- ensurePersonalModelEditorOwner();
+ if(ensurePersonalModelEditorOwner())return;
  for(const card of app.querySelectorAll('details[data-personal-model]')){
   state.personalModelExpanded[String(card.dataset.id)]=card.open;
  }
@@ -234,8 +236,8 @@ function renderPersonalModelManager(){
 }
 function renderPersonalCenter({captureDrafts=true}={}){
  stopWs();const u=state.me?.user;if(!u){clearPersonalModelEditorState();renderAuth();return;}
- ensurePersonalModelEditorOwner();
- if(captureDrafts)capturePersonalModelDrafts();
+ const ownerChanged=ensurePersonalModelEditorOwner();
+ if(captureDrafts&&!ownerChanged)capturePersonalModelDrafts();
  app.innerHTML=`<div class="pagehead"><div><div class="overline">ACCOUNT / PERSONAL CENTER</div><h1>个人中心</h1><p class="muted">管理当前账号的基本资料、登录密码和个人模型 API 配置。</p></div><div class="buttonrow"><button data-action="personal-back">← 返回${state.personalReturn?.roomId?'房间':'大厅'}</button></div></div>
  <div class="personal-layout"><div class="stack">
  <section class="card"><h2>基本资料</h2><div class="uid-row"><div><label class="field">UID（不可修改）</label><div class="code"> ${esc(u.uid)}</div></div><button class="small" data-action="copy-uid" data-uid="${esc(u.uid)}">复制 UID</button></div><form data-form="profile-name" class="spaced"><label class="field">名字</label><input name="display_name" type="text" maxlength="40" required value="${esc(u.display_name)}"><div class="form-actions"><button class="primary" type="submit">保存名字</button></div></form></section>
