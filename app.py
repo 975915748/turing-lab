@@ -2966,7 +2966,8 @@ def create_app(db_path=None):
         return {'ok':True}
 
     @app.post('/api/rooms/{room_id}/ai-judges/verdicts/generate')
-    async def generate_ai_judge_verdicts(room_id:int,request:Request):
+    async def generate_ai_judge_verdicts(room_id:int,request:Request,
+                                         target_judge_id:Optional[int]=Query(default=None,ge=1)):
         with connection() as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
@@ -2983,15 +2984,40 @@ def create_app(db_path=None):
                 JOIN users profile_owner ON profile_owner.id=mp.owner_user_id AND profile_owner.deleted_at IS NULL
                 LEFT JOIN ai_judge_verdicts v ON v.room_id=j.room_id AND v.ai_judge_id=j.id
                 WHERE j.room_id=? AND v.ai_judge_id IS NULL ORDER BY j.id''',(room_id,)).fetchall()
+            if target_judge_id is not None:
+                rows=[row for row in rows if row['judge_id']==target_judge_id]
             match_number=room['match_number']
             actor_id=u['id']
             session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
             profiles=[dict(row) for row in rows]
+            retry_of=getattr(request.state,'model_operation_retry_of',None)
+            queued_profiles=[]
+            for profile in profiles:
+                with connection(immediate=True) as task_db:
+                    operation_id,created,active_state=create_model_operation_task(
+                        task_db,purpose='judge_verdict',target_type='ai_judge',
+                        target_key=profile['judge_id'],target_label=profile['label'],
+                        profile=profile,trigger_user_id=actor_id,room_id=room_id,
+                        match_number=match_number,round_number=room['current_round'],
+                        context_revision=evidence_revision,retry_of=retry_of,
+                        idempotency_key=request.headers.get('Idempotency-Key'))
+                if created:
+                    profile['_operation_id']=operation_id
+                    queued_profiles.append(profile)
+                else:
+                    results.append({'judge_id':profile['judge_id'],'status':active_state,
+                                    'reason':'该席位已有进行中的模型任务。'})
+            profiles=queued_profiles
+        if profiles:
+            await app.state.hub.notify(room_id,'model_operation_updated')
         if not profiles:
-            return {'generated':0,'skipped':0,'failed':[]}
+            return {'generated':0,'skipped':sum(x['status']=='skipped' for x in results),
+                    'blocked':sum(x['status']=='blocked' for x in results),
+                    'failed':[],'results':results}
 
         async def generate_one(profile):
             judge_id=profile['judge_id']
+            operation_id=profile['_operation_id']
             try:
                 key=decrypt_api_key(profile['api_key_encrypted'])
                 def preflight():
@@ -3019,7 +3045,8 @@ def create_app(db_path=None):
                      '严格返回 JSON 对象，不要使用 Markdown 代码块或附加说明。结构：'
                      '{"predictions":{"A":"Human"},"evidence":"判断依据","confidence":0,"weakness":"最不确定之处","possible_error":"可能误判原因"}。'
                      'predictions 的值只能是 Human 或 AI，confidence 必须为 0 到 100 的整数。')},
-                    {'role':'user','content':packet}],key,preflight)
+                    {'role':'user','content':packet}],key,preflight,
+                    operation_id=operation_id)
                 payload=parse_json_object(result['text'])
                 verdict=VerdictData.model_validate(payload)
                 if set(verdict.predictions)!=set(roster) or not all(v in ('Human','AI') for v in verdict.predictions.values()):
@@ -3029,24 +3056,30 @@ def create_app(db_path=None):
                 with connection(immediate=True) as db:
                     current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
                     if not current or current['match_number']!=match_number or current['status']!='open':
+                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间比赛场次或状态发生变化，旧判决未保存。')
                         return {'judge_id':judge_id,'status':'skipped'}
                     if not model_call_actor_valid(db,room_id,actor_id,session_hash) or not model_profile_owner_active(db,profile['id']):
+                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间登录权限或模型配置所属账号发生变化，旧判决未保存。')
                         return {'judge_id':judge_id,'status':'skipped'}
                     binding=db.execute('SELECT model_profile_id FROM ai_judges WHERE room_id=? AND id=?',
                                        (room_id,judge_id)).fetchone()
                     if not binding or binding['model_profile_id']!=profile['id']:
+                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间 AI 裁判席绑定发生变化，旧判决未保存。')
                         return {'judge_id':judge_id,'status':'skipped'}
                     states=db.execute('SELECT status FROM rounds WHERE room_id=?',(room_id,)).fetchall()
                     if not states or any(x['status']!='revealed' for x in states):
-                        return {'judge_id':judge_id,'status':'failed',
-                                'error':'比赛资料在模型判断期间发生变化，已废弃旧判决，请重新生成。'}
+                        finish_model_operation_in_db(db,operation_id,'stale',error='比赛资料在模型判断期间发生变化，已废弃旧判决，请重新生成。')
+                        return {'judge_id':judge_id,'status':'skipped',
+                                'reason':'比赛资料发生变化，旧判决已作废。'}
                     current_packet=anonymous_match_packet(db,room_id)
                     current_revision=hashlib.sha256(current_packet.encode('utf-8')).hexdigest()
                     if current_revision!=evidence_revision:
-                        return {'judge_id':judge_id,'status':'failed',
-                                'error':'比赛资料在模型判断期间发生变化，已废弃旧判决，请重新生成。'}
+                        finish_model_operation_in_db(db,operation_id,'stale',error='比赛资料在模型判断期间发生变化，已废弃旧判决，请重新生成。')
+                        return {'judge_id':judge_id,'status':'skipped',
+                                'reason':'比赛资料发生变化，旧判决已作废。'}
                     if db.execute('SELECT 1 FROM ai_judge_verdicts WHERE room_id=? AND ai_judge_id=?',
                                   (room_id,judge_id)).fetchone():
+                        finish_model_operation_in_db(db,operation_id,'stale',error='该 AI 裁判已经锁定判断，旧结果未重复保存。')
                         return {'judge_id':judge_id,'status':'skipped'}
                     locked=utcnow()
                     data=verdict.model_dump()
@@ -3054,18 +3087,24 @@ def create_app(db_path=None):
                     db.execute('INSERT INTO ai_judge_verdicts(room_id,ai_judge_id,verdict_json,locked_at) VALUES(?,?,?,?)',
                                (room_id,judge_id,json.dumps(data,ensure_ascii=False),locked))
                     log_event(db,room_id,current['current_round'],'ai_judge_verdict_locked','AI 裁判','模型 API 已自动完成最终判断并锁定')
+                    finish_model_operation_in_db(db,operation_id,'completed',result_applied=True)
                 await app.state.hub.notify(room_id,'ai_judge_verdict_locked')
                 return {'judge_id':judge_id,'status':'generated','usage':result['usage']}
+            except ModelRequestLimitReached as exc:
+                return {'judge_id':judge_id,'status':'blocked','error':str(exc)}
             except ModelCallCancelled:
                 return {'judge_id':judge_id,'status':'skipped'}
             except ModelAPIError as exc:
+                await finish_and_notify_model_operation(operation_id,'failed',error=exc)
                 return {'judge_id':judge_id,'status':'failed','error':str(exc)}
             except Exception as exc:
+                await finish_and_notify_model_operation(operation_id,'failed',error=exc)
                 return {'judge_id':judge_id,'status':'failed','error':'AI 裁判返回格式无效或模型调用失败，请检查配置后重试。'}
 
         results=await asyncio.gather(*(generate_one(profile) for profile in profiles))
         return {'generated':sum(x['status']=='generated' for x in results),
                 'skipped':sum(x['status']=='skipped' for x in results),
+                'blocked':sum(x['status']=='blocked' for x in results),
                 'failed':[x for x in results if x['status']=='failed'],'results':results}
 
     @app.post('/api/rooms/{room_id}/ai-judges/{judge_id}/verdict')
