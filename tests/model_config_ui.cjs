@@ -174,6 +174,7 @@ async function registerPlayer(browser, username, displayName) {
     const playerTwo = await registerPlayer(browser, 'question_player_two', '问题玩家二');
 
     await page.goto(site + '#room=' + roomAuto.room_id);
+    await page.getByText('自动出题 UI 验收', { exact: true }).waitFor();
     assert.equal(await page.getByText('人类玩家互相可见真实账号身份；裁判包仅含匿名代号。', { exact: true }).count(), 0);
     assert.equal(await page.getByText('在房主管理台选择以人类身份加入。', { exact: true }).count(), 1);
     await page.screenshot({ path: path.join(artifacts, 'room-player-p5-p6.png'), fullPage: true });
@@ -233,9 +234,12 @@ async function registerPlayer(browser, username, displayName) {
     assert.equal(autoRoom.rounds[0].questions.length, 1);
     assert.equal(autoRoom.rounds[0].status, 'collecting');
 
-    await mutate(playerOne, '/api/join', { code: roomManual.code, role: 'player' });
-    await mutate(playerTwo, '/api/join', { code: roomManual.code, role: 'player' });
+    const playerThree = await registerPlayer(browser, 'question_player_three', '问题玩家三');
+    const playerFour = await registerPlayer(browser, 'question_player_four', '问题玩家四');
+    await mutate(playerThree, '/api/join', { code: roomManual.code, role: 'player' });
+    await mutate(playerFour, '/api/join', { code: roomManual.code, role: 'player' });
     await page.goto(site + '#room=' + roomManual.room_id);
+    await page.getByText('手动生成 UI 验收', { exact: true }).waitFor();
     await page.locator('[data-action="room-view"][data-view="ai-judges"]').click();
     generateButton = page.locator('[data-action="generate-ai-questions"]');
     assert.equal(await generateButton.isEnabled(), true);
