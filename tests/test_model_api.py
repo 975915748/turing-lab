@@ -838,6 +838,7 @@ def test_ai_question_is_not_saved_if_model_profile_changes_during_generation(tmp
             me = (await mutator.get('/api/me')).json()['user']
             changed_profile = dict(profile_body)
             changed_profile['name'] = '出题模型（生成期间已编辑）'
+            changed_profile['model'] = 'question-model-updated'
             changed_profile['api_key'] = ''
             changed = await mutator.put(
                 f'/api/me/models/{profile_id}', json=changed_profile,
