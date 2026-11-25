@@ -1,13 +1,13 @@
 'use strict';
 const $ = (selector) => document.querySelector(selector);
 const app = $('#app');
-const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelSavePending:{},personalModelEpoch:0,modelOperationRecords:[],modelOperationStats:{},modelOperationProfileOptions:[],modelOperationTotal:0,modelOperationOffset:0,modelOperationFilters:{profile_id:'',purpose:'',status:''},modelOperationsExpanded:false};
+const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelSavePending:{},personalModelEpoch:0,modelOperationRecords:[],modelOperationStats:{},modelOperationProfileOptions:[],modelOperationTotal:0,modelOperationOffset:0,modelOperationFilters:{profile_id:'',purpose:'',status:''},modelOperationsExpanded:false,modelOperationRequestVersion:0,modelOperationHistoryPanels:{}};
 const esc = (v) => String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const shortDate = s => s ? new Date(s).toLocaleString('zh-CN',{hour12:false}) : '';
 const val = (id) => document.getElementById(id)?.value??'';
 const D = (txt='暂无记录') => `<p class="muted hint">${esc(txt)}</p>`;
 let toastTimer;
-function clearPersonalModelState(){state.personalModelEpoch=(state.personalModelEpoch||0)+1;state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};state.personalModelTestVersions={};state.personalModelTestPending={};state.personalModelSavePending={};state.modelOperationRecords=[];state.modelOperationStats={};state.modelOperationProfileOptions=[];state.modelOperationTotal=0;state.modelOperationOffset=0;state.modelOperationFilters={profile_id:'',purpose:'',status:''};state.modelOperationsExpanded=false;}
+function clearPersonalModelState(){state.personalModelEpoch=(state.personalModelEpoch||0)+1;state.modelOperationRequestVersion=(state.modelOperationRequestVersion||0)+1;state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};state.personalModelTestVersions={};state.personalModelTestPending={};state.personalModelSavePending={};state.modelOperationRecords=[];state.modelOperationStats={};state.modelOperationProfileOptions=[];state.modelOperationTotal=0;state.modelOperationOffset=0;state.modelOperationFilters={profile_id:'',purpose:'',status:''};state.modelOperationsExpanded=false;state.modelOperationHistoryPanels={};}
 function toast(message){const el=$('#toast');el.textContent=message;el.classList.add('visible');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('visible'),4200)}
 function setConnection(txt,online){const el=$('#connection');el.textContent=(online?'● ':'○ ')+txt;el.className='connection'+(online?' online':'')}
 function applyPrefs(){let theme=localStorage.getItem('turing_theme')||'light';document.body.dataset.theme=theme;$('#themeBtn').textContent=theme==='light'?'☾ 深色':'☀ 日间';let f=Number(localStorage.getItem('turing_font')||15);if(f<12||f>22)f=15;document.documentElement.style.setProperty('--font',f+'px');$('#fontSize').value=f;$('#fontValue').textContent=f;}
@@ -102,9 +102,14 @@ async function loadPersonalModels(){
 }
 
 async function loadModelOperationRecords(){
+ const uid=state.me?.user?.uid,epoch=state.personalModelEpoch;
+ if(!uid)return;
+ const version=++state.modelOperationRequestVersion;
  const params=new URLSearchParams({limit:'20',offset:String(state.modelOperationOffset)});
  for(const [key,value] of Object.entries(state.modelOperationFilters||{}))if(value)params.set(key,value);
  const data=await api('/api/me/model-operations?'+params.toString());
+ if(state.personalModelEpoch!==epoch||state.me?.user?.uid!==uid||
+    state.modelOperationRequestVersion!==version)return;
  state.modelOperationRecords=data.records||[];
  state.modelOperationStats=data.stats||{};
  state.modelOperationProfileOptions=data.profile_options||[];
@@ -435,7 +440,7 @@ function judgeAdminPanel(r){
 }
 
 function renderReadinessPanel(r){
- const x=r.readiness;if(!x)return '';
+ const x=r.readiness;if(!x||x.phase!=='draft')return '';
  const limit=x.model_request_limit===null?'不限':x.model_request_limit;
  const blockers=(x.blockers||[]).map(message=>'<li>'+esc(message)+'</li>').join('');
  const notices=(x.notices||[]).map(message=>'<li>'+esc(message)+'</li>').join('');
@@ -443,13 +448,14 @@ function renderReadinessPanel(r){
  if(x.can_generate_and_start)actions+='<button class="primary" data-action="start-round" data-generate-questions="true">生成问题并开始</button>';
  if(x.can_start)actions+='<button data-action="start-round" data-generate-questions="false">按已提交问题开始</button>';
  if(!x.can_start&&!x.can_generate_and_start){
+  if(x.participant_count<2)actions+='<button class="small" data-action="room-view" data-view="admin">前往房主管理台补足参赛者</button>';
   if(x.manual_question_required)actions+='<button class="small" data-action="focus-manual-question">前往外部裁判问题录入</button>';
-  else if(x.suggested_view&&x.suggested_view!=='admin')actions+='<button class="small" data-action="room-view" data-view="'+esc(x.suggested_view)+'">前往裁判管理</button>';
+  else if(x.participant_count>=2&&x.suggested_view&&x.suggested_view!=='admin')actions+='<button class="small" data-action="room-view" data-view="'+esc(x.suggested_view)+'">前往裁判管理</button>';
  }
  return '<section class="card compact readiness-card"><div class="label-line"><h2>本轮准备</h2><span class="pill">'+(x.can_start?'可以开始':'尚未就绪')+'</span></div>'+
   '<div class="readiness-grid"><div><span class="tiny muted">参赛者</span><strong>'+x.participant_count+' 人已加入</strong></div>'+
   '<div><span class="tiny muted">裁判问题</span><strong>已提交 '+x.submitted_judges+' / '+x.total_judges+' 位裁判 · '+x.question_count+' 份</strong></div>'+
-  '<div><span class="tiny muted">自动席位</span><strong>'+x.auto_pending+' 位 AI 裁判待出题</strong></div>'+
+  '<div><span class="tiny muted">自动席位</span><strong>'+x.auto_pending+' 位可用模型 AI 裁判待出题'+(x.unavailable_ai_pending?' · '+x.unavailable_ai_pending+' 位配置不可用':'')+'</strong></div>'+
   '<div><span class="tiny muted">本场请求</span><strong>已尝试 '+x.model_request_count+' / '+limit+'</strong></div></div>'+
   (blockers?'<ul class="readiness-messages danger-text">'+blockers+'</ul>':'')+
   (notices?'<ul class="readiness-messages">'+notices+'</ul>':'')+
@@ -459,10 +465,10 @@ function renderReadinessPanel(r){
   '</section>';
 }
 function renderModelOperationPanel(r){
- const tasks=r.model_operations||[];
- if(!tasks.length)return '';
- const items=tasks.map(t=>{
-  const retryable=['failed','interrupted','blocked'].includes(t.state);
+ const tasks=r.model_operations||[],history=r.model_operation_history||[];
+ const historyKey=String(r.id)+':'+String(r.match_number);
+ const renderTask=(t,allowRetry)=>{
+  const retryable=allowRetry&&['failed','interrupted','blocked'].includes(t.state);
   const request=t.request_succeeded===true?'请求成功':t.request_succeeded===false?'请求失败':t.request_started_at?'请求结果待确认':'尚未开始请求';
   const applied=t.result_applied?'已写入比赛':t.request_succeeded===true?'结果未应用':'未写入比赛';
   const usage=t.usage_known?'Token：'+operationTokens(t.total_tokens):'Token：未返回';
@@ -474,8 +480,10 @@ function renderModelOperationPanel(r){
    (t.error_message?'<p class="operation-error">'+esc(t.error_message)+'</p>':'')+
    (retryable?'<div class="buttonrow spaced"><button class="small" data-action="retry-model-operation" data-id="'+t.id+'">重试此席位</button></div>':'')+
    '</article>';
- }).join('');
- return '<section class="card compact"><div class="label-line"><h2>模型调用状态</h2><span class="pill">'+tasks.length+' 个任务</span></div><p class="hint">显示本场当前轮次的模型任务。请求成功与结果写入比赛分别记录。</p><div class="operation-list">'+items+'</div></section>';
+ };
+ const currentHtml=tasks.length?'<section class="card compact"><div class="label-line"><h2>模型调用状态</h2><span class="pill">'+tasks.length+' 个任务</span></div><p class="hint">显示本场当前阶段的模型任务。</p><div class="operation-list">'+tasks.map(t=>renderTask(t,true)).join('')+'</div></section>':'';
+ const historyHtml=history.length?'<section class="card compact"><details class="operation-history" data-model-operation-history data-key="'+esc(historyKey)+'" '+(state.modelOperationHistoryPanels[historyKey]?'open':'')+'><summary class="label-line"><strong>历史模型调用</strong><span class="pill">'+history.length+' 条</span></summary><div class="operation-history-body"><p class="hint">本场此前阶段的调用记录；旧阶段任务不能在这里重试。</p><div class="operation-list">'+history.map(t=>renderTask(t,false)).join('')+'</div></div></details></section>':'';
+ return currentHtml+historyHtml;
 }
 function renderJudgeWorkflowPanel(r){
  const judges=r.judges||[];
@@ -567,6 +575,7 @@ app.addEventListener('toggle',e=>{
  if(e.target.matches('details[data-packet-panel]'))state.packetPanels[e.target.dataset.key]=e.target.open;
  if(e.target.matches('details[data-model-config]'))state.personalModelExpanded[Number(e.target.dataset.id)]=e.target.open;
  if(e.target.matches('[data-model-operations-panel]'))state.modelOperationsExpanded=!!e.target.open;
+ if(e.target.matches('details[data-model-operation-history]'))state.modelOperationHistoryPanels[e.target.dataset.key]=e.target.open;
 },true);
 app.addEventListener('input',e=>{
  const modelForm=e.target.closest('form[data-form="personal-model-edit"]');
