@@ -306,7 +306,7 @@ function judgeAdminPanel(r){
   html+='<div class="divider"></div><form data-form="ai-judge-question"><h3>代录 AI 裁判的第 '+r.current_round+' 轮问题</h3><p class="hint">手动转录或配置暂不可用的 AI 裁判，每席每轮只能提交一次。</p><select name="judge_id">'+pendingAis.map(j=>'<option value="'+j.id+'">'+esc(j.label)+'</option>').join('')+'</select><textarea name="text" data-draft="ai-judge-question" maxlength="3000" required placeholder="粘贴 AI 裁判提出的问题原文…">'+myDraft('ai-judge-question')+'</textarea><div class="form-actions"><button class="primary" type="submit">提交 AI 裁判问题</button></div></form>';
  }
  if(!r.revealed_at&&!r.verdict_locked){
-  html+='<div class="divider"></div><form data-form="add-ai-judge"><h3>添加 AI 裁判</h3><label class="field">AI 裁判名称</label><input type="text" name="name" required maxlength="60" placeholder="例如 DeepSeek-R1"><label class="field">个人模型配置</label><select name="model_profile_id">'+modelProfileOptions(r)+'</select><p class="hint">选择模型配置即授权本房间房主和全站管理员通过比赛操作触发调用；服务商可能按实际调用量计费。</p><div class="form-actions"><button class="primary" type="submit">＋ 添加 AI 裁判</button></div></form>';
+  html+='<div class="divider"></div><form data-form="add-ai-judge"><h3>添加 AI 裁判</h3><label class="field">AI 裁判名称</label><input type="text" name="name" required maxlength="60" placeholder="例如 DeepSeek-R1"><label class="field">个人模型配置</label><select name="model_profile_id">'+modelProfileOptions(r)+'</select><div class="form-actions"><button class="primary" type="submit">＋ 添加 AI 裁判</button></div></form>';
  }
  if(!r.revealed_at&&r.rounds.every(x=>x.status==='revealed')&&autoAwaiting.length){
   html+='<div class="divider"></div><p class="hint">'+autoAwaiting.length+' 位模型 AI 裁判尚未完成最终判断。</p><button class="primary" data-action="generate-ai-verdicts">让模型自动完成最终判断</button>';
