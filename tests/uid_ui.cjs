@@ -439,8 +439,9 @@ async function logout(page) {
       await page.locator('#toast').filter({ hasText: '成功生成 1 个 AI 裁判问题' }).waitFor();
       await page.locator('form[data-form="ai-judge-question"]').waitFor();
       await page.locator('form[data-form="ai-judge-question"] textarea[name="text"]').fill('第二轮手动转录问题。');
+      const manualJudgeId = await page.locator('form[data-form="ai-judge-question"] select[name="judge_id"]').inputValue();
       const manualQuestionSaved = page.waitForResponse(response =>
-        response.url().endsWith('/ai-judge-questions') && response.request().method() === 'POST');
+        response.url().endsWith('/ai-judges/' + manualJudgeId + '/questions') && response.request().method() === 'POST');
       await page.locator('form[data-form="ai-judge-question"] [type="submit"]').click();
       const manualResponse = await manualQuestionSaved;
       assert.equal(manualResponse.status(), 200, await manualResponse.text());
