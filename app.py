@@ -1727,6 +1727,82 @@ def create_app(db_path=None):
         return {'ok':True,'model':profile['model'],'preview':result['text'][:120],
                 'latency_ms':round((time.perf_counter()-started)*1000),'usage':result['usage']}
 
+
+    @app.get('/api/me/model-operations')
+    def list_my_model_operations(request:Request,profile_id:Optional[int]=Query(default=None,ge=1),
+                                 purpose:Optional[str]=Query(default=None),
+                                 status:Optional[str]=Query(default=None),
+                                 limit:int=Query(default=20,ge=1,le=100),
+                                 offset:int=Query(default=0,ge=0)):
+        allowed_purposes={'connection_test','judge_question','ai_answer','judge_verdict'}
+        allowed_states={'queued','requesting','completed','failed','blocked','stale','interrupted'}
+        if purpose is not None and purpose not in allowed_purposes:
+            raise HTTPException(422,'调用用途筛选值无效。')
+        if status is not None and status not in allowed_states:
+            raise HTTPException(422,'调用状态筛选值无效。')
+        with connection() as db:
+            u=caller(request,db)
+            clauses=['profile_owner_user_id=?']
+            params=[u['id']]
+            if profile_id is not None:
+                clauses.append('profile_id=?')
+                params.append(profile_id)
+            if purpose is not None:
+                clauses.append('purpose=?')
+                params.append(purpose)
+            if status is not None:
+                clauses.append('state=?')
+                params.append(status)
+            where=' AND '.join(clauses)
+            total=int(db.execute(f'SELECT COUNT(*) FROM model_operation_tasks WHERE {where}',params).fetchone()[0])
+            stats=db.execute(f'''SELECT COUNT(*) AS task_attempts,
+                SUM(CASE WHEN request_started_at IS NOT NULL THEN 1 ELSE 0 END) AS request_attempts,
+                SUM(CASE WHEN request_succeeded=1 THEN 1 ELSE 0 END) AS request_successes,
+                SUM(CASE WHEN state='failed' THEN 1 ELSE 0 END) AS failures,
+                SUM(CASE WHEN result_applied=1 THEN 1 ELSE 0 END) AS applied_results,
+                SUM(CASE WHEN usage_known=1 THEN 1 ELSE 0 END) AS known_usage_records,
+                SUM(prompt_tokens) AS prompt_tokens,
+                SUM(completion_tokens) AS completion_tokens,
+                SUM(total_tokens) AS total_tokens
+                FROM model_operation_tasks WHERE {where}''',params).fetchone()
+            rows=db.execute(f'''SELECT t.*,r.title AS room_title,
+                    u.id AS trigger_user_id,u.display_name AS trigger_name
+                FROM model_operation_tasks t
+                LEFT JOIN rooms r ON r.id=t.room_id
+                LEFT JOIN users u ON u.id=t.trigger_user_id
+                WHERE {where} ORDER BY t.id DESC LIMIT ? OFFSET ?''',
+                (*params,limit,offset)).fetchall()
+            options=db.execute('''SELECT profile_id,profile_name,model_name,MAX(id) AS latest_id
+                FROM model_operation_tasks WHERE profile_owner_user_id=?
+                GROUP BY profile_id,profile_name,model_name ORDER BY latest_id DESC''',(u['id'],)).fetchall()
+            records=[]
+            for row in rows:
+                item=model_operation_view(row)
+                item.update({
+                    'profile_id':row['profile_id'],'room_id':row['room_id'],
+                    'room_title':row['room_title'],'match_number':row['match_number'],
+                    'round_number':row['round_number'],
+                    'trigger_uid':user_uid(row['trigger_user_id']) if row['trigger_user_id'] else None,
+                    'trigger_name':row['trigger_name'],
+                })
+                records.append(item)
+            known=int(stats['known_usage_records'] or 0)
+            summary={
+                'task_attempts':int(stats['task_attempts'] or 0),
+                'request_attempts':int(stats['request_attempts'] or 0),
+                'request_successes':int(stats['request_successes'] or 0),
+                'failures':int(stats['failures'] or 0),
+                'applied_results':int(stats['applied_results'] or 0),
+                'known_usage_records':known,
+                'prompt_tokens':stats['prompt_tokens'] if known else None,
+                'completion_tokens':stats['completion_tokens'] if known else None,
+                'total_tokens':stats['total_tokens'] if known and stats['total_tokens'] is not None else None,
+            }
+            profile_options=[{'profile_id':row['profile_id'],'profile_name':row['profile_name'],
+                              'model_name':row['model_name']} for row in options]
+        return {'records':records,'total':total,'limit':limit,'offset':offset,
+                'stats':summary,'profile_options':profile_options}
+
     @app.post('/api/login')
     def login(body:LoginData, request:Request, response:Response):
         require_origin(request.headers)
