@@ -1,18 +1,19 @@
 'use strict';
 const $ = (selector) => document.querySelector(selector);
 const app = $('#app');
-const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null};
+const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{}};
 const esc = (v) => String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const shortDate = s => s ? new Date(s).toLocaleString('zh-CN',{hour12:false}) : '';
 const val = (id) => document.getElementById(id)?.value??'';
 const D = (txt='暂无记录') => `<p class="muted hint">${esc(txt)}</p>`;
 let toastTimer;
+function clearPersonalModelState(){state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};}
 function toast(message){const el=$('#toast');el.textContent=message;el.classList.add('visible');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('visible'),4200)}
 function setConnection(txt,online){const el=$('#connection');el.textContent=(online?'● ':'○ ')+txt;el.className='connection'+(online?' online':'')}
 function applyPrefs(){let theme=localStorage.getItem('turing_theme')||'light';document.body.dataset.theme=theme;$('#themeBtn').textContent=theme==='light'?'☾ 深色':'☀ 日间';let f=Number(localStorage.getItem('turing_font')||15);if(f<12||f>22)f=15;document.documentElement.style.setProperty('--font',f+'px');$('#fontSize').value=f;$('#fontValue').textContent=f;}
 $('#themeBtn').addEventListener('click',()=>{localStorage.setItem('turing_theme',document.body.dataset.theme==='light'?'dark':'light');applyPrefs()});
 $('#fontSize').addEventListener('input',e=>{localStorage.setItem('turing_font',e.target.value);applyPrefs()});
-$('#logoutBtn').addEventListener('click',async()=>{try{await api('/api/logout',{method:'POST'});}catch(e){toast(e.message)} state.me=null;state.room=null;state.roomId=null;state.personalModels=[];state.chat=[];state.chatDraft='';state.drafts={};state.personalReturn=null;state.tab='login';state.legacyLogin=false;stopWs();history.replaceState(null,'',location.pathname);await init()});
+$('#logoutBtn').addEventListener('click',async()=>{try{await api('/api/logout',{method:'POST'});}catch(e){toast(e.message)} state.me=null;state.room=null;state.roomId=null;state.personalModels=[];clearPersonalModelState();state.chat=[];state.chatDraft='';state.drafts={};state.personalReturn=null;state.tab='login';state.legacyLogin=false;stopWs();history.replaceState(null,'',location.pathname);await init()});
 async function api(path,{method='GET',body,raw=false}={}){
  const opts={method,headers:{}};
  if(body!==undefined){opts.headers['Content-Type']='application/json';opts.body=JSON.stringify(body)}
@@ -21,7 +22,7 @@ async function api(path,{method='GET',body,raw=false}={}){
  const response=await fetch(path,opts);
  if(raw){if(!response.ok)throw new Error('下载失败');return response.blob()}
  const data=await response.json().catch(()=>({detail:'网络连接错误'}));
- if(!response.ok){if(response.status===401&&state.me){state.me=null;state.room=null;state.roomId=null;state.personalModels=[];state.chat=[];state.chatDraft='';state.drafts={};stopWs();renderAuth();}throw new Error(typeof data.detail==='string'?data.detail:'请求失败');}
+ if(!response.ok){if(response.status===401&&state.me){state.me=null;state.room=null;state.roomId=null;state.personalModels=[];clearPersonalModelState();state.chat=[];state.chatDraft='';state.drafts={};stopWs();renderAuth();}throw new Error(typeof data.detail==='string'?data.detail:'请求失败');}
  return data;
 }
 function stopWs(){state.lastTyping=null;if(state.reconnect)clearTimeout(state.reconnect);state.reconnect=null; if(state.ws){const ws=state.ws;state.ws=null;ws.onclose=null;ws.close();}setConnection('未连接',false)}
@@ -43,7 +44,7 @@ async function refreshRoom(){if(!state.roomId||location.hash.startsWith('#profil
  if(r.is_judge||r.status==='finished'){state.chat=[];state.chatDraft='';}else await loadRoomChat().catch(()=>{});
  if(r.can_manage)await loadPersonalModels().catch(()=>{});
  renderRoom();maybeNotifyJudge();}catch(e){if(/不属于这个房间|公共聊天/.test(e.message)){state.roomId=null;state.room=null;state.chat=[];await loadLobby();toast('你已不在该房间');}else toast(e.message)}}
-async function init(){applyPrefs();try{state.me=await api('/api/me');$('#logoutBtn').classList.remove('hide');const q=/^#room=(\d+)$/.exec(location.hash);if(location.hash.startsWith('#profile')){state.personalReturn=profileReturnFromHash();await openPersonalCenter({fromHash:true});}else if(q){await openRoom(Number(q[1]));}else renderLobby()}catch(e){state.me=null;state.roomId=null;state.personalModels=[];state.chat=[];$('#logoutBtn').classList.add('hide');renderAuth();}}
+async function init(){applyPrefs();try{const previousUid=state.me?.user?.uid;state.me=await api('/api/me');if(previousUid&&previousUid!==state.me?.user?.uid)clearPersonalModelState();$('#logoutBtn').classList.remove('hide');const q=/^#room=(\d+)$/.exec(location.hash);if(location.hash.startsWith('#profile')){state.personalReturn=profileReturnFromHash();await openPersonalCenter({fromHash:true});}else if(q){await openRoom(Number(q[1]));}else renderLobby()}catch(e){state.me=null;state.roomId=null;state.personalModels=[];state.chat=[];$('#logoutBtn').classList.add('hide');renderAuth();}}
 function renderAuth(){
  stopWs();$('#logoutBtn').classList.add('hide');setConnection('未登录',false);
  const reg=state.tab==='register',legacy=!!state.legacyLogin;
@@ -174,46 +175,64 @@ async function returnFromPersonalCenter(){
  if(back?.roomId){await openRoom(back.roomId,{view:back.view,round:back.round});return;}
  history.replaceState(null,'',location.pathname);state.roomId=null;state.room=null;await loadLobby();
 }
-function credentialStatusLabel(p){if(!state.modelApiEnabled)return '模型 API 暂不可用，请联系管理员。';return ({ok:'API Key 已验证',missing:'缺少 API Key',needs_repair:'需要重新录入 API Key',key_unavailable:'服务器密钥不可用',owner_unavailable:'配置所属账号不可用'})[p.credential_status]||'状态未知';}
-function personalModelFields(p={}){
+function credentialStatusLabel(p){if(!state.modelApiEnabled)return '模型 API 暂不可用，请联系管理员。';return ({ok:'API Key 已保存（可解密）',missing:'缺少 API Key',needs_repair:'需要重新录入 API Key',key_unavailable:'服务器密钥不可用',owner_unavailable:'配置所属账号不可用'})[p.credential_status]||'状态未知';}
+function personalModelDraftKey(form){return form.dataset.form==='personal-model-create'?'create':'model:'+Number(form.dataset.id);}
+function capturePersonalModelDrafts(skipKey=null){
+ app.querySelectorAll('form[data-form^="personal-model-"]').forEach(form=>{
+  const key=personalModelDraftKey(form);
+  if(key===skipKey){delete state.personalModelDrafts[key];return;}
+  state.personalModelDrafts[key]=Object.fromEntries(new FormData(form));
+ });
+}
+function personalModelFields(p={},draft={}){
+ const field=(name,fallback)=>Object.prototype.hasOwnProperty.call(draft,name)?draft[name]:fallback;
  const status=p.credential_status||'missing',editing=!!p.id,repair=editing&&status!=='ok';
  const keyLabel=!editing?'API Key':status==='needs_repair'?'API Key（无法解密，必须重新录入）':status==='key_unavailable'?'API Key（服务器密钥不可用）':status==='missing'?'API Key（缺少密钥）':p.has_api_key?'API Key（已保存，留空保持不变）':'API Key';
  const keyRequired=!editing||repair||!p.has_api_key;
- return `<label class="field">配置名称</label><input name="name" type="text" maxlength="60" required value="${esc(p.name||'')}" placeholder="例如 DeepSeek 主力">
- <label class="field">Base URL</label><input name="base_url" type="text" maxlength="500" required value="${esc(p.base_url||'https://api.openai.com/v1')}" placeholder="https://api.openai.com/v1">
- <label class="field">模型名称</label><input name="model" type="text" maxlength="120" required value="${esc(p.model||'')}" placeholder="例如 gpt-4.1-mini">
- <label class="field">${keyLabel}</label><input name="api_key" type="password" maxlength="2000" autocomplete="new-password" ${keyRequired?'required':''} placeholder="${editing&&p.has_api_key&&status==='ok'?'不修改时留空':'填写 API Key'}">
- <div class="grid2"><div><label class="field">采样温度</label><input name="temperature" type="number" min="0" max="2" step="0.1" value="${p.temperature??0.7}" required></div><div><label class="field">最大输出 Token</label><input name="max_tokens" type="number" min="64" max="8192" step="1" value="${p.max_tokens??2048}" required></div></div>
- <label class="field">请求超时（秒）</label><input name="timeout_seconds" type="number" min="10" max="120" step="1" value="${p.timeout_seconds??60}" required>`;
+ return '<label class="field">配置名称</label><input name="name" type="text" maxlength="60" required value="'+esc(field('name',p.name||''))+'" placeholder="例如 DeepSeek 主力">'+
+ '<label class="field">Base URL</label><input name="base_url" type="text" maxlength="500" required value="'+esc(field('base_url',p.base_url||'https://api.openai.com/v1'))+'" placeholder="https://api.openai.com/v1">'+
+ '<label class="field">模型名称</label><input name="model" type="text" maxlength="120" required value="'+esc(field('model',p.model||''))+'" placeholder="例如 gpt-4.1-mini">'+
+ '<label class="field">'+keyLabel+'</label><input name="api_key" type="password" maxlength="2000" autocomplete="new-password" '+(keyRequired?'required':'')+' value="'+esc(field('api_key',''))+'" placeholder="'+(editing&&p.has_api_key&&status==='ok'?'不修改时留空':'填写 API Key')+'">'+
+ '<div class="grid2"><div><label class="field">采样温度</label><input name="temperature" type="number" min="0" max="2" step="0.1" value="'+esc(field('temperature',p.temperature??0.7))+'" required></div><div><label class="field">最大输出 Token</label><input name="max_tokens" type="number" min="64" max="8192" step="1" value="'+esc(field('max_tokens',p.max_tokens??2048))+'" required></div></div>'+
+ '<label class="field">请求超时（秒）</label><input name="timeout_seconds" type="number" min="10" max="120" step="1" value="'+esc(field('timeout_seconds',p.timeout_seconds??60))+'" required>';
 }
-
+function modelTestResultText(result){
+ if(!result)return '';
+ return result.ok?'最近一次连接测试成功 · '+esc(result.model)+' · '+esc(result.latency_ms)+' ms':'最近一次连接测试失败：'+esc(result.error);
+}
+function updateModelTestResult(id,result){
+ state.modelTestResults[id]=result;
+ const node=app.querySelector('[data-model-test-result="'+id+'"]');
+ if(node){node.textContent=result.ok?'最近一次连接测试成功 · '+result.model+' · '+result.latency_ms+' ms':'最近一次连接测试失败：'+result.error;
+  node.className='model-test-result '+(result.ok?'success':'failed');}
+}
 function renderPersonalModelManager(){
  if(!state.modelApiEnabled)return '<section class="notice"><strong>模型 API 暂不可用，请联系管理员。</strong></section>';
  let html='<p class="hint">配置归当前账号所有，可在自己管理的多个房间中复用。</p><div class="label-line"><h3>新增模型配置</h3><span class="pill">'+state.personalModels.length+' 个配置</span></div>';
- html+='<form data-form="personal-model-create" class="model-form">'+personalModelFields()+'<div class="form-actions"><button class="primary" type="submit">保存配置</button></div></form>';
+ html+='<form data-form="personal-model-create" class="model-form">'+personalModelFields({},state.personalModelDrafts.create||{})+'<div class="form-actions"><button class="primary" type="submit">保存配置</button></div></form>';
  html+='<div class="divider"></div><h3>已有配置</h3>';
  if(!state.personalModels.length)return html+D('尚无个人模型配置。');
  html+=state.personalModels.map(p=>{
-  let card='<section class="personal-model-card"><div class="label-line"><strong>'+esc(p.name)+'</strong><span class="pill '+(p.credential_status==='ok'?'ok':'warn')+'">'+credentialStatusLabel(p)+'</span></div>'+
-   '<div class="tiny muted">'+esc(p.model)+' · '+esc(p.base_url)+'</div>';
+  const test=state.modelTestResults[p.id];
+  const expanded=!!state.personalModelExpanded[p.id];
+  let card='<details class="personal-model-card" data-model-config data-id="'+p.id+'" '+(expanded?'open':'')+'><summary class="model-config-summary"><strong>'+esc(p.name)+'</strong><span class="model-config-chevron" aria-hidden="true"></span></summary><div class="model-config-details">'+
+   '<div class="label-line"><span class="pill '+(p.credential_status==='ok'?'ok':'warn')+'">'+credentialStatusLabel(p)+'</span></div>'+
+   '<div class="tiny muted">模型标识：'+esc(p.model)+'<br>Base URL：'+esc(p.base_url)+'</div>';
   if(p.credential_status==='needs_repair')card+='<p class="hint">此配置无法解密，请重新录入服务商 API Key 并保存。</p>';
   if(p.credential_status==='missing')card+='<p class="hint">此配置缺少 API Key，请重新录入后保存。</p>';
-  card+='<form data-form="personal-model-edit" data-id="'+p.id+'" class="spaced">'+personalModelFields(p)+'<div class="form-actions"><button type="submit">保存修改</button></div></form>'+
-   '<div class="buttonrow spaced"><button class="small" data-action="test-personal-model" data-id="'+p.id+'" '+(p.credential_status==='ok'?'':'disabled')+'>测试连接</button><button class="small danger" data-action="delete-personal-model" data-id="'+p.id+'">删除配置</button></div></section>';
+  card+='<form data-form="personal-model-edit" data-id="'+p.id+'" class="spaced">'+personalModelFields(p,state.personalModelDrafts['model:'+p.id]||{})+'<div class="form-actions"><button type="submit">保存修改</button></div></form>'+
+   '<div class="buttonrow spaced"><button class="small" data-action="test-personal-model" data-id="'+p.id+'" '+(p.credential_status==='ok'?'':'disabled')+'>测试连接</button><button class="small danger" data-action="delete-personal-model" data-id="'+p.id+'">删除配置</button></div>'+
+   '<p class="model-test-result '+(test?(test.ok?'success':'failed'):'')+'" data-model-test-result="'+p.id+'" aria-live="polite">'+modelTestResultText(test)+'</p></div></details>';
   return card;
  }).join('');
  return html;
 }
-function renderPersonalCenter(){
- stopWs();const u=state.me?.user;if(!u){renderAuth();return;}
- app.innerHTML=`<div class="pagehead"><div><div class="overline">ACCOUNT / PERSONAL CENTER</div><h1>个人中心</h1><p class="muted">管理当前账号的基本资料、登录密码和个人模型 API 配置。</p></div><div class="buttonrow"><button data-action="personal-back">← 返回${state.personalReturn?.roomId?'房间':'大厅'}</button></div></div>
- <div class="personal-layout"><div class="stack">
- <section class="card"><h2>基本资料</h2><div class="uid-row"><div><label class="field">UID（不可修改）</label><div class="code"> ${esc(u.uid)}</div></div><button class="small" data-action="copy-uid" data-uid="${esc(u.uid)}">复制 UID</button></div><form data-form="profile-name" class="spaced"><label class="field">名字</label><input name="display_name" type="text" maxlength="40" required value="${esc(u.display_name)}"><div class="form-actions"><button class="primary" type="submit">保存名字</button></div></form></section>
- <section class="card"><h2>修改密码</h2><p class="hint">修改成功后，当前账号的所有登录会话都会退出，需要使用新密码重新登录。</p><form data-form="change-password"><label class="field">当前密码</label><input name="current_password" type="password" autocomplete="current-password" maxlength="200" required><label class="field">新密码（8～200 位）</label><input name="new_password" type="password" autocomplete="new-password" minlength="8" maxlength="200" required><label class="field">确认新密码</label><input name="confirm_password" type="password" autocomplete="new-password" minlength="8" maxlength="200" required><div class="form-actions"><button class="primary" type="submit">修改密码并退出登录</button></div></form></section>
- </div><div class="stack"><section class="card"><h2>个人模型 API</h2>${renderPersonalModelManager()}</section></div></div>`;
-}
-
-function modelProfileOptions(r){
+function renderPersonalCenter({skipModelDraftKey=null}={}){
+ const u=state.me?.user;if(!u){clearPersonalModelState();renderAuth();return;}
+ capturePersonalModelDrafts(skipModelDraftKey);
+ if(skipModelDraftKey)delete state.personalModelDrafts[skipModelDraftKey];
+ stopWs();
+ app.innerHTML=function modelProfileOptions(r){
  const profiles=(state.personalModels||[]).filter(p=>p.credential_status==='ok');
  return `<option value="">手动转录（不调用 API）</option>${profiles.map(p=>`<option value="${p.id}">${esc(p.name)} · ${esc(p.model)}</option>`).join('')}`;
 }
