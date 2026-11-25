@@ -338,6 +338,120 @@ async function logout(page) {
         tests: state.modelTestResults,
       }));
       assert.deepEqual(cleared, { drafts: {}, expanded: {}, tests: {} });
+    } else if (scenario === 'questions') {
+      await page.getByRole('button', { name: '使用旧登录名', exact: true }).click();
+      await page.locator('[name="username"]').fill('browser_admin');
+      await page.locator('[name="password"]').fill('browser-password');
+      await clickSubmit(page, 'login');
+      await uidIs(page, 'TL00000001');
+      await page.locator('form[data-form="room"] [name="title"]').fill('AI 裁判出题链路验收');
+      const roomCreated = page.waitForResponse(response =>
+        response.url().endsWith('/api/rooms') && response.request().method() === 'POST');
+      await clickSubmit(page, 'room');
+      const createdRoom = await roomCreated;
+      assert.equal(createdRoom.status(), 200, await createdRoom.text());
+
+      const roomInfo = await (await context.request.get(site + '/api/me')).json();
+      const roomId = roomInfo.rooms[0].id;
+      const base = '/api/rooms/' + roomId;
+      const room = await (await context.request.get(site + base)).json();
+      const profiles = await (await context.request.get(site + '/api/me/models')).json();
+      const usableProfile = profiles.models.find(profile => profile.credential_status === 'ok');
+      assert(usableProfile, '出题验收需要一个有效的测试模型配置');
+
+      await page.locator('[data-action="room-view"][data-view="ai-judges"]').click();
+      const addJudge = page.locator('form[data-form="add-ai-judge"]');
+      await addJudge.waitFor();
+      await addJudge.locator('[name="name"]').fill('自动出题 AI 裁判');
+      await addJudge.locator('[name="model_profile_id"]').selectOption(String(usableProfile.id));
+      await addJudge.locator('[type="submit"]').click();
+      await page.locator('.feed-item').filter({ hasText: '自动出题 AI 裁判' }).waitFor();
+
+      const addManualJudge = page.locator('form[data-form="add-ai-judge"]');
+      await addManualJudge.locator('[name="name"]').fill('手动转录 AI 裁判');
+      await addManualJudge.locator('[name="model_profile_id"]').selectOption('');
+      await addManualJudge.locator('[type="submit"]').click();
+      await page.locator('.feed-item').filter({ hasText: '手动转录 AI 裁判' }).waitFor();
+
+      await page.locator('[data-action="room-view"][data-view="admin"]').click();
+      await page.locator('[data-action="start-round"]').waitFor();
+      assert.equal(await page.locator('[data-action="start-round"]').isDisabled(), true);
+      assert.equal(await page.locator('[data-action="generate-ai-questions"]').isDisabled(), true);
+      assert((await page.locator('#app').innerText()).includes('当前仅有 0 位参赛者；至少需要两名在场参赛者才能开始统一作答。'));
+      await screenshot(page, 'ai-question-zero-participants-blocked.png');
+
+      const playerContexts = [];
+      for (const username of ['question_human_a', 'question_human_b']) {
+        const playerContext = await browser.newContext();
+        playerContexts.push(playerContext);
+        const joined = await playerContext.request.post(site + '/api/register', {
+          data: { username, password: 'question-human-password', code: room.invite_code },
+        });
+        assert.equal(joined.status(), 200, await joined.text());
+      }
+      await page.reload();
+      await page.waitForFunction(id => state.room?.id === id && state.room?.humans?.length === 2, roomId);
+      await page.locator('[data-action="room-view"][data-view="admin"]').click();
+      await page.waitForFunction(() => {
+        const button = document.querySelector('[data-action="start-round"]');
+        return button && !button.disabled;
+      });
+
+      // Entry point 1: starting the round must generate the bound judge's question first.
+      page.once('dialog', dialog => dialog.accept());
+      await page.locator('[data-action="start-round"]').click();
+      await page.locator('#toast').filter({ hasText: '本轮已开始' }).waitFor();
+      const startToast = await page.locator('#toast').innerText();
+      assert(startToast.includes('成功生成 1 个 AI 裁判问题'));
+      assert(startToast.includes('此 AI 裁判席尚未绑定个人模型配置'));
+      await page.waitForFunction(() => state.room?.rounds?.find(x => x.number === state.room.current_round)?.status === 'collecting');
+      await screenshot(page, 'ai-question-start-round-autogeneration.png');
+
+      // Complete round 1, then open round 2 directly so the explicit generation button can be tested.
+      for (let index = 0; index < playerContexts.length; index++) {
+        const playerContext = playerContexts[index];
+        const me = await (await playerContext.request.get(site + '/api/me')).json();
+        const answer = await playerContext.request.post(site + base + '/answers', {
+          data: { text: '第二阶段验收回答 ' + (index + 1) },
+          headers: {
+            'X-CSRF-Token': me.user.csrf,
+            'X-Match-Number': String(room.match_number),
+          },
+        });
+        assert.equal(answer.status(), 200, await answer.text());
+      }
+      const adminMe = await (await context.request.get(site + '/api/me')).json();
+      const next = await context.request.post(site + '/api/rooms/' + roomId + '/next', {
+        data: {},
+        headers: {
+          'X-CSRF-Token': adminMe.user.csrf,
+          'X-Match-Number': String(room.match_number),
+        },
+      });
+      assert.equal(next.status(), 200, await next.text());
+      await page.reload();
+      await page.waitForFunction(() => state.room?.current_round === 2 && state.room?.rounds?.find(x => x.number === 2)?.status === 'draft');
+      await page.locator('[data-action="room-view"][data-view="ai-judges"]').click();
+
+      // Entry point 2: the explicit generation button saves the next-round question.
+      await page.locator('[data-action="generate-ai-questions"]').click();
+      await page.locator('#toast').filter({ hasText: '成功生成 1 个 AI 裁判问题' }).waitFor();
+      await page.locator('form[data-form="ai-judge-question"]').waitFor();
+      await page.locator('form[data-form="ai-judge-question"] textarea[name="text"]').fill('第二轮手动转录问题。');
+      const manualQuestionSaved = page.waitForResponse(response =>
+        response.url().endsWith('/ai-judge-questions') && response.request().method() === 'POST');
+      await page.locator('form[data-form="ai-judge-question"] [type="submit"]').click();
+      const manualResponse = await manualQuestionSaved;
+      assert.equal(manualResponse.status(), 200, await manualResponse.text());
+
+      const finalRoom = await (await context.request.get(site + base)).json();
+      const secondRound = finalRoom.rounds.find(round => round.number === 2);
+      assert.equal(secondRound.questions.length, 2);
+      assert(secondRound.questions.some(question => question.text === 'OK'));
+      assert(secondRound.questions.some(question => question.text === '第二轮手动转录问题。'));
+      await screenshot(page, 'ai-question-manual-generation-and-transcription.png');
+
+      for (const playerContext of playerContexts) await playerContext.close();
     } else if (scenario === 'copy') {
       await page.getByRole('button', { name: '使用旧登录名', exact: true }).click();
       await page.locator('[name="username"]').fill('browser_admin');
