@@ -546,8 +546,19 @@ def test_ai_judge_discards_verdict_if_match_evidence_changes(tmp_path, monkeypat
             assert verdict_resp.status_code == 200, verdict_resp.text
             result = verdict_resp.json()
             assert result['generated'] == 0
-            assert len(result['failed']) == 1
-            assert '资料在模型判断期间发生变化' in result['failed'][0]['error']
+            assert result['skipped'] == 1
+            assert result['failed'] == []
+            assert len(result['results']) == 1
+            assert result['results'][0]['status'] == 'skipped'
+            assert '比赛资料发生变化' in result['results'][0]['reason']
+            with db_open(path) as db:
+                stale_task = db.execute(
+                    """SELECT state,error_message FROM model_operation_tasks
+                       WHERE room_id=? AND purpose='judge_verdict' AND target_key=?""",
+                    (room['room_id'], str(judge_id)),
+                ).fetchone()
+                assert stale_task['state'] == 'stale'
+                assert '比赛资料在模型判断期间发生变化' in stale_task['error_message']
             state = (await admin.get(base)).json()
             assert state['judges'][0]['locked'] is False
             assert state['rounds'][-1]['number'] == 2

@@ -80,6 +80,7 @@ async function closePersonalCenter(page) {
 
     await pageA.locator('form[data-form="room"] [name="title"]').fill('好友与积分浏览器验收');
     await clickSubmit(pageA, 'room');
+    await pageA.waitForFunction(() => /^#room=\d+$/.test(location.hash));
     const roomHash = await pageA.evaluate(() => location.hash);
     const roomId = Number(roomHash.match(/room=(\d+)/)?.[1]);
     assert(roomId > 0);
