@@ -1715,10 +1715,14 @@ def create_app(db_path=None):
             await finish_and_notify_model_operation(operation_id,'failed',error=exc)
             raise HTTPException(502,str(exc))
         with connection() as db:
-            u=caller(request,db)
-            valid=bool(db.execute('''SELECT 1 FROM model_profiles mp JOIN users u ON u.id=mp.owner_user_id
+            token_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
+            session=db.execute('''SELECT u.id FROM sessions s JOIN users u ON u.id=s.user_id
+                WHERE s.token_hash=? AND s.expires_at>? AND u.deleted_at IS NULL''',
+                (token_hash,utcnow())).fetchone()
+            valid=bool(session and session['id']==profile['owner_user_id'] and db.execute(
+                '''SELECT 1 FROM model_profiles mp JOIN users u ON u.id=mp.owner_user_id
                 WHERE mp.id=? AND mp.owner_user_id=? AND mp.ownership_issue IS NULL AND u.deleted_at IS NULL''',
-                (profile_id,u['id'])).fetchone())
+                (profile_id,profile['owner_user_id'])).fetchone())
         if not valid:
             await finish_and_notify_model_operation(operation_id,'stale',
                 error='测试期间模型配置或账号状态已变化；服务商请求结果未作为有效测试应用。')
@@ -2189,10 +2193,14 @@ def create_app(db_path=None):
             await finish_and_notify_model_operation(operation_id,'failed',error=exc)
             raise HTTPException(502,str(exc))
         with connection() as db:
-            u=caller(request,db)
-            require_room_manager(db,room_id,u)
-            valid=bool(db.execute('SELECT 1 FROM model_profiles WHERE id=? AND owner_user_id=?',
-                                  (profile_id,u['id'])).fetchone())
+            token_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
+            session=db.execute('''SELECT u.id,u.is_admin FROM sessions s JOIN users u ON u.id=s.user_id
+                WHERE s.token_hash=? AND s.expires_at>? AND u.deleted_at IS NULL''',
+                (token_hash,utcnow())).fetchone()
+            current_room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
+            valid=bool(session and current_room and can_manage_room(current_room,dict(session)) and
+                db.execute('SELECT 1 FROM model_profiles WHERE id=? AND owner_user_id=?',
+                           (profile_id,session['id'])).fetchone())
         if not valid:
             await finish_and_notify_model_operation(operation_id,'stale',
                 error='测试期间模型配置或账号状态已变化；服务商请求结果未作为有效测试应用。')
