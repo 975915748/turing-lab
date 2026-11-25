@@ -38,10 +38,6 @@ class ModelCallCancelled(Exception):
     """Queued model work became unauthorized or stale before the provider call began."""
 
 
-class ModelRequestLimitReached(Exception):
-    """A room has no remaining model-request attempts."""
-
-
 def utcnow():
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
@@ -85,9 +81,6 @@ def init_db(path):
             room_sql = old.execute("SELECT sql FROM sqlite_master WHERE name='rooms'").fetchone()
             needs_room_ids = bool(room_sql) and 'AUTOINCREMENT' not in room_sql['sql'].upper()
             if 'users' in old_tables and (
-                'model_operation_tasks' not in old_tables or
-                ('rooms' in old_tables and 'model_request_limit' not in {
-                    x['name'] for x in old.execute('PRAGMA table_info(rooms)')}) or
                 'model_profiles' not in old_tables or
                 ('model_profiles' in old_tables and 'owner_user_id' not in {
                     x['name'] for x in old.execute('PRAGMA table_info(model_profiles)')}) or
@@ -105,10 +98,7 @@ def init_db(path):
                 ('answers' in old_tables and 'edited_at' not in {
                     x['name'] for x in old.execute('PRAGMA table_info(answers)')})):
                 stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
-                backup_tag = ('v1_9' if 'model_operation_tasks' not in old_tables or
-                                  ('rooms' in old_tables and 'model_request_limit' not in {
-                                      x['name'] for x in old.execute('PRAGMA table_info(rooms)')}) else
-                              'v1_8' if 'model_profiles' in old_tables and 'owner_user_id' not in {
+                backup_tag = ('v1_8' if 'model_profiles' in old_tables and 'owner_user_id' not in {
                                   x['name'] for x in old.execute('PRAGMA table_info(model_profiles)')} else
                               'v1_1' if 'room_judges' not in old_tables else
                               'v1_2' if 'ai_judges' not in old_tables else
@@ -145,7 +135,6 @@ def init_db(path):
             judge TEXT NOT NULL DEFAULT '裁判', status TEXT NOT NULL DEFAULT 'open',
             current_round INTEGER NOT NULL DEFAULT 1,
             verdict_json TEXT, verdict_locked_at TEXT, revealed_at TEXT,
-            model_request_limit INTEGER,
             created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS members (
             room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
@@ -231,36 +220,6 @@ def init_db(path):
             through_round INTEGER NOT NULL, version INTEGER NOT NULL, content TEXT NOT NULL,
             sha256 TEXT NOT NULL, created_at TEXT NOT NULL, sent_at TEXT,
             UNIQUE(room_id,through_round,version));
-        CREATE TABLE IF NOT EXISTS model_operation_tasks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            room_id INTEGER REFERENCES rooms(id) ON DELETE CASCADE,
-            match_number INTEGER, round_number INTEGER,
-            purpose TEXT NOT NULL, target_type TEXT NOT NULL, target_key TEXT NOT NULL,
-            target_label TEXT NOT NULL,
-            profile_id INTEGER, profile_owner_user_id INTEGER NOT NULL, trigger_user_id INTEGER NOT NULL,
-            profile_name TEXT NOT NULL, model_name TEXT NOT NULL, profile_snapshot_hash TEXT NOT NULL,
-            context_revision TEXT,
-            state TEXT NOT NULL CHECK(state IN
-                ('queued','requesting','completed','failed','blocked','stale','interrupted')),
-            retry_of INTEGER REFERENCES model_operation_tasks(id) ON DELETE SET NULL,
-            idempotency_key TEXT,
-            queued_at TEXT NOT NULL, request_started_at TEXT, request_finished_at TEXT,
-            finished_at TEXT, queue_ms INTEGER, duration_ms INTEGER,
-            request_succeeded INTEGER, result_applied INTEGER NOT NULL DEFAULT 0,
-            usage_known INTEGER NOT NULL DEFAULT 0,
-            prompt_tokens INTEGER, completion_tokens INTEGER, total_tokens INTEGER,
-            error_message TEXT, updated_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_model_operations_room_match_round
-            ON model_operation_tasks(room_id,match_number,round_number,id DESC);
-        CREATE INDEX IF NOT EXISTS idx_model_operations_owner
-            ON model_operation_tasks(profile_owner_user_id,id DESC);
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_model_operations_active_room_target
-            ON model_operation_tasks(room_id,match_number,round_number,purpose,target_type,target_key)
-            WHERE room_id IS NOT NULL AND state IN ('queued','requesting');
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_model_operations_active_profile_test
-            ON model_operation_tasks(profile_owner_user_id,profile_id)
-            WHERE purpose='connection_test' AND state IN ('queued','requesting');
         ''')
         if 'model_profile_id' not in {x['name'] for x in db.execute('PRAGMA table_info(ai_players)')}:
             db.execute('ALTER TABLE ai_players ADD COLUMN model_profile_id INTEGER REFERENCES model_profiles(id) ON DELETE SET NULL')
@@ -279,46 +238,12 @@ def init_db(path):
             db.execute('ALTER TABLE rooms ADD COLUMN match_number INTEGER NOT NULL DEFAULT 1')
         if 'records_deleted' not in {x['name'] for x in db.execute('PRAGMA table_info(rooms)')}:
             db.execute('ALTER TABLE rooms ADD COLUMN records_deleted INTEGER NOT NULL DEFAULT 0')
-        if 'model_request_limit' not in {x['name'] for x in db.execute('PRAGMA table_info(rooms)')}:
-            db.execute('ALTER TABLE rooms ADD COLUMN model_request_limit INTEGER')
         if 'deleted_at' not in {x['name'] for x in db.execute('PRAGMA table_info(users)')}:
             db.execute('ALTER TABLE users ADD COLUMN deleted_at TEXT')
         room_sql = db.execute("SELECT sql FROM sqlite_master WHERE name='rooms'").fetchone()['sql']
         if 'AUTOINCREMENT' not in room_sql.upper():
             migrate_room_ids(db,room_sql)
         migrate_model_profiles(db)
-        # Never replay a possibly billed request after restart. First check whether
-        # its match context or target content already changed while the process was down.
-        interrupted_at=datetime.now(timezone.utc).isoformat(timespec='milliseconds')
-        unfinished=db.execute("""SELECT * FROM model_operation_tasks
-            WHERE state IN ('queued','requesting') ORDER BY id""").fetchall()
-        for task in unfinished:
-            next_state='interrupted'
-            message='服务重启，无法确认请求是否完成；请先核对比赛内容再重试。'
-            if task['room_id'] is not None:
-                room=db.execute('SELECT * FROM rooms WHERE id=?',(task['room_id'],)).fetchone()
-                stale=not room or room['match_number']!=task['match_number'] or room['current_round']!=task['round_number']
-                if not stale and task['purpose']=='judge_question':
-                    stale=bool(db.execute('''SELECT 1 FROM ai_judge_questions
-                        WHERE room_id=? AND round_number=? AND ai_judge_id=?''',
-                        (task['room_id'],task['round_number'],int(task['target_key']))).fetchone())
-                    stale=stale or room['status']!='open'
-                elif not stale and task['purpose']=='ai_answer':
-                    round_row=db.execute('SELECT id,question,status FROM rounds WHERE room_id=? AND number=?',
-                                          (task['room_id'],task['round_number'])).fetchone()
-                    stale=bool(not round_row or round_row['status']!='collecting' or
-                        db.execute('SELECT 1 FROM answers WHERE round_id=? AND alias=?',
-                                   (round_row['id'],task['target_key'])).fetchone())
-                elif not stale and task['purpose']=='judge_verdict':
-                    stale=bool(db.execute('SELECT 1 FROM ai_judge_verdicts WHERE room_id=? AND ai_judge_id=?',
-                                          (task['room_id'],int(task['target_key']))).fetchone())
-                    stale=stale or room['status']!='open'
-                if stale:
-                    next_state='stale'
-                    message='服务重启时发现目标内容已完成或比赛上下文已变化；旧任务已作废。'
-            db.execute('''UPDATE model_operation_tasks SET state=?,finished_at=?,updated_at=?,
-                error_message=? WHERE id=? AND state IN ('queued','requesting')''',
-                (next_state,interrupted_at,interrupted_at,message,task['id']))
 
 
 
@@ -524,10 +449,6 @@ class ModelBindingData(BaseModel, extra='forbid'):
     keep_existing: bool = False
 
 
-class ModelRequestLimitData(BaseModel, extra='forbid'):
-    limit: Optional[int] = Field(default=None, ge=1, le=1000000)
-
-
 class ChatMessageData(BaseModel, extra='forbid'):
     match_number: int = Field(ge=1)
     text: str = Field(min_length=1, max_length=2000)
@@ -634,13 +555,6 @@ def model_profile_snapshot_valid(db, profile):
         return False
     fields=('owner_user_id','base_url','model','api_key_encrypted','temperature','max_tokens','timeout_seconds','updated_at')
     return all(current.get(field)==profile.get(field) for field in fields)
-
-
-def model_profile_snapshot_hash(profile):
-    fields=('id','owner_user_id','base_url','model','api_key_encrypted','temperature',
-            'max_tokens','timeout_seconds','updated_at')
-    payload=[profile.get(field) for field in fields]
-    return hashlib.sha256(json.dumps(payload,ensure_ascii=False,separators=(',',':')).encode('utf-8')).hexdigest()
 
 
 def model_actor_session_valid(db, user_id, session_hash):
@@ -832,14 +746,8 @@ def check_judge_registration(db, room, user_id, viewer=None):
 
 
 def aliases(db, room_id):
-    room_status=db.execute('SELECT status FROM rooms WHERE id=?',(room_id,)).fetchone()
-    # A deleted account leaves an active match immediately, but its alias and
-    # historical answers remain visible in the finished match until restart.
-    include_deleted=bool(room_status and room_status['status']=='finished')
     humans = db.execute('''SELECT m.alias,m.user_id,u.display_name,u.username FROM members m
-        JOIN users u ON u.id=m.user_id WHERE m.room_id=? AND m.removed_at IS NULL
-        AND (u.deleted_at IS NULL OR ?) ORDER BY m.alias''',
-        (room_id,1 if include_deleted else 0)).fetchall()
+        JOIN users u ON u.id=m.user_id WHERE m.room_id=? AND m.removed_at IS NULL ORDER BY m.alias''', (room_id,)).fetchall()
     ais = db.execute('SELECT alias,name,model_profile_id FROM ai_players WHERE room_id=? ORDER BY alias', (room_id,)).fetchall()
     all_aliases = sorted([r['alias'] for r in humans] + [r['alias'] for r in ais])
     return humans, ais, all_aliases
@@ -887,7 +795,7 @@ def current_round(db, room, number=None):
 
 def clear_match_records(db, room_id):
     # 只清除比赛内容，房间、成员、AI 参赛位及裁判配置保留。
-    for table in ('model_operation_tasks', 'rounds', 'suggestions', 'events', 'judge_questions', 'judge_verdicts',
+    for table in ('rounds', 'suggestions', 'events', 'judge_questions', 'judge_verdicts',
                   'ai_judge_questions', 'ai_judge_verdicts', 'ai_answer_revisions', 'packets', 'chat_messages'):
         db.execute(f'DELETE FROM {table} WHERE room_id=?', (room_id,))
     db.execute('''UPDATE rooms SET verdict_json=NULL,verdict_locked_at=NULL,
@@ -897,164 +805,6 @@ def clear_match_records(db, room_id):
 def check_match_number(room, number):
     if str(room['match_number']) != str(number):
         raise HTTPException(409, '房间已开始另一场比赛，请刷新后重试。')
-
-
-def active_participant_count(db, room_id):
-    humans=db.execute('''SELECT COUNT(*) FROM members m JOIN users u ON u.id=m.user_id
-        WHERE m.room_id=? AND m.removed_at IS NULL AND u.deleted_at IS NULL''',(room_id,)).fetchone()[0]
-    ais=db.execute('SELECT COUNT(*) FROM ai_players WHERE room_id=?',(room_id,)).fetchone()[0]
-    return int(humans)+int(ais)
-
-
-def round_question_rows(db, room_id, round_number):
-    return db.execute('''SELECT q.text,q.created_at,j.label,'human' AS kind,q.id
-        FROM judge_questions q JOIN room_judges j
-        ON j.room_id=q.room_id AND j.user_id=q.judge_user_id
-        WHERE q.room_id=? AND q.round_number=?
-        UNION ALL
-        SELECT q.text,q.created_at,j.label,'ai' AS kind,q.id
-        FROM ai_judge_questions q JOIN ai_judges j ON j.id=q.ai_judge_id
-        WHERE q.room_id=? AND q.round_number=?
-        ORDER BY 2,4,5''',(room_id,round_number,room_id,round_number)).fetchall()
-
-
-def combined_round_question(rows):
-    return '\n\n'.join(f'【裁判问题 {i}】\n{row["text"]}' for i,row in enumerate(rows,1))
-
-
-def combined_question_length_with_addition(db, room_id, round_number, text):
-    rows=list(round_question_rows(db,room_id,round_number))
-    rows.append({'text':text})
-    return len(combined_round_question(rows))
-
-
-def inspect_round_start(db, room):
-    rnd=current_round(db,room)
-    participant_count=active_participant_count(db,room['id'])
-    rows=round_question_rows(db,room['id'],rnd['number'])
-    question=combined_round_question(rows)
-    reason=None
-    if room['status']!='open' or room['verdict_locked_at']:
-        reason='比赛已结束或裁判判断已锁定。'
-    elif rnd['status']!='draft':
-        reason='本轮已经开始。'
-    elif participant_count<2:
-        reason='至少需要两名在场参赛者，才能开始统一作答。'
-    elif not rows:
-        reason='还没有裁判提交问题。'
-    elif len(question)>6000:
-        reason='裁判问题合计超过 6000 字，请减少内容后重新开局。'
-    return {'round':rnd,'participant_count':participant_count,'questions':rows,
-            'question':question,'reason':reason,'question_chars':len(question)}
-
-
-def model_request_count(db, room_id, match_number):
-    return int(db.execute('''SELECT COUNT(*) FROM model_operation_tasks
-        WHERE room_id=? AND match_number=? AND request_started_at IS NOT NULL''',
-        (room_id,match_number)).fetchone()[0])
-
-
-def match_readiness(db, room):
-    rnd=current_round(db,room)
-    validation=inspect_round_start(db,room)
-    judges=judge_records(db,room['id'])
-    question_count=len(validation['questions'])
-    human_pending=0
-    for judge in judges:
-        if judge['kind']=='human' and not db.execute('''SELECT 1 FROM judge_questions
-            WHERE room_id=? AND round_number=? AND judge_user_id=?''',
-            (room['id'],rnd['number'],judge['user_id'])).fetchone():
-            human_pending+=1
-    ai_rows=db.execute('''SELECT j.id,j.model_profile_id,q.id AS question_id,
-            mp.*,u.deleted_at AS owner_deleted_at
-        FROM ai_judges j
-        LEFT JOIN model_profiles mp ON mp.id=j.model_profile_id
-        LEFT JOIN users u ON u.id=mp.owner_user_id
-        LEFT JOIN ai_judge_questions q ON q.room_id=j.room_id AND q.round_number=? AND q.ai_judge_id=j.id
-        WHERE j.room_id=? ORDER BY j.id''',(rnd['number'],room['id'])).fetchall()
-    auto_pending=0
-    unbound_ai_pending=0
-    unavailable_ai_pending=0
-    for row in ai_rows:
-        if row['question_id'] is not None:
-            continue
-        if row['model_profile_id'] is None:
-            unbound_ai_pending+=1
-            continue
-        if model_profile_credential_status(dict(row))=='ok':
-            auto_pending+=1
-        else:
-            unavailable_ai_pending+=1
-    manual_pending=human_pending+unbound_ai_pending
-    attempts=model_request_count(db,room['id'],room['match_number'])
-    limit=room['model_request_limit']
-    limit_reached=limit is not None and attempts>=limit
-    can_generate=(room['status']=='open' and rnd['status']=='draft' and
-                  validation['participant_count']>=2 and auto_pending>0 and
-                  not limit_reached and validation['question_chars']<=6000)
-    blockers=[]
-    if validation['participant_count']<2:
-        blockers.append(f'当前仅有 {validation["participant_count"]} 位参赛者；至少需要两名在场参赛者才能开始统一作答。')
-    if room['status']!='open':
-        blockers.append('本场比赛已结束。')
-    elif rnd['status']!='draft':
-        blockers.append('当前轮次已开始作答。')
-    elif not question_count and not auto_pending:
-        blockers.append('本轮尚无裁判问题。')
-    if validation['question_chars']>6000:
-        blockers.append('裁判问题合计超过 6000 字。')
-    notices=[]
-    if manual_pending:
-        notices.append(f'{manual_pending} 位真人 / 手动 AI 裁判尚未交题；已有至少一份合规问题时，房主仍可按现有规则确认开局。')
-    if unavailable_ai_pending:
-        notices.append(f'{unavailable_ai_pending} 位 AI 裁判配置不可用，请在 AI 裁判管理检查席位，并修复个人配置或更换绑定。')
-    if limit_reached:
-        notices.append('本场模型请求次数已达上限；可调整上限或手动转录。')
-    elif auto_pending:
-        notices.append(f'{auto_pending} 位可用模型 AI 裁判尚未交题。')
-    if not judges:
-        notices.append('当前使用外部裁判流程，不需要配置模型 API；可手动录入并发布问题。')
-    return {
-        'participant_count':validation['participant_count'],
-        'question_count':question_count,
-        'question_chars':validation['question_chars'],
-        'total_judges':len(judges),
-        'submitted_judges':sum(1 for j in judges if
-            (j['kind']=='human' and db.execute('''SELECT 1 FROM judge_questions
-                WHERE room_id=? AND round_number=? AND judge_user_id=?''',
-                (room['id'],rnd['number'],j['user_id'])).fetchone()) or
-            (j['kind']=='ai' and db.execute('''SELECT 1 FROM ai_judge_questions
-                WHERE room_id=? AND round_number=? AND ai_judge_id=?''',
-                (room['id'],rnd['number'],j['id'])).fetchone())),
-        'auto_pending':auto_pending,'manual_pending':manual_pending,
-        'unavailable_ai_pending':unavailable_ai_pending,
-        'independent_judges':len(judges),'external_judge':not judges,
-        'phase':rnd['status'],'can_start':validation['reason'] is None,
-        'can_generate_and_start':can_generate,
-        'model_request_count':attempts,'model_request_limit':limit,
-        'model_request_remaining':None if limit is None else max(0,int(limit)-attempts),
-        'model_limit_reached':limit_reached,'blockers':blockers,'notices':notices,
-        'manual_question_required':not judges and rnd['status']=='draft' and not question_count,
-        'suggested_view':('admin' if validation['participant_count']<2 else
-                          'human-judges' if human_pending else
-                          'ai-judges' if unbound_ai_pending or unavailable_ai_pending or auto_pending else 'admin'),
-    }
-
-
-def model_operation_view(row):
-    return {
-        'id':row['id'],'purpose':row['purpose'],'target_type':row['target_type'],
-        'target_key':row['target_key'],'target_label':row['target_label'],
-        'profile_name':row['profile_name'],'model_name':row['model_name'],
-        'state':row['state'],'retry_of':row['retry_of'],
-        'queued_at':row['queued_at'],'request_started_at':row['request_started_at'],
-        'request_finished_at':row['request_finished_at'],'finished_at':row['finished_at'],
-        'queue_ms':row['queue_ms'],'duration_ms':row['duration_ms'],
-        'request_succeeded':None if row['request_succeeded'] is None else bool(row['request_succeeded']),
-        'result_applied':bool(row['result_applied']),'usage_known':bool(row['usage_known']),
-        'prompt_tokens':row['prompt_tokens'],'completion_tokens':row['completion_tokens'],
-        'total_tokens':row['total_tokens'],'error_message':row['error_message'],
-    }
 
 
 def public_room(db, room, user, mine):
@@ -1153,7 +903,7 @@ def public_room(db, room, user, mine):
         ai_edits = {row['alias']:row['text'] for row in db.execute('''SELECT a.alias,a.text FROM answers a
             JOIN ai_players ai ON ai.room_id=? AND ai.alias=a.alias
             WHERE a.round_id=?''',(room['id'],now_round['id']))}
-    result={'id':room['id'],'title':room['title'],'judge':room['judge'],
+    return {'id':room['id'],'title':room['title'],'judge':room['judge'],
             'match_number':room['match_number'],'records_deleted':bool(room['records_deleted']),
             'can_manage':manager,'is_owner':room['owner_id']==user['id'],
             'roster_recovery':manager and needs_roster_recovery(db,room),
@@ -1177,37 +927,6 @@ def public_room(db, room, user, mine):
             'rounds':body,'suggestions':[dict(s) for s in suggestions],
             'ai_edits':ai_edits,'packets':[dict(p) for p in pkts],
             'model_profiles':model_profiles,'model_api_enabled':has_valid_credential_key()}
-    if manager:
-        current_round_row=db.execute('SELECT status FROM rounds WHERE room_id=? AND number=?',
-                                      (room['id'],room['current_round'])).fetchone()
-        has_current_round=bool(current_round_row)
-        phase_purpose=None
-        if current_round_row and current_round_row['status']=='draft':
-            phase_purpose='judge_question'
-        elif current_round_row and current_round_row['status']=='collecting':
-            phase_purpose='ai_answer'
-        elif current_round_row and current_round_row['status']=='revealed' and room['status']=='open':
-            all_rounds=db.execute('SELECT status FROM rounds WHERE room_id=?',(room['id'],)).fetchall()
-            if all_rounds and all(row['status']=='revealed' for row in all_rounds):
-                phase_purpose='judge_verdict'
-        all_operations=db.execute('''SELECT * FROM model_operation_tasks
-            WHERE room_id=? AND match_number=? ORDER BY id DESC LIMIT 60''',
-            (room['id'],room['match_number'])).fetchall()
-        operations=[row for row in all_operations
-                    if has_current_round and phase_purpose and
-                    row['round_number']==room['current_round'] and row['purpose']==phase_purpose][:30]
-        active_ids={row['id'] for row in operations}
-        history=[row for row in all_operations if row['id'] not in active_ids][:30]
-        result.update({
-            # Clearing completed records removes the old round rows as well; do not
-            # make a read-only room refresh fail while waiting for the next match.
-            'readiness':match_readiness(db,room) if has_current_round else None,
-            'model_operations':[model_operation_view(row) for row in operations],
-            'model_operation_history':[model_operation_view(row) for row in history],
-            'model_request_count':model_request_count(db,room['id'],room['match_number']),
-            'model_request_limit':room['model_request_limit'],
-        })
-    return result
 
 
 def anonymous_match_packet(db, room_id, through_round=None):
@@ -1420,93 +1139,15 @@ def create_app(db_path=None):
     app = FastAPI(title='图灵测试多人主持台', docs_url=None, redoc_url=None)
     app.state.path = path
     app.state.hub = Hub(path)
-    async def model_call(profile, messages, api_key, preflight=None, operation_id=None):
+    async def model_call(profile, messages, api_key, preflight=None):
         loop = asyncio.get_running_loop()
         if getattr(app.state, 'model_semaphore_loop', None) is not loop:
             app.state.model_semaphore = asyncio.Semaphore(4)
             app.state.model_semaphore_loop = loop
         async with app.state.model_semaphore:
-            if operation_id is None:
-                if preflight is not None and not preflight():
-                    raise ModelCallCancelled()
-            else:
-                outcome=None
-                room_id=None
-                with connection(immediate=True) as db:
-                    task=db.execute('SELECT * FROM model_operation_tasks WHERE id=?',(operation_id,)).fetchone()
-                    if not task or task['state']!='queued':
-                        outcome='stale'
-                    else:
-                        room_id=task['room_id']
-                        if preflight is not None and not preflight():
-                            finish_model_operation_in_db(db,operation_id,'stale',
-                                error='排队期间权限、配置或比赛上下文发生变化；未向服务商发送请求。')
-                            outcome='stale'
-                        else:
-                            room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone() if room_id is not None else None
-                            if room_id is not None and (not room or room['match_number']!=task['match_number']):
-                                finish_model_operation_in_db(db,operation_id,'stale',
-                                    error='房间或比赛场次已变化；未向服务商发送请求。')
-                                outcome='stale'
-                            else:
-                                if room_id is not None:
-                                    attempts=model_request_count(db,room_id,task['match_number'])
-                                    limit=room['model_request_limit']
-                                    if limit is not None and attempts>=limit:
-                                        finish_model_operation_in_db(db,operation_id,'blocked',
-                                            error='本场模型请求次数已达上限；请提高上限或手动转录。')
-                                        outcome='blocked'
-                                if outcome is None:
-                                    now=operation_timestamp()
-                                    try:
-                                        queued=datetime.fromisoformat(task['queued_at'])
-                                        wait_ms=max(0,int((datetime.now(timezone.utc)-queued).total_seconds()*1000))
-                                    except (TypeError,ValueError):
-                                        wait_ms=0
-                                    db.execute("""UPDATE model_operation_tasks SET state='requesting',
-                                        request_started_at=?,queue_ms=?,updated_at=?
-                                        WHERE id=? AND state='queued'""",(now,wait_ms,now,operation_id))
-                if outcome is not None:
-                    if room_id is not None:
-                        await app.state.hub.notify(room_id,'model_operation_updated')
-                    if outcome=='blocked':
-                        raise ModelRequestLimitReached('本场模型请求次数已达上限；请提高上限或手动转录。')
-                    raise ModelCallCancelled()
-                await notify_model_operation(operation_id)
-
-            started=time.perf_counter()
-            try:
-                result=await chat_completion(profile,messages,api_key)
-            except Exception as exc:
-                if operation_id is not None:
-                    now=operation_timestamp()
-                    with connection(immediate=True) as db:
-                        db.execute("""UPDATE model_operation_tasks SET state='failed',
-                            request_finished_at=?,finished_at=?,duration_ms=?,request_succeeded=0,
-                            error_message=?,result_applied=0,updated_at=?
-                            WHERE id=? AND state='requesting'""",
-                            (now,now,round((time.perf_counter()-started)*1000),
-                             operation_error_message(exc),now,operation_id))
-                    await notify_model_operation(operation_id)
-                raise
-
-            if operation_id is not None:
-                now=operation_timestamp()
-                usage=result.get('usage') if isinstance(result,dict) else {}
-                usage=usage if isinstance(usage,dict) else {}
-                prompt=usage.get('prompt_tokens')
-                completion=usage.get('completion_tokens')
-                total=usage.get('total_tokens')
-                known=any(value is not None for value in (prompt,completion,total))
-                with connection(immediate=True) as db:
-                    db.execute("""UPDATE model_operation_tasks SET request_finished_at=?,
-                        duration_ms=?,request_succeeded=1,usage_known=?,
-                        prompt_tokens=?,completion_tokens=?,total_tokens=?,updated_at=?
-                        WHERE id=? AND state='requesting'""",
-                        (now,round((time.perf_counter()-started)*1000),1 if known else 0,
-                         prompt,completion,total,now,operation_id))
-                await notify_model_operation(operation_id)
-            return result
+            if preflight is not None and not preflight():
+                raise ModelCallCancelled()
+            return await chat_completion(profile, messages, api_key)
 
     app.mount('/static', StaticFiles(directory=ROOT/'static'), name='static')
 
@@ -1533,78 +1174,6 @@ def create_app(db_path=None):
             raise
         finally:
             db.close()
-
-
-    def operation_timestamp():
-        return datetime.now(timezone.utc).isoformat(timespec='milliseconds')
-
-    def operation_error_message(error):
-        if isinstance(error, ModelAPIError):
-            message=str(error)
-        elif isinstance(error, HTTPException):
-            message=str(error.detail)
-        else:
-            message='模型调用失败，请检查配置或稍后重试。'
-        return message.replace('\n',' ')[:500]
-
-    def create_model_operation_task(db, *, purpose, target_type, target_key, target_label,
-                                    profile, trigger_user_id, room_id=None, match_number=None,
-                                    round_number=None, context_revision=None, retry_of=None,
-                                    idempotency_key=None):
-        if room_id is None:
-            active=db.execute("""SELECT id,state FROM model_operation_tasks
-                WHERE purpose='connection_test' AND profile_owner_user_id=? AND profile_id=?
-                  AND state IN ('queued','requesting') ORDER BY id DESC LIMIT 1""",
-                (profile['owner_user_id'],profile['id'])).fetchone()
-        else:
-            active=db.execute("""SELECT id,state FROM model_operation_tasks
-                WHERE room_id=? AND match_number=? AND round_number=? AND purpose=?
-                  AND target_type=? AND target_key=? AND state IN ('queued','requesting')
-                ORDER BY id DESC LIMIT 1""",
-                (room_id,match_number,round_number,purpose,target_type,str(target_key))).fetchone()
-        if active:
-            return int(active['id']),False,active['state']
-        now=operation_timestamp()
-        profile_name=profile.get('profile_name') or profile.get('name') or '个人模型配置'
-        model_name=profile.get('model_name') or profile.get('model') or '未知模型'
-        cur=db.execute('''INSERT INTO model_operation_tasks(
-            room_id,match_number,round_number,purpose,target_type,target_key,target_label,
-            profile_id,profile_owner_user_id,trigger_user_id,profile_name,model_name,
-            profile_snapshot_hash,context_revision,state,retry_of,idempotency_key,queued_at,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'queued',?,?,?,?)''',
-            (room_id,match_number,round_number,purpose,target_type,str(target_key),target_label,
-             profile['id'],profile['owner_user_id'],trigger_user_id,profile_name,model_name,
-             model_profile_snapshot_hash(profile),context_revision,retry_of,
-             (idempotency_key or secrets.token_urlsafe(18))[:128],now,now))
-        return int(cur.lastrowid),True,'queued'
-
-    def finish_model_operation_in_db(db, operation_id, state, *, error=None, result_applied=False):
-        now=operation_timestamp()
-        db.execute('''UPDATE model_operation_tasks SET state=?,finished_at=?,updated_at=?,
-            error_message=?,result_applied=?
-            WHERE id=? AND state IN ('queued','requesting')''',
-            (state,now,now,operation_error_message(error) if error else None,
-             1 if result_applied else 0,operation_id))
-
-    def finish_model_operation(operation_id, state, *, error=None, result_applied=False):
-        with connection(immediate=True) as db:
-            row=db.execute('SELECT room_id FROM model_operation_tasks WHERE id=?',(operation_id,)).fetchone()
-            if not row:
-                return None
-            room_id=row['room_id']
-            finish_model_operation_in_db(db,operation_id,state,error=error,result_applied=result_applied)
-        return room_id
-
-    async def finish_and_notify_model_operation(operation_id, state, *, error=None, result_applied=False):
-        room_id=finish_model_operation(operation_id,state,error=error,result_applied=result_applied)
-        if room_id is not None:
-            await app.state.hub.notify(room_id,'model_operation_updated')
-
-    async def notify_model_operation(operation_id):
-        with connection() as db:
-            row=db.execute('SELECT room_id FROM model_operation_tasks WHERE id=?',(operation_id,)).fetchone()
-        if row and row['room_id'] is not None:
-            await app.state.hub.notify(row['room_id'],'model_operation_updated')
 
     def caller(request, db, mutate=False):
         if mutate:
@@ -1740,9 +1309,6 @@ def create_app(db_path=None):
                 UNION SELECT room_id FROM ai_judges WHERE model_profile_id=?''',(profile_id,profile_id))]
             db.execute('UPDATE ai_players SET model_profile_id=NULL WHERE model_profile_id=?',(profile_id,))
             db.execute('UPDATE ai_judges SET model_profile_id=NULL WHERE model_profile_id=?',(profile_id,))
-            db.execute("""DELETE FROM model_operation_tasks
-                WHERE purpose='connection_test' AND profile_id=? AND profile_owner_user_id=?""",
-                (profile_id,u['id']))
             db.execute('DELETE FROM model_profiles WHERE id=? AND owner_user_id=?',(profile_id,u['id']))
         for room_id in set(rooms):
             await app.state.hub.notify(room_id,'model_profile_changed')
@@ -1750,15 +1316,9 @@ def create_app(db_path=None):
 
     @app.post('/api/me/models/{profile_id}/test')
     async def test_my_model_profile(profile_id:int,request:Request):
-        with connection(immediate=True) as db:
+        with connection() as db:
             u=caller(request,db,mutate=True)
             profile=require_owned_model_profile(db,profile_id,u['id'])
-            operation_id,created,_=create_model_operation_task(
-                db,purpose='connection_test',target_type='model_profile',
-                target_key=profile_id,target_label=profile['name'],profile=profile,
-                trigger_user_id=u['id'],idempotency_key=request.headers.get('Idempotency-Key'))
-            if not created:
-                raise HTTPException(409,'该模型配置已有连接测试正在进行。')
         actor_id=u['id']
         session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
         def preflight():
@@ -1771,102 +1331,19 @@ def create_app(db_path=None):
             started=time.perf_counter()
             result=await model_call(profile,[
                 {'role':'system','content':'You are a connection test. Reply with exactly OK.'},
-                {'role':'user','content':'Reply with OK.'}],key,preflight,operation_id=operation_id)
+                {'role':'user','content':'Reply with OK.'}],key,preflight)
         except ModelCallCancelled:
             raise HTTPException(409,'测试排队期间模型配置或账号状态已变化，请重试。')
         except ModelAPIError as exc:
-            await finish_and_notify_model_operation(operation_id,'failed',error=exc)
             raise HTTPException(502,str(exc))
         with connection() as db:
-            token_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
-            session=db.execute('''SELECT u.id FROM sessions s JOIN users u ON u.id=s.user_id
-                WHERE s.token_hash=? AND s.expires_at>? AND u.deleted_at IS NULL''',
-                (token_hash,utcnow())).fetchone()
-            valid=bool(session and session['id']==profile['owner_user_id'] and
-                model_profile_snapshot_valid(db,profile))
-        if not valid:
-            await finish_and_notify_model_operation(operation_id,'stale',
-                error='测试期间模型配置或账号状态已变化；服务商请求结果未作为有效测试应用。')
-            raise HTTPException(409,'测试期间模型配置或账号状态已变化，请重试。')
-        await finish_and_notify_model_operation(operation_id,'completed',result_applied=True)
+            u=caller(request,db)
+            if not db.execute('''SELECT 1 FROM model_profiles mp JOIN users u ON u.id=mp.owner_user_id
+                WHERE mp.id=? AND mp.owner_user_id=? AND mp.ownership_issue IS NULL AND u.deleted_at IS NULL''',
+                (profile_id,u['id'])).fetchone():
+                raise HTTPException(409,'测试期间模型配置或账号状态已变化，请重试。')
         return {'ok':True,'model':profile['model'],'preview':result['text'][:120],
                 'latency_ms':round((time.perf_counter()-started)*1000),'usage':result['usage']}
-
-
-    @app.get('/api/me/model-operations')
-    def list_my_model_operations(request:Request,profile_id:Optional[int]=Query(default=None,ge=1),
-                                 purpose:Optional[str]=Query(default=None),
-                                 status:Optional[str]=Query(default=None),
-                                 limit:int=Query(default=20,ge=1,le=100),
-                                 offset:int=Query(default=0,ge=0)):
-        allowed_purposes={'connection_test','judge_question','ai_answer','judge_verdict'}
-        allowed_states={'queued','requesting','completed','failed','blocked','stale','interrupted'}
-        if purpose is not None and purpose not in allowed_purposes:
-            raise HTTPException(422,'调用用途筛选值无效。')
-        if status is not None and status not in allowed_states:
-            raise HTTPException(422,'调用状态筛选值无效。')
-        with connection() as db:
-            u=caller(request,db)
-            clauses=['profile_owner_user_id=?']
-            params=[u['id']]
-            if profile_id is not None:
-                clauses.append('profile_id=?')
-                params.append(profile_id)
-            if purpose is not None:
-                clauses.append('purpose=?')
-                params.append(purpose)
-            if status is not None:
-                clauses.append('state=?')
-                params.append(status)
-            where=' AND '.join(clauses)
-            total=int(db.execute(f'SELECT COUNT(*) FROM model_operation_tasks WHERE {where}',params).fetchone()[0])
-            stats=db.execute(f'''SELECT COUNT(*) AS task_attempts,
-                SUM(CASE WHEN request_started_at IS NOT NULL THEN 1 ELSE 0 END) AS request_attempts,
-                SUM(CASE WHEN request_succeeded=1 THEN 1 ELSE 0 END) AS request_successes,
-                SUM(CASE WHEN state='failed' THEN 1 ELSE 0 END) AS failures,
-                SUM(CASE WHEN result_applied=1 THEN 1 ELSE 0 END) AS applied_results,
-                SUM(CASE WHEN usage_known=1 THEN 1 ELSE 0 END) AS known_usage_records,
-                SUM(prompt_tokens) AS prompt_tokens,
-                SUM(completion_tokens) AS completion_tokens,
-                SUM(total_tokens) AS total_tokens
-                FROM model_operation_tasks WHERE {where}''',params).fetchone()
-            rows=db.execute(f'''SELECT t.*,r.title AS room_title,
-                    u.id AS trigger_user_id,u.display_name AS trigger_name
-                FROM model_operation_tasks t
-                LEFT JOIN rooms r ON r.id=t.room_id
-                LEFT JOIN users u ON u.id=t.trigger_user_id
-                WHERE {where} ORDER BY t.id DESC LIMIT ? OFFSET ?''',
-                (*params,limit,offset)).fetchall()
-            options=db.execute('''SELECT profile_id,profile_name,model_name,MAX(id) AS latest_id
-                FROM model_operation_tasks WHERE profile_owner_user_id=?
-                GROUP BY profile_id,profile_name,model_name ORDER BY latest_id DESC''',(u['id'],)).fetchall()
-            records=[]
-            for row in rows:
-                item=model_operation_view(row)
-                item.update({
-                    'profile_id':row['profile_id'],'room_id':row['room_id'],
-                    'room_title':row['room_title'],'match_number':row['match_number'],
-                    'round_number':row['round_number'],
-                    'trigger_uid':user_uid(row['trigger_user_id']) if row['trigger_user_id'] else None,
-                    'trigger_name':row['trigger_name'],
-                })
-                records.append(item)
-            known=int(stats['known_usage_records'] or 0)
-            summary={
-                'task_attempts':int(stats['task_attempts'] or 0),
-                'request_attempts':int(stats['request_attempts'] or 0),
-                'request_successes':int(stats['request_successes'] or 0),
-                'failures':int(stats['failures'] or 0),
-                'applied_results':int(stats['applied_results'] or 0),
-                'known_usage_records':known,
-                'prompt_tokens':stats['prompt_tokens'] if known else None,
-                'completion_tokens':stats['completion_tokens'] if known else None,
-                'total_tokens':stats['total_tokens'] if known and stats['total_tokens'] is not None else None,
-            }
-            profile_options=[{'profile_id':row['profile_id'],'profile_name':row['profile_name'],
-                              'model_name':row['model_name']} for row in options]
-        return {'records':records,'total':total,'limit':limit,'offset':offset,
-                'stats':summary,'profile_options':profile_options}
 
     @app.post('/api/login')
     def login(body:LoginData, request:Request, response:Response):
@@ -2214,9 +1691,6 @@ def create_app(db_path=None):
                 UNION SELECT room_id FROM ai_judges WHERE model_profile_id=?''',(profile_id,profile_id))]
             db.execute('UPDATE ai_players SET model_profile_id=NULL WHERE model_profile_id=?',(profile_id,))
             db.execute('UPDATE ai_judges SET model_profile_id=NULL WHERE model_profile_id=?',(profile_id,))
-            db.execute("""DELETE FROM model_operation_tasks
-                WHERE purpose='connection_test' AND profile_id=? AND profile_owner_user_id=?""",
-                (profile_id,u['id']))
             db.execute('DELETE FROM model_profiles WHERE id=? AND owner_user_id=?',(profile_id,u['id']))
             log_event(db,room_id,room['current_round'],'model_profile_deleted','房主','删除个人模型配置，关联席位改为手动转录')
         for affected_room in set(rooms)|{room_id}:
@@ -2225,16 +1699,10 @@ def create_app(db_path=None):
 
     @app.post('/api/rooms/{room_id}/models/{profile_id}/test')
     async def test_model_profile(room_id:int,profile_id:int,request:Request):
-        with connection(immediate=True) as db:
+        with connection() as db:
             u=caller(request,db,mutate=True)
             require_room_manager(db,room_id,u)
             profile=require_owned_model_profile(db,profile_id,u['id'])
-            operation_id,created,_=create_model_operation_task(
-                db,purpose='connection_test',target_type='model_profile',
-                target_key=profile_id,target_label=profile['name'],profile=profile,
-                trigger_user_id=u['id'],idempotency_key=request.headers.get('Idempotency-Key'))
-            if not created:
-                raise HTTPException(409,'该模型配置已有连接测试正在进行。')
         actor_id=u['id']
         session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
         def preflight():
@@ -2247,26 +1715,17 @@ def create_app(db_path=None):
             started=time.perf_counter()
             result=await model_call(profile,[
                 {'role':'system','content':'You are a connection test. Reply with exactly OK.'},
-                {'role':'user','content':'Reply with OK.'}],key,preflight,operation_id=operation_id)
+                {'role':'user','content':'Reply with OK.'}],key,preflight)
         except ModelCallCancelled:
             raise HTTPException(409,'测试排队期间房间权限、模型配置或账号状态已变化，请重试。')
         except ModelAPIError as exc:
-            await finish_and_notify_model_operation(operation_id,'failed',error=exc)
             raise HTTPException(502,str(exc))
         with connection() as db:
-            token_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
-            session=db.execute('''SELECT u.id,u.is_admin FROM sessions s JOIN users u ON u.id=s.user_id
-                WHERE s.token_hash=? AND s.expires_at>? AND u.deleted_at IS NULL''',
-                (token_hash,utcnow())).fetchone()
-            current_room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
-            valid=bool(session and current_room and can_manage_room(current_room,dict(session)) and
-                model_profile_snapshot_valid(db,profile) and
-                profile['owner_user_id']==session['id'])
-        if not valid:
-            await finish_and_notify_model_operation(operation_id,'stale',
-                error='测试期间模型配置或账号状态已变化；服务商请求结果未作为有效测试应用。')
-            raise HTTPException(409,'测试期间模型配置或账号状态已变化，请重试。')
-        await finish_and_notify_model_operation(operation_id,'completed',result_applied=True)
+            u=caller(request,db)
+            require_room_manager(db,room_id,u)
+            if not db.execute('SELECT 1 FROM model_profiles WHERE id=? AND owner_user_id=?',
+                              (profile_id,u['id'])).fetchone():
+                raise HTTPException(409,'测试期间模型配置或账号状态已变化，请重试。')
         return {'ok':True,'model':profile['model'],'preview':result['text'][:120],
                 'latency_ms':round((time.perf_counter()-started)*1000),'usage':result['usage']}
 
@@ -2403,8 +1862,7 @@ def create_app(db_path=None):
         return {'ok':True}
 
     @app.post('/api/rooms/{room_id}/ai-judges/questions/generate')
-    async def generate_ai_judge_questions(room_id:int,request:Request,
-                                          target_judge_id:Optional[int]=Query(default=None,ge=1)):
+    async def generate_ai_judge_questions(room_id:int,request:Request):
         with connection() as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
@@ -2415,81 +1873,23 @@ def create_app(db_path=None):
                 raise HTTPException(409,'只能在本轮开始作答前生成 AI 裁判问题。')
             roster=aliases(db,room_id)[2]
             if len(roster)<2:
-                raise HTTPException(409,f'至少需要两名在场参赛者才能生成 AI 裁判问题；当前仅有 {len(roster)} 位。请先让至少两位参赛者加入。')
-            rows=db.execute('''SELECT j.id AS judge_id,j.label,j.model_profile_id,
-                    mp.*,u.deleted_at AS owner_deleted_at,q.id AS question_id
-                FROM ai_judges j
-                LEFT JOIN model_profiles mp ON mp.id=j.model_profile_id
-                LEFT JOIN users u ON u.id=mp.owner_user_id
+                raise HTTPException(409,'至少需要两名参赛者。')
+            rows=db.execute('''SELECT j.id AS judge_id,j.label,mp.* FROM ai_judges j
+                JOIN model_profiles mp ON mp.id=j.model_profile_id AND mp.ownership_issue IS NULL
+                JOIN users profile_owner ON profile_owner.id=mp.owner_user_id AND profile_owner.deleted_at IS NULL
                 LEFT JOIN ai_judge_questions q ON q.room_id=j.room_id AND q.round_number=? AND q.ai_judge_id=j.id
-                WHERE j.room_id=? ORDER BY j.id''',(rnd['number'],room_id)).fetchall()
-            if target_judge_id is not None:
-                rows=[row for row in rows if row['judge_id']==target_judge_id]
+                WHERE j.room_id=? AND q.id IS NULL ORDER BY j.id''',(rnd['number'],room_id)).fetchall()
             match_number=room['match_number']
             actor_id=u['id']
             session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
             round_number=rnd['number']
             history=anonymous_match_packet(db,room_id,round_number-1)
-            profiles=[]
-            results=[]
-            for raw in rows:
-                profile=dict(raw)
-                if profile['question_id'] is not None:
-                    continue
-                if profile['model_profile_id'] is None:
-                    results.append({'judge_id':profile['judge_id'],'label':profile['label'],
-                                    'status':'skipped','reason':'此 AI 裁判席尚未绑定个人模型配置；请绑定可用配置，或手动转录问题。'})
-                    continue
-                credential_status=model_profile_credential_status(profile)
-                if credential_status!='ok':
-                    reasons={
-                        'missing':'绑定的模型配置缺少 API Key，请在个人中心补录后保存。',
-                        'needs_repair':'绑定的模型配置无法解密，请在个人中心重新录入 API Key。',
-                        'key_unavailable':'服务器模型凭据密钥不可用，请联系管理员。',
-                        'owner_unavailable':'绑定的模型配置或其所属账号不可用，请重新绑定可用配置。',
-                    }
-                    results.append({'judge_id':profile['judge_id'],'label':profile['label'],
-                                    'status':'skipped','reason':reasons.get(
-                                        credential_status,'绑定的模型配置不可用，请在个人中心检查后重新绑定。')})
-                    continue
-                profiles.append(profile)
-            context_revision=hashlib.sha256(
-                (str(round_number)+'|'+','.join(roster)+'|'+history).encode('utf-8')).hexdigest()
-            retry_of=getattr(request.state,'model_operation_retry_of',None)
-            queued_profiles=[]
-            for profile in profiles:
-                with connection(immediate=True) as db:
-                    operation_id,created,active_state=create_model_operation_task(
-                        db,purpose='judge_question',target_type='ai_judge',
-                        target_key=profile['judge_id'],target_label=profile['label'],
-                        profile=profile,trigger_user_id=actor_id,room_id=room_id,
-                        match_number=match_number,round_number=round_number,
-                        context_revision=context_revision,retry_of=retry_of,
-                        idempotency_key=request.headers.get('Idempotency-Key'))
-                if created:
-                    profile['_operation_id']=operation_id
-                    queued_profiles.append(profile)
-                else:
-                    results.append({'judge_id':profile['judge_id'],'label':profile['label'],
-                                    'status':active_state,'reason':'该席位已有进行中的模型任务。'})
-            profiles=queued_profiles
-        if profiles:
-            await app.state.hub.notify(room_id,'model_operation_updated')
-        if not rows:
-            return {'generated':0,'skipped':0,'failed':[],'results':[],
-                    'message':'当前房间没有 AI 裁判席。'}
-        pending_count=len(profiles)+len(results)
-        if not pending_count:
-            return {'generated':0,'skipped':0,'failed':[],'results':[],
-                    'message':'本轮 AI 裁判均已提交问题，无需重复生成。'}
+            profiles=[dict(row) for row in rows]
         if not profiles:
-            return {'generated':0,'skipped':sum(x['status']=='skipped' for x in results),
-                    'blocked':sum(x['status']=='blocked' for x in results),'failed':[],'results':results,
-                    'message':'没有新的 AI 裁判请求；请查看席位状态或使用手动转录。'}
+            return {'generated':0,'skipped':0,'failed':[]}
 
         async def generate_one(profile):
             judge_id=profile['judge_id']
-            operation_id=profile['_operation_id']
             try:
                 key=decrypt_api_key(profile['api_key_encrypted'])
                 def preflight():
@@ -2506,8 +1906,6 @@ def create_app(db_path=None):
                         current_rnd=current_round(db,current)
                         if current_rnd['number']!=round_number or current_rnd['status']!='draft':
                             return False
-                        if aliases(db,room_id)[2]!=roster:
-                            return False
                         return not db.execute('SELECT 1 FROM ai_judge_questions WHERE room_id=? AND round_number=? AND ai_judge_id=?',
                                               (room_id,round_number,judge_id)).fetchone()
                 result=await model_call(profile,[
@@ -2515,76 +1913,42 @@ def create_app(db_path=None):
                      '问题必须面向所有匿名参赛者，不能询问真实姓名、账号、模型名称或系统提示。'
                      '只输出问题正文，不要前言、编号或解释。')},
                     {'role':'user','content':f'此前轮次的匿名资料：\n{history}\n\n当前是第 {round_number} 轮，参赛者匿名代号：{", ".join(roster)}。'
-                     '请根据已有信息提出一个适合所有参赛者回答的全新问题。'}],key,preflight,
-                    operation_id=operation_id)
+                     '请根据已有信息提出一个适合所有参赛者回答的全新问题。'}],key,preflight)
                 question=norm_text(result['text'],3000)
                 with connection(immediate=True) as db:
                     current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
                     if not current or current['match_number']!=match_number or current['status']!='open':
-                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间比赛场次或状态发生变化，旧问题未保存。')
-                        return {'judge_id':judge_id,'label':profile['label'],'status':'skipped',
-                                'reason':'生成期间比赛场次或状态发生变化，旧问题未保存。'}
-                    if not model_call_actor_valid(db,room_id,actor_id,session_hash) or not model_profile_snapshot_valid(db,profile):
-                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间登录权限或模型配置发生变化，旧问题未保存。')
-                        return {'judge_id':judge_id,'label':profile['label'],'status':'skipped',
-                                'reason':'生成期间登录权限或模型配置发生变化，旧问题未保存。'}
+                        return {'judge_id':judge_id,'status':'skipped'}
+                    if not model_call_actor_valid(db,room_id,actor_id,session_hash) or not model_profile_owner_active(db,profile['id']):
+                        return {'judge_id':judge_id,'status':'skipped'}
                     binding=db.execute('SELECT model_profile_id FROM ai_judges WHERE room_id=? AND id=?',
                                        (room_id,judge_id)).fetchone()
                     if not binding or binding['model_profile_id']!=profile['id']:
-                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间 AI 裁判席绑定发生变化，旧问题未保存。')
-                        return {'judge_id':judge_id,'label':profile['label'],'status':'skipped',
-                                'reason':'生成期间 AI 裁判席绑定发生变化，旧问题未保存。'}
+                        return {'judge_id':judge_id,'status':'skipped'}
                     current_rnd=current_round(db,current)
                     if current_rnd['number']!=round_number or current_rnd['status']!='draft':
-                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间轮次已变化或已开始作答，旧问题未保存。')
-                        return {'judge_id':judge_id,'label':profile['label'],'status':'skipped',
-                                'reason':'生成期间轮次已变化或已开始作答，旧问题未保存。'}
-                    if aliases(db,room_id)[2]!=roster:
-                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间参赛名单发生变化，旧问题未保存。')
-                        return {'judge_id':judge_id,'label':profile['label'],'status':'skipped',
-                                'reason':'生成期间参赛名单发生变化，旧问题未保存。'}
+                        return {'judge_id':judge_id,'status':'skipped'}
                     if db.execute('SELECT 1 FROM ai_judge_questions WHERE room_id=? AND round_number=? AND ai_judge_id=?',
                                   (room_id,round_number,judge_id)).fetchone():
-                        finish_model_operation_in_db(db,operation_id,'stale',error='该 AI 裁判已提交本轮问题，未重复保存。')
-                        return {'judge_id':judge_id,'label':profile['label'],'status':'skipped',
-                                'reason':'该 AI 裁判已提交本轮问题，未重复保存。'}
-                    if combined_question_length_with_addition(db,room_id,round_number,question)>6000:
-                        error='生成的问题会使本轮裁判问题合计超过 6000 字，问题未保存；请先精简已有问题。'
-                        finish_model_operation_in_db(db,operation_id,'failed',error=error)
-                        return {'judge_id':judge_id,'label':profile['label'],'status':'failed','error':error}
+                        return {'judge_id':judge_id,'status':'skipped'}
                     db.execute('INSERT INTO ai_judge_questions(room_id,round_number,ai_judge_id,text,created_at) VALUES(?,?,?,?,?)',
                                (room_id,round_number,judge_id,question,utcnow()))
                     log_event(db,room_id,round_number,'ai_judge_question','AI 裁判','模型 API 已自动生成本轮问题')
-                    finish_model_operation_in_db(db,operation_id,'completed',result_applied=True)
                 await app.state.hub.notify(room_id,'ai_judge_question')
-                return {'judge_id':judge_id,'label':profile['label'],'status':'generated','usage':result['usage']}
-            except ModelRequestLimitReached as exc:
-                return {'judge_id':judge_id,'label':profile['label'],'status':'blocked','error':str(exc)}
+                return {'judge_id':judge_id,'status':'generated','usage':result['usage']}
             except ModelCallCancelled:
-                return {'judge_id':judge_id,'label':profile['label'],'status':'skipped',
-                        'reason':'任务排队期间权限、配置、绑定或比赛状态发生变化；未向服务商发送请求。'}
+                return {'judge_id':judge_id,'status':'skipped'}
             except ModelAPIError as exc:
-                await finish_and_notify_model_operation(operation_id,'failed',error=exc)
-                return {'judge_id':judge_id,'label':profile['label'],'status':'failed','error':str(exc)}
+                return {'judge_id':judge_id,'status':'failed','error':str(exc)}
             except HTTPException as exc:
-                await finish_and_notify_model_operation(operation_id,'failed',error=exc)
-                return {'judge_id':judge_id,'label':profile['label'],'status':'failed','error':str(exc.detail)}
-            except Exception as exc:
-                await finish_and_notify_model_operation(operation_id,'failed',error=exc)
-                return {'judge_id':judge_id,'label':profile['label'],'status':'failed',
-                        'error':'模型调用失败或返回内容为空，请检查配置、服务状态或稍后重试。'}
+                return {'judge_id':judge_id,'status':'failed','error':str(exc.detail)}
+            except Exception:
+                return {'judge_id':judge_id,'status':'failed','error':'模型调用失败，请检查配置或稍后重试。'}
 
-        generated_results=await asyncio.gather(*(generate_one(profile) for profile in profiles))
-        results.extend(generated_results)
-        failed=[x for x in results if x['status']=='failed']
-        skipped=sum(x['status']=='skipped' for x in results)
-        generated=sum(x['status']=='generated' for x in results)
-        return {'generated':generated,'skipped':skipped,
-                'blocked':sum(x['status']=='blocked' for x in results),
-                'failed':failed,'results':results,
-                'message':('AI 裁判问题生成完成。' if generated else
-                           '没有 AI 裁判成功生成问题；请查看各席位原因。')}
-
+        results=await asyncio.gather(*(generate_one(profile) for profile in profiles))
+        return {'generated':sum(x['status']=='generated' for x in results),
+                'skipped':sum(x['status']=='skipped' for x in results),
+                'failed':[x for x in results if x['status']=='failed'],'results':results}
 
     @app.post('/api/rooms/{room_id}/ai-judges/{judge_id}/questions')
     async def ai_judge_question(room_id:int,judge_id:int,body:TextData,request:Request):
@@ -2606,8 +1970,6 @@ def create_app(db_path=None):
             if len(roster)<2:
                 raise HTTPException(409,'至少需要两名参赛者。')
             msg=norm_text(body.text,3000)
-            if combined_question_length_with_addition(db,room_id,rnd['number'],msg)>6000:
-                raise HTTPException(422,'本轮裁判问题合计不能超过 6000 字，请精简后重新提交。')
             db.execute('INSERT INTO ai_judge_questions(room_id,round_number,ai_judge_id,text,created_at) VALUES(?,?,?,?,?)',
                        (room_id,rnd['number'],judge_id,msg,utcnow()))
             log_event(db,room_id,rnd['number'],'ai_judge_question','管理员','已转录 AI 裁判问题')
@@ -2632,8 +1994,6 @@ def create_app(db_path=None):
             if len(roster)<2:
                 raise HTTPException(409,'至少需要两名参赛者。')
             text=norm_text(body.text,3000)
-            if combined_question_length_with_addition(db,room_id,rnd['number'],text)>6000:
-                raise HTTPException(422,'本轮裁判问题合计不能超过 6000 字，请精简后重新提交。')
             db.execute('INSERT INTO judge_questions(room_id,round_number,judge_user_id,text,created_at) VALUES(?,?,?,?,?)',
                        (room_id,rnd['number'],u['id'],text,utcnow()))
             # 审计日志只记录提交动作，不存入账号信息或答案。
@@ -2641,28 +2001,32 @@ def create_app(db_path=None):
         await app.state.hub.notify(room_id,'judge_question_proposed')
         return {'ok':True}
 
-
-    @app.put('/api/rooms/{room_id}/model-request-limit')
-    async def update_model_request_limit(room_id:int,body:ModelRequestLimitData,request:Request):
-        with connection(immediate=True) as db:
-            u=caller(request,db,mutate=True)
-            room,_=require_room_manager(db,room_id,u)
-            db.execute('UPDATE rooms SET model_request_limit=? WHERE id=?',(body.limit,room_id))
-            attempts=model_request_count(db,room_id,room['match_number'])
-        await app.state.hub.notify(room_id,'model_request_limit_changed')
-        return {'ok':True,'limit':body.limit,'attempted':attempts,
-                'remaining':None if body.limit is None else max(0,body.limit-attempts)}
-
     @app.post('/api/rooms/{room_id}/start')
     async def start_round(room_id:int,request:Request):
         with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
-            validation=inspect_round_start(db,room)
-            if validation['reason']:
-                raise HTTPException(409,validation['reason'])
-            rnd=validation['round']
-            question=validation['question']
+            if room['status']!='open' or room['verdict_locked_at']:
+                raise HTTPException(409,'比赛已结束。')
+            rnd=current_round(db,room)
+            if rnd['status']!='draft':
+                raise HTTPException(409,'本轮已经开始。')
+            if len(aliases(db,room_id)[2])<2:
+                raise HTTPException(409,'至少需要两名在场参赛者，才能开始统一作答。')
+            qs=db.execute('''SELECT q.text,q.created_at,j.label,'human' AS kind,q.id
+                FROM judge_questions q JOIN room_judges j
+                ON j.room_id=q.room_id AND j.user_id=q.judge_user_id
+                WHERE q.room_id=? AND q.round_number=?
+                UNION ALL
+                SELECT q.text,q.created_at,j.label,'ai' AS kind,q.id
+                FROM ai_judge_questions q JOIN ai_judges j ON j.id=q.ai_judge_id
+                WHERE q.room_id=? AND q.round_number=?
+                ORDER BY 2,4,5''',(room_id,rnd['number'],room_id,rnd['number'])).fetchall()
+            if not qs:
+                raise HTTPException(409,'还没有裁判提交问题。')
+            question='\n\n'.join(f'【裁判问题 {i}】\n{q["text"]}' for i,q in enumerate(qs,1))
+            if len(question)>6000:
+                raise HTTPException(409,'裁判问题合计超过 6000 字，请减少内容后重新开局。')
             db.execute('UPDATE rounds SET question=?,status=? WHERE id=?',(question,'collecting',rnd['id']))
             log_event(db,room_id,rnd['number'],'judge_question','独立裁判组','主持人已开启统一作答')
         await app.state.hub.notify(room_id,'judge_question')
@@ -2782,8 +2146,7 @@ def create_app(db_path=None):
         return {'ok':True,'revealed':finished}
 
     @app.post('/api/rooms/{room_id}/ai/answers/generate')
-    async def generate_ai_answers(room_id:int,request:Request,
-                                  target_alias:Optional[str]=Query(default=None,min_length=1,max_length=8)):
+    async def generate_ai_answers(room_id:int,request:Request):
         with connection() as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
@@ -2792,54 +2155,24 @@ def create_app(db_path=None):
             rnd=current_round(db,room)
             if rnd['status']!='collecting':
                 raise HTTPException(409,'只有本轮正在收集回答时才能生成 AI 回复。')
-            rows=db.execute('''SELECT ai.alias,ai.name AS ai_name,mp.*,
-                    mp.name AS profile_name,mp.model AS model_name FROM ai_players ai
+            rows=db.execute('''SELECT ai.alias,ai.name,mp.* FROM ai_players ai
                 JOIN model_profiles mp ON mp.id=ai.model_profile_id AND mp.ownership_issue IS NULL
                 JOIN users profile_owner ON profile_owner.id=mp.owner_user_id AND profile_owner.deleted_at IS NULL
                 LEFT JOIN answers a ON a.round_id=? AND a.alias=ai.alias
                 WHERE ai.room_id=? AND a.id IS NULL ORDER BY ai.alias''',(rnd['id'],room_id)).fetchall()
-            if target_alias is not None:
-                rows=[row for row in rows if row['alias']==target_alias.upper()]
             match_number=room['match_number']
             actor_id=u['id']
             session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
             round_number=rnd['number']
             question=rnd['question']
-            results=[]
             profiles=[dict(row) for row in rows]
             history_by_alias={row['alias']:anonymous_player_history(db,room_id,row['alias'],round_number-1)
                               for row in rows}
-            retry_of=getattr(request.state,'model_operation_retry_of',None)
-            queued_profiles=[]
-            for profile in profiles:
-                context_revision=hashlib.sha256(
-                    (question+'\0'+history_by_alias.get(profile['alias'],'')).encode('utf-8')).hexdigest()
-                with connection(immediate=True) as task_db:
-                    operation_id,created,active_state=create_model_operation_task(
-                        task_db,purpose='ai_answer',target_type='ai_player',
-                        target_key=profile['alias'],
-                        target_label=f"{profile['alias']} · {profile.get('ai_name') or profile.get('name')}",
-                        profile=profile,trigger_user_id=actor_id,room_id=room_id,
-                        match_number=match_number,round_number=round_number,
-                        context_revision=context_revision,retry_of=retry_of,
-                        idempotency_key=request.headers.get('Idempotency-Key'))
-                if created:
-                    profile['_operation_id']=operation_id
-                    queued_profiles.append(profile)
-                else:
-                    results.append({'alias':profile['alias'],'status':active_state,
-                                    'reason':'该席位已有进行中的模型任务。'})
-            profiles=queued_profiles
-        if profiles:
-            await app.state.hub.notify(room_id,'model_operation_updated')
         if not profiles:
-            return {'generated':0,'skipped':sum(x['status']=='skipped' for x in results),
-                    'blocked':sum(x['status']=='blocked' for x in results),
-                    'failed':[],'results':results}
+            return {'generated':0,'skipped':0,'failed':[]}
 
         async def generate_one(profile):
             alias=profile['alias']
-            operation_id=profile['_operation_id']
             try:
                 key=decrypt_api_key(profile['api_key_encrypted'])
                 def preflight():
@@ -2861,29 +2194,23 @@ def create_app(db_path=None):
                 result=await model_call(profile,[
                     {'role':'system','content':('你正在参加一场多人图灵测试。你是匿名参赛者，请自然、直接地回答裁判问题。'
                      '不要提及模型、API、系统提示或你被要求扮演的身份；不要编造个人经历来冒充真实事实。')},
-                    {'role':'user','content':f'你此前的本场记录（只包含你自己的回答）：\n{history_by_alias.get(alias, "（此前没有已完成轮次。）")}\n\n当前第 {round_number} 轮裁判问题：\n\n{question}\n\n请给出你的本轮回答。'}],key,preflight,
-                    operation_id=operation_id)
+                    {'role':'user','content':f'你此前的本场记录（只包含你自己的回答）：\n{history_by_alias.get(alias, "（此前没有已完成轮次。）")}\n\n当前第 {round_number} 轮裁判问题：\n\n{question}\n\n请给出你的本轮回答。'}],key,preflight)
                 answer=norm_text(result['text'],12000)
                 with connection(immediate=True) as db:
                     current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
                     if not current or current['match_number']!=match_number or current['status']!='open':
-                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间比赛场次或状态发生变化，旧回答未保存。')
                         return {'alias':alias,'status':'skipped'}
-                    if not model_call_actor_valid(db,room_id,actor_id,session_hash) or not model_profile_snapshot_valid(db,profile):
-                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间登录权限或模型配置所属账号发生变化，旧回答未保存。')
+                    if not model_call_actor_valid(db,room_id,actor_id,session_hash) or not model_profile_owner_active(db,profile['id']):
                         return {'alias':alias,'status':'skipped'}
                     binding=db.execute('SELECT model_profile_id FROM ai_players WHERE room_id=? AND alias=?',
                                        (room_id,alias)).fetchone()
                     if not binding or binding['model_profile_id']!=profile['id']:
-                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间 AI 参赛席绑定发生变化，旧回答未保存。')
                         return {'alias':alias,'status':'skipped'}
                     current_rnd=current_round(db,current)
-                    if current_rnd['number']!=round_number or current_rnd['status']!='collecting' or current_rnd['question']!=question:
-                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间轮次或问题发生变化，旧回答未保存。')
+                    if current_rnd['number']!=round_number or current_rnd['status']!='collecting':
                         return {'alias':alias,'status':'skipped'}
                     if db.execute('SELECT 1 FROM answers WHERE round_id=? AND alias=?',
                                   (current_rnd['id'],alias)).fetchone():
-                        finish_model_operation_in_db(db,operation_id,'stale',error='该 AI 参赛席已提交本轮回答，未重复保存。')
                         return {'alias':alias,'status':'skipped'}
                     db.execute('INSERT INTO answers(round_id,alias,text,submitted_at) VALUES(?,?,?,?)',
                                (current_rnd['id'],alias,answer,utcnow()))
@@ -2891,27 +2218,20 @@ def create_app(db_path=None):
                     completed=is_complete(db,current_rnd,room_id)
                     if completed:
                         log_event(db,room_id,round_number,'round_revealed','系统','本轮全部回答已公开')
-                    finish_model_operation_in_db(db,operation_id,'completed',result_applied=True)
                 await app.state.hub.notify(room_id,'round_revealed' if completed else 'answer_submitted')
                 return {'alias':alias,'status':'generated','usage':result['usage']}
-            except ModelRequestLimitReached as exc:
-                return {'alias':alias,'status':'blocked','error':str(exc)}
             except ModelCallCancelled:
                 return {'alias':alias,'status':'skipped'}
             except ModelAPIError as exc:
-                await finish_and_notify_model_operation(operation_id,'failed',error=exc)
                 return {'alias':alias,'status':'failed','error':str(exc)}
             except HTTPException as exc:
-                await finish_and_notify_model_operation(operation_id,'failed',error=exc)
                 return {'alias':alias,'status':'failed','error':str(exc.detail)}
-            except Exception as exc:
-                await finish_and_notify_model_operation(operation_id,'failed',error=exc)
+            except Exception:
                 return {'alias':alias,'status':'failed','error':'模型调用失败，请检查配置或稍后重试。'}
 
         results=await asyncio.gather(*(generate_one(profile) for profile in profiles))
         return {'generated':sum(x['status']=='generated' for x in results),
                 'skipped':sum(x['status']=='skipped' for x in results),
-                'blocked':sum(x['status']=='blocked' for x in results),
                 'failed':[x for x in results if x['status']=='failed'],
                 'results':results}
 
@@ -3144,8 +2464,7 @@ def create_app(db_path=None):
         return {'ok':True}
 
     @app.post('/api/rooms/{room_id}/ai-judges/verdicts/generate')
-    async def generate_ai_judge_verdicts(room_id:int,request:Request,
-                                         target_judge_id:Optional[int]=Query(default=None,ge=1)):
+    async def generate_ai_judge_verdicts(room_id:int,request:Request):
         with connection() as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
@@ -3162,41 +2481,15 @@ def create_app(db_path=None):
                 JOIN users profile_owner ON profile_owner.id=mp.owner_user_id AND profile_owner.deleted_at IS NULL
                 LEFT JOIN ai_judge_verdicts v ON v.room_id=j.room_id AND v.ai_judge_id=j.id
                 WHERE j.room_id=? AND v.ai_judge_id IS NULL ORDER BY j.id''',(room_id,)).fetchall()
-            if target_judge_id is not None:
-                rows=[row for row in rows if row['judge_id']==target_judge_id]
             match_number=room['match_number']
             actor_id=u['id']
             session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
-            results=[]
             profiles=[dict(row) for row in rows]
-            retry_of=getattr(request.state,'model_operation_retry_of',None)
-            queued_profiles=[]
-            for profile in profiles:
-                with connection(immediate=True) as task_db:
-                    operation_id,created,active_state=create_model_operation_task(
-                        task_db,purpose='judge_verdict',target_type='ai_judge',
-                        target_key=profile['judge_id'],target_label=profile['label'],
-                        profile=profile,trigger_user_id=actor_id,room_id=room_id,
-                        match_number=match_number,round_number=room['current_round'],
-                        context_revision=evidence_revision,retry_of=retry_of,
-                        idempotency_key=request.headers.get('Idempotency-Key'))
-                if created:
-                    profile['_operation_id']=operation_id
-                    queued_profiles.append(profile)
-                else:
-                    results.append({'judge_id':profile['judge_id'],'status':active_state,
-                                    'reason':'该席位已有进行中的模型任务。'})
-            profiles=queued_profiles
-        if profiles:
-            await app.state.hub.notify(room_id,'model_operation_updated')
         if not profiles:
-            return {'generated':0,'skipped':sum(x['status']=='skipped' for x in results),
-                    'blocked':sum(x['status']=='blocked' for x in results),
-                    'failed':[],'results':results}
+            return {'generated':0,'skipped':0,'failed':[]}
 
         async def generate_one(profile):
             judge_id=profile['judge_id']
-            operation_id=profile['_operation_id']
             try:
                 key=decrypt_api_key(profile['api_key_encrypted'])
                 def preflight():
@@ -3224,8 +2517,7 @@ def create_app(db_path=None):
                      '严格返回 JSON 对象，不要使用 Markdown 代码块或附加说明。结构：'
                      '{"predictions":{"A":"Human"},"evidence":"判断依据","confidence":0,"weakness":"最不确定之处","possible_error":"可能误判原因"}。'
                      'predictions 的值只能是 Human 或 AI，confidence 必须为 0 到 100 的整数。')},
-                    {'role':'user','content':packet}],key,preflight,
-                    operation_id=operation_id)
+                    {'role':'user','content':packet}],key,preflight)
                 payload=parse_json_object(result['text'])
                 verdict=VerdictData.model_validate(payload)
                 if set(verdict.predictions)!=set(roster) or not all(v in ('Human','AI') for v in verdict.predictions.values()):
@@ -3235,30 +2527,24 @@ def create_app(db_path=None):
                 with connection(immediate=True) as db:
                     current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
                     if not current or current['match_number']!=match_number or current['status']!='open':
-                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间比赛场次或状态发生变化，旧判决未保存。')
                         return {'judge_id':judge_id,'status':'skipped'}
-                    if not model_call_actor_valid(db,room_id,actor_id,session_hash) or not model_profile_snapshot_valid(db,profile):
-                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间登录权限或模型配置所属账号发生变化，旧判决未保存。')
+                    if not model_call_actor_valid(db,room_id,actor_id,session_hash) or not model_profile_owner_active(db,profile['id']):
                         return {'judge_id':judge_id,'status':'skipped'}
                     binding=db.execute('SELECT model_profile_id FROM ai_judges WHERE room_id=? AND id=?',
                                        (room_id,judge_id)).fetchone()
                     if not binding or binding['model_profile_id']!=profile['id']:
-                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间 AI 裁判席绑定发生变化，旧判决未保存。')
                         return {'judge_id':judge_id,'status':'skipped'}
                     states=db.execute('SELECT status FROM rounds WHERE room_id=?',(room_id,)).fetchall()
                     if not states or any(x['status']!='revealed' for x in states):
-                        finish_model_operation_in_db(db,operation_id,'stale',error='比赛资料在模型判断期间发生变化，已废弃旧判决，请重新生成。')
-                        return {'judge_id':judge_id,'status':'skipped',
-                                'reason':'比赛资料发生变化，旧判决已作废。'}
+                        return {'judge_id':judge_id,'status':'failed',
+                                'error':'比赛资料在模型判断期间发生变化，已废弃旧判决，请重新生成。'}
                     current_packet=anonymous_match_packet(db,room_id)
                     current_revision=hashlib.sha256(current_packet.encode('utf-8')).hexdigest()
                     if current_revision!=evidence_revision:
-                        finish_model_operation_in_db(db,operation_id,'stale',error='比赛资料在模型判断期间发生变化，已废弃旧判决，请重新生成。')
-                        return {'judge_id':judge_id,'status':'skipped',
-                                'reason':'比赛资料发生变化，旧判决已作废。'}
+                        return {'judge_id':judge_id,'status':'failed',
+                                'error':'比赛资料在模型判断期间发生变化，已废弃旧判决，请重新生成。'}
                     if db.execute('SELECT 1 FROM ai_judge_verdicts WHERE room_id=? AND ai_judge_id=?',
                                   (room_id,judge_id)).fetchone():
-                        finish_model_operation_in_db(db,operation_id,'stale',error='该 AI 裁判已经锁定判断，旧结果未重复保存。')
                         return {'judge_id':judge_id,'status':'skipped'}
                     locked=utcnow()
                     data=verdict.model_dump()
@@ -3266,119 +2552,19 @@ def create_app(db_path=None):
                     db.execute('INSERT INTO ai_judge_verdicts(room_id,ai_judge_id,verdict_json,locked_at) VALUES(?,?,?,?)',
                                (room_id,judge_id,json.dumps(data,ensure_ascii=False),locked))
                     log_event(db,room_id,current['current_round'],'ai_judge_verdict_locked','AI 裁判','模型 API 已自动完成最终判断并锁定')
-                    finish_model_operation_in_db(db,operation_id,'completed',result_applied=True)
                 await app.state.hub.notify(room_id,'ai_judge_verdict_locked')
                 return {'judge_id':judge_id,'status':'generated','usage':result['usage']}
-            except ModelRequestLimitReached as exc:
-                return {'judge_id':judge_id,'status':'blocked','error':str(exc)}
             except ModelCallCancelled:
                 return {'judge_id':judge_id,'status':'skipped'}
             except ModelAPIError as exc:
-                await finish_and_notify_model_operation(operation_id,'failed',error=exc)
                 return {'judge_id':judge_id,'status':'failed','error':str(exc)}
             except Exception as exc:
-                await finish_and_notify_model_operation(operation_id,'failed',error=exc)
                 return {'judge_id':judge_id,'status':'failed','error':'AI 裁判返回格式无效或模型调用失败，请检查配置后重试。'}
 
         results=await asyncio.gather(*(generate_one(profile) for profile in profiles))
         return {'generated':sum(x['status']=='generated' for x in results),
                 'skipped':sum(x['status']=='skipped' for x in results),
-                'blocked':sum(x['status']=='blocked' for x in results),
                 'failed':[x for x in results if x['status']=='failed'],'results':results}
-
-
-    @app.post('/api/rooms/{room_id}/model-operations/{operation_id}/retry')
-    async def retry_model_operation(room_id:int,operation_id:int,request:Request):
-        with connection() as db:
-            u=caller(request,db,mutate=True)
-            room,_=require_room_manager(db,room_id,u)
-            task=db.execute('SELECT * FROM model_operation_tasks WHERE id=? AND room_id=?',
-                            (operation_id,room_id)).fetchone()
-            if not task:
-                raise HTTPException(404,'模型任务不存在或已随比赛记录清理。')
-            if task['state'] not in ('failed','interrupted','blocked'):
-                raise HTTPException(409,'只有失败、中断或额度阻止的任务可以重试。')
-            if task['match_number']!=room['match_number'] or task['round_number']!=room['current_round']:
-                raise HTTPException(409,'任务所属比赛场次或轮次已变化，不能重试旧任务。')
-            if room['status']!='open' or room['verdict_locked_at']:
-                raise HTTPException(409,'比赛已结束或判决已锁定，不能重试。')
-            profile_row=db.execute('''SELECT mp.*,u.deleted_at AS owner_deleted_at
-                FROM model_profiles mp JOIN users u ON u.id=mp.owner_user_id
-                WHERE mp.id=? AND mp.owner_user_id=?''',
-                (task['profile_id'],task['profile_owner_user_id'])).fetchone()
-            if not profile_row or model_profile_credential_status(dict(profile_row))!='ok':
-                raise HTTPException(409,'原模型配置已删除或不可用，请先修复配置并重新绑定。')
-            profile=dict(profile_row)
-            if model_profile_snapshot_hash(profile)!=task['profile_snapshot_hash']:
-                raise HTTPException(409,'原模型配置已发生变化，请确认新配置后从当前阶段重新发起。')
-            purpose=task['purpose']
-            target_key=task['target_key']
-            if purpose=='judge_question':
-                rnd=current_round(db,room)
-                if rnd['number']!=task['round_number'] or rnd['status']!='draft':
-                    raise HTTPException(409,'当前轮次已开始或变化，不能重试出题。')
-                if active_participant_count(db,room_id)<2:
-                    raise HTTPException(409,'至少需要两名在场参赛者才能重新出题。')
-                judge=db.execute('SELECT model_profile_id,label FROM ai_judges WHERE room_id=? AND id=?',
-                                 (room_id,int(target_key))).fetchone()
-                if not judge or judge['model_profile_id']!=task['profile_id']:
-                    raise HTTPException(409,'AI 裁判席已删除或更换绑定，不能重试旧任务。')
-                if db.execute('SELECT 1 FROM ai_judge_questions WHERE room_id=? AND round_number=? AND ai_judge_id=?',
-                              (room_id,task['round_number'],int(target_key))).fetchone():
-                    raise HTTPException(409,'该 AI 裁判已提交问题，无需重试。')
-                roster=aliases(db,room_id)[2]
-                history=anonymous_match_packet(db,room_id,task['round_number']-1)
-                revision=hashlib.sha256(
-                    (str(task['round_number'])+'|'+','.join(roster)+'|'+history).encode('utf-8')).hexdigest()
-                if revision!=task['context_revision']:
-                    raise HTTPException(409,'本次出题依据已变化，请从当前阶段重新发起。')
-                target_judge_id=int(target_key)
-                retry_function=generate_ai_judge_questions
-            elif purpose=='ai_answer':
-                rnd=current_round(db,room)
-                if rnd['number']!=task['round_number'] or rnd['status']!='collecting':
-                    raise HTTPException(409,'当前轮次已结束或变化，不能重试回答。')
-                seat=db.execute('SELECT name,model_profile_id FROM ai_players WHERE room_id=? AND alias=?',
-                                (room_id,target_key)).fetchone()
-                if not seat or seat['model_profile_id']!=task['profile_id']:
-                    raise HTTPException(409,'AI 参赛席已删除或更换绑定，不能重试旧任务。')
-                if db.execute('SELECT 1 FROM answers WHERE round_id=? AND alias=?',
-                              (rnd['id'],target_key)).fetchone():
-                    raise HTTPException(409,'该 AI 参赛席已提交回答，无需重试。')
-                history=anonymous_player_history(db,room_id,target_key,task['round_number']-1)
-                revision=hashlib.sha256((rnd['question']+'\0'+history).encode('utf-8')).hexdigest()
-                if revision!=task['context_revision']:
-                    raise HTTPException(409,'回答所依据的问题或历史资料已变化，不能重试旧任务。')
-                target_alias=target_key
-                retry_function=generate_ai_answers
-            elif purpose=='judge_verdict':
-                rounds=db.execute('SELECT status FROM rounds WHERE room_id=? ORDER BY number',(room_id,)).fetchall()
-                if not rounds or any(row['status']!='revealed' for row in rounds):
-                    raise HTTPException(409,'所有轮次必须保持已揭晓状态，才能重试最终判断。')
-                judge=db.execute('SELECT model_profile_id FROM ai_judges WHERE room_id=? AND id=?',
-                                 (room_id,int(target_key))).fetchone()
-                if not judge or judge['model_profile_id']!=task['profile_id']:
-                    raise HTTPException(409,'AI 裁判席已删除或更换绑定，不能重试旧任务。')
-                if db.execute('SELECT 1 FROM ai_judge_verdicts WHERE room_id=? AND ai_judge_id=?',
-                              (room_id,int(target_key))).fetchone():
-                    raise HTTPException(409,'该 AI 裁判已锁定判断，无需重试。')
-                packet=anonymous_match_packet(db,room_id)
-                revision=hashlib.sha256(packet.encode('utf-8')).hexdigest()
-                if revision!=task['context_revision']:
-                    raise HTTPException(409,'最终判断依据已变化，不能重试旧任务。')
-                target_judge_id=int(target_key)
-                retry_function=generate_ai_judge_verdicts
-            else:
-                raise HTTPException(409,'此类模型任务不支持重试。')
-            if room['model_request_limit'] is not None and model_request_count(
-                    db,room_id,room['match_number'])>=room['model_request_limit']:
-                raise HTTPException(409,'本场模型请求次数仍已达到上限，请先提高上限。')
-        request.state.model_operation_retry_of=operation_id
-        if purpose=='judge_question':
-            return await retry_function(room_id,request,target_judge_id=target_judge_id)
-        if purpose=='ai_answer':
-            return await retry_function(room_id,request,target_alias=target_alias)
-        return await retry_function(room_id,request,target_judge_id=target_judge_id)
 
     @app.post('/api/rooms/{room_id}/ai-judges/{judge_id}/verdict')
     async def lock_ai_judge_verdict(room_id:int,judge_id:int,body:VerdictData,request:Request):

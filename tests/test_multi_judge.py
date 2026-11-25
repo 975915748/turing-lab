@@ -146,11 +146,11 @@ def test_legacy_database_auto_migrates_and_old_room_retained(tmp_path):
         c.execute('INSERT INTO rounds (room_id,number,question,status,created_at) VALUES (?,?,?,?,?)',
                   (1,1,'','draft','2026-01-01T00:00:00+00:00'))
     new_app=create_app(db)
-    backups=list(tmp_path.glob('existing.pre-v1_9-*.sqlite3'))
+    backups=list(tmp_path.glob('existing.pre-v1_1-*.sqlite3'))
     assert len(backups)==1 and backups[0].stat().st_size>0
     # A second startup should not generate a second migration backup.
     create_app(db)
-    assert len(list(tmp_path.glob('existing.pre-v1_9-*.sqlite3')))==1
+    assert len(list(tmp_path.glob('existing.pre-v1_1-*.sqlite3')))==1
     newer=TestClient(new_app)
     post(newer,'/api/login',{'username':'original_admin','password':'secure-password123'})
     view=newer.get('/api/rooms/1').json()
