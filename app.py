@@ -287,13 +287,38 @@ def init_db(path):
         if 'AUTOINCREMENT' not in room_sql.upper():
             migrate_room_ids(db,room_sql)
         migrate_model_profiles(db)
-        # A process restart cannot determine whether an in-flight provider request
-        # completed. Preserve its quota reservation and require an explicit retry.
+        # Never replay a possibly billed request after restart. First check whether
+        # its match context or target content already changed while the process was down.
         interrupted_at=datetime.now(timezone.utc).isoformat(timespec='milliseconds')
-        db.execute("""UPDATE model_operation_tasks SET state='interrupted',
-            finished_at=COALESCE(finished_at,?),updated_at=?,
-            error_message='服务重启，无法确认请求是否完成；请先核对比赛内容再重试。'
-            WHERE state IN ('queued','requesting')""",(interrupted_at,interrupted_at))
+        unfinished=db.execute("""SELECT * FROM model_operation_tasks
+            WHERE state IN ('queued','requesting') ORDER BY id""").fetchall()
+        for task in unfinished:
+            next_state='interrupted'
+            message='服务重启，无法确认请求是否完成；请先核对比赛内容再重试。'
+            if task['room_id'] is not None:
+                room=db.execute('SELECT * FROM rooms WHERE id=?',(task['room_id'],)).fetchone()
+                stale=not room or room['match_number']!=task['match_number'] or room['current_round']!=task['round_number']
+                if not stale and task['purpose']=='judge_question':
+                    stale=bool(db.execute('''SELECT 1 FROM ai_judge_questions
+                        WHERE room_id=? AND round_number=? AND ai_judge_id=?''',
+                        (task['room_id'],task['round_number'],int(task['target_key']))).fetchone())
+                    stale=stale or room['status']!='open'
+                elif not stale and task['purpose']=='ai_answer':
+                    round_row=db.execute('SELECT id,question,status FROM rounds WHERE room_id=? AND number=?',
+                                          (task['room_id'],task['round_number'])).fetchone()
+                    stale=bool(not round_row or round_row['status']!='collecting' or
+                        db.execute('SELECT 1 FROM answers WHERE round_id=? AND alias=?',
+                                   (round_row['id'],task['target_key'])).fetchone())
+                elif not stale and task['purpose']=='judge_verdict':
+                    stale=bool(db.execute('SELECT 1 FROM ai_judge_verdicts WHERE room_id=? AND ai_judge_id=?',
+                                          (task['room_id'],int(task['target_key']))).fetchone())
+                    stale=stale or room['status']!='open'
+                if stale:
+                    next_state='stale'
+                    message='服务重启时发现目标内容已完成或比赛上下文已变化；旧任务已作废。'
+            db.execute('''UPDATE model_operation_tasks SET state=?,finished_at=?,updated_at=?,
+                error_message=? WHERE id=? AND state IN ('queued','requesting')''',
+                (next_state,interrupted_at,interrupted_at,message,task['id']))
 
 
 
