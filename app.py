@@ -1159,17 +1159,32 @@ def public_room(db, room, user, mine):
             'ai_edits':ai_edits,'packets':[dict(p) for p in pkts],
             'model_profiles':model_profiles,'model_api_enabled':has_valid_credential_key()}
     if manager:
-        operations=db.execute('''SELECT * FROM model_operation_tasks
-            WHERE room_id=? AND match_number=? AND round_number=?
-            ORDER BY id DESC LIMIT 30''',
-            (room['id'],room['match_number'],room['current_round'])).fetchall()
-        has_current_round=bool(db.execute('SELECT 1 FROM rounds WHERE room_id=? AND number=?',
-                                           (room['id'],room['current_round'])).fetchone())
+        current_round_row=db.execute('SELECT status FROM rounds WHERE room_id=? AND number=?',
+                                      (room['id'],room['current_round'])).fetchone()
+        has_current_round=bool(current_round_row)
+        phase_purpose=None
+        if current_round_row and current_round_row['status']=='draft':
+            phase_purpose='judge_question'
+        elif current_round_row and current_round_row['status']=='collecting':
+            phase_purpose='ai_answer'
+        elif current_round_row and current_round_row['status']=='revealed' and room['status']=='open':
+            all_rounds=db.execute('SELECT status FROM rounds WHERE room_id=?',(room['id'],)).fetchall()
+            if all_rounds and all(row['status']=='revealed' for row in all_rounds):
+                phase_purpose='judge_verdict'
+        all_operations=db.execute('''SELECT * FROM model_operation_tasks
+            WHERE room_id=? AND match_number=? ORDER BY id DESC LIMIT 60''',
+            (room['id'],room['match_number'])).fetchall()
+        operations=[row for row in all_operations
+                    if has_current_round and phase_purpose and
+                    row['round_number']==room['current_round'] and row['purpose']==phase_purpose][:30]
+        active_ids={row['id'] for row in operations}
+        history=[row for row in all_operations if row['id'] not in active_ids][:30]
         result.update({
             # Clearing completed records removes the old round rows as well; do not
             # make a read-only room refresh fail while waiting for the next match.
             'readiness':match_readiness(db,room) if has_current_round else None,
             'model_operations':[model_operation_view(row) for row in operations],
+            'model_operation_history':[model_operation_view(row) for row in history],
             'model_request_count':model_request_count(db,room['id'],room['match_number']),
             'model_request_limit':room['model_request_limit'],
         })
