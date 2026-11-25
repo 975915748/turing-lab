@@ -2460,32 +2460,28 @@ def create_app(db_path=None):
         await app.state.hub.notify(room_id,'judge_question_proposed')
         return {'ok':True}
 
+
+    @app.put('/api/rooms/{room_id}/model-request-limit')
+    async def update_model_request_limit(room_id:int,body:ModelRequestLimitData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            db.execute('UPDATE rooms SET model_request_limit=? WHERE id=?',(body.limit,room_id))
+            attempts=model_request_count(db,room_id,room['match_number'])
+        await app.state.hub.notify(room_id,'model_request_limit_changed')
+        return {'ok':True,'limit':body.limit,'attempted':attempts,
+                'remaining':None if body.limit is None else max(0,body.limit-attempts)}
+
     @app.post('/api/rooms/{room_id}/start')
     async def start_round(room_id:int,request:Request):
         with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
-            if room['status']!='open' or room['verdict_locked_at']:
-                raise HTTPException(409,'比赛已结束。')
-            rnd=current_round(db,room)
-            if rnd['status']!='draft':
-                raise HTTPException(409,'本轮已经开始。')
-            if len(aliases(db,room_id)[2])<2:
-                raise HTTPException(409,'至少需要两名在场参赛者，才能开始统一作答。')
-            qs=db.execute('''SELECT q.text,q.created_at,j.label,'human' AS kind,q.id
-                FROM judge_questions q JOIN room_judges j
-                ON j.room_id=q.room_id AND j.user_id=q.judge_user_id
-                WHERE q.room_id=? AND q.round_number=?
-                UNION ALL
-                SELECT q.text,q.created_at,j.label,'ai' AS kind,q.id
-                FROM ai_judge_questions q JOIN ai_judges j ON j.id=q.ai_judge_id
-                WHERE q.room_id=? AND q.round_number=?
-                ORDER BY 2,4,5''',(room_id,rnd['number'],room_id,rnd['number'])).fetchall()
-            if not qs:
-                raise HTTPException(409,'还没有裁判提交问题。')
-            question='\n\n'.join(f'【裁判问题 {i}】\n{q["text"]}' for i,q in enumerate(qs,1))
-            if len(question)>6000:
-                raise HTTPException(409,'裁判问题合计超过 6000 字，请减少内容后重新开局。')
+            validation=inspect_round_start(db,room)
+            if validation['reason']:
+                raise HTTPException(409,validation['reason'])
+            rnd=validation['round']
+            question=validation['question']
             db.execute('UPDATE rounds SET question=?,status=? WHERE id=?',(question,'collecting',rnd['id']))
             log_event(db,room_id,rnd['number'],'judge_question','独立裁判组','主持人已开启统一作答')
         await app.state.hub.notify(room_id,'judge_question')
@@ -3106,6 +3102,100 @@ def create_app(db_path=None):
                 'skipped':sum(x['status']=='skipped' for x in results),
                 'blocked':sum(x['status']=='blocked' for x in results),
                 'failed':[x for x in results if x['status']=='failed'],'results':results}
+
+
+    @app.post('/api/rooms/{room_id}/model-operations/{operation_id}/retry')
+    async def retry_model_operation(room_id:int,operation_id:int,request:Request):
+        with connection() as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            task=db.execute('SELECT * FROM model_operation_tasks WHERE id=? AND room_id=?',
+                            (operation_id,room_id)).fetchone()
+            if not task:
+                raise HTTPException(404,'模型任务不存在或已随比赛记录清理。')
+            if task['state'] not in ('failed','interrupted','blocked'):
+                raise HTTPException(409,'只有失败、中断或额度阻止的任务可以重试。')
+            if task['match_number']!=room['match_number'] or task['round_number']!=room['current_round']:
+                raise HTTPException(409,'任务所属比赛场次或轮次已变化，不能重试旧任务。')
+            if room['status']!='open' or room['verdict_locked_at']:
+                raise HTTPException(409,'比赛已结束或判决已锁定，不能重试。')
+            profile_row=db.execute('''SELECT mp.*,u.deleted_at AS owner_deleted_at
+                FROM model_profiles mp JOIN users u ON u.id=mp.owner_user_id
+                WHERE mp.id=? AND mp.owner_user_id=?''',
+                (task['profile_id'],task['profile_owner_user_id'])).fetchone()
+            if not profile_row or model_profile_credential_status(dict(profile_row))!='ok':
+                raise HTTPException(409,'原模型配置已删除或不可用，请先修复配置并重新绑定。')
+            profile=dict(profile_row)
+            if model_profile_snapshot_hash(profile)!=task['profile_snapshot_hash']:
+                raise HTTPException(409,'原模型配置已发生变化，请确认新配置后从当前阶段重新发起。')
+            purpose=task['purpose']
+            target_key=task['target_key']
+            if purpose=='judge_question':
+                rnd=current_round(db,room)
+                if rnd['number']!=task['round_number'] or rnd['status']!='draft':
+                    raise HTTPException(409,'当前轮次已开始或变化，不能重试出题。')
+                if active_participant_count(db,room_id)<2:
+                    raise HTTPException(409,'至少需要两名在场参赛者才能重新出题。')
+                judge=db.execute('SELECT model_profile_id,label FROM ai_judges WHERE room_id=? AND id=?',
+                                 (room_id,int(target_key))).fetchone()
+                if not judge or judge['model_profile_id']!=task['profile_id']:
+                    raise HTTPException(409,'AI 裁判席已删除或更换绑定，不能重试旧任务。')
+                if db.execute('SELECT 1 FROM ai_judge_questions WHERE room_id=? AND round_number=? AND ai_judge_id=?',
+                              (room_id,task['round_number'],int(target_key))).fetchone():
+                    raise HTTPException(409,'该 AI 裁判已提交问题，无需重试。')
+                roster=aliases(db,room_id)[2]
+                history=anonymous_match_packet(db,room_id,task['round_number']-1)
+                revision=hashlib.sha256(
+                    (str(task['round_number'])+'|'+','.join(roster)+'|'+history).encode('utf-8')).hexdigest()
+                if revision!=task['context_revision']:
+                    raise HTTPException(409,'本次出题依据已变化，请从当前阶段重新发起。')
+                target_judge_id=int(target_key)
+                retry_function=generate_ai_judge_questions
+            elif purpose=='ai_answer':
+                rnd=current_round(db,room)
+                if rnd['number']!=task['round_number'] or rnd['status']!='collecting':
+                    raise HTTPException(409,'当前轮次已结束或变化，不能重试回答。')
+                seat=db.execute('SELECT name,model_profile_id FROM ai_players WHERE room_id=? AND alias=?',
+                                (room_id,target_key)).fetchone()
+                if not seat or seat['model_profile_id']!=task['profile_id']:
+                    raise HTTPException(409,'AI 参赛席已删除或更换绑定，不能重试旧任务。')
+                if db.execute('SELECT 1 FROM answers WHERE round_id=? AND alias=?',
+                              (rnd['id'],target_key)).fetchone():
+                    raise HTTPException(409,'该 AI 参赛席已提交回答，无需重试。')
+                history=anonymous_player_history(db,room_id,target_key,task['round_number']-1)
+                revision=hashlib.sha256((rnd['question']+'\0'+history).encode('utf-8')).hexdigest()
+                if revision!=task['context_revision']:
+                    raise HTTPException(409,'回答所依据的问题或历史资料已变化，不能重试旧任务。')
+                target_alias=target_key
+                retry_function=generate_ai_answers
+            elif purpose=='judge_verdict':
+                rounds=db.execute('SELECT status FROM rounds WHERE room_id=? ORDER BY number',(room_id,)).fetchall()
+                if not rounds or any(row['status']!='revealed' for row in rounds):
+                    raise HTTPException(409,'所有轮次必须保持已揭晓状态，才能重试最终判断。')
+                judge=db.execute('SELECT model_profile_id FROM ai_judges WHERE room_id=? AND id=?',
+                                 (room_id,int(target_key))).fetchone()
+                if not judge or judge['model_profile_id']!=task['profile_id']:
+                    raise HTTPException(409,'AI 裁判席已删除或更换绑定，不能重试旧任务。')
+                if db.execute('SELECT 1 FROM ai_judge_verdicts WHERE room_id=? AND ai_judge_id=?',
+                              (room_id,int(target_key))).fetchone():
+                    raise HTTPException(409,'该 AI 裁判已锁定判断，无需重试。')
+                packet=anonymous_match_packet(db,room_id)
+                revision=hashlib.sha256(packet.encode('utf-8')).hexdigest()
+                if revision!=task['context_revision']:
+                    raise HTTPException(409,'最终判断依据已变化，不能重试旧任务。')
+                target_judge_id=int(target_key)
+                retry_function=generate_ai_judge_verdicts
+            else:
+                raise HTTPException(409,'此类模型任务不支持重试。')
+            if room['model_request_limit'] is not None and model_request_count(
+                    db,room_id,room['match_number'])>=room['model_request_limit']:
+                raise HTTPException(409,'本场模型请求次数仍已达到上限，请先提高上限。')
+        request.state.model_operation_retry_of=operation_id
+        if purpose=='judge_question':
+            return await retry_function(room_id,request,target_judge_id=target_judge_id)
+        if purpose=='ai_answer':
+            return await retry_function(room_id,request,target_alias=target_alias)
+        return await retry_function(room_id,request,target_judge_id=target_judge_id)
 
     @app.post('/api/rooms/{room_id}/ai-judges/{judge_id}/verdict')
     async def lock_ai_judge_verdict(room_id:int,judge_id:int,body:VerdictData,request:Request):
