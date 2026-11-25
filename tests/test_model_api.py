@@ -784,3 +784,113 @@ def test_queued_ai_judge_question_is_discarded_when_roster_changes(model_lab, mo
 
     asyncio.run(scenario())
 
+@pytest.mark.parametrize('failure,expected_message', [
+    ('http', 'HTTP 503'),
+    ('timeout', '超时'),
+    ('empty', 'Chat Completions 格式'),
+    ('malformed', 'Chat Completions 格式'),
+    ('invalid_json', 'Chat Completions 格式'),
+])
+def test_chat_completion_reports_http_timeout_and_invalid_content_safely(
+        monkeypatch, failure, expected_message):
+    endpoint = model_api.ResolvedEndpoint(
+        base_url='https://api.example.com/v1',
+        host='api.example.com',
+        port=443,
+        addresses=('93.184.216.34',),
+    )
+    monkeypatch.setattr(model_api, 'resolve_base_url', lambda value: endpoint)
+
+    if failure == 'http':
+        body = b'{"error":{"message":"provider unavailable"}}'
+        status = 503
+    elif failure == 'empty':
+        body = b'{"choices":[{"message":{"content":"  "}}]}'
+        status = 200
+    elif failure == 'malformed':
+        body = b'{"choices":[]}'
+        status = 200
+    elif failure == 'invalid_json':
+        body = b'{not-json'
+        status = 200
+    else:
+        body = b''
+        status = 200
+
+    wire_response = (
+        f'HTTP/1.1 {status} TEST\\r\\n'.encode('ascii')
+        + f'Content-Length: {len(body)}\\r\\n'.encode('ascii')
+        + b'Connection: close\\r\\n\\r\\n'
+        + body
+    )
+
+    class FakeStream(httpcore.AsyncNetworkStream):
+        def __init__(self):
+            self.remaining = wire_response
+
+        async def read(self, max_bytes, timeout=None):
+            if failure == 'timeout':
+                raise httpcore.ReadTimeout('simulated timeout')
+            if not self.remaining:
+                return b''
+            chunk, self.remaining = self.remaining[:max_bytes], self.remaining[max_bytes:]
+            return chunk
+
+        async def write(self, buffer, timeout=None):
+            pass
+
+        async def aclose(self):
+            pass
+
+        async def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+            return self
+
+        def get_extra_info(self, info):
+            return None
+
+    class FakeBackend(httpcore.AsyncNetworkBackend):
+        async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+            assert host == '93.184.216.34'
+            assert port == 443
+            return FakeStream()
+
+        async def connect_unix_socket(self, path, timeout=None, socket_options=None):
+            raise AssertionError('model API must not use unix sockets')
+
+        async def sleep(self, seconds):
+            pass
+
+    profile = {
+        'base_url': endpoint.base_url,
+        'model': 'mock-model',
+        'temperature': 0.3,
+        'max_tokens': 128,
+        'timeout_seconds': 10,
+    }
+    with pytest.raises(ModelAPIError) as caught:
+        asyncio.run(model_api.chat_completion(
+            profile, [{'role': 'user', 'content': 'test'}], 'sk-never-log-this',
+            network_backend=FakeBackend(),
+        ))
+    assert expected_message in str(caught.value)
+    assert 'sk-never-log-this' not in str(caught.value)
+
+
+def test_ai_judge_question_generation_reports_empty_model_content(model_lab, monkeypatch):
+    admin, base = model_lab['admin'], model_lab['base']
+    post(admin, base + '/ai-judges', {
+        'name': '空内容 AI 裁判',
+        'model_profile_id': model_lab['profile_id'],
+    })
+
+    async def empty_provider_response(*args, **kwargs):
+        return {'text': '   ', 'usage': {}}
+
+    monkeypatch.setattr(app_module, 'chat_completion', empty_provider_response)
+    result = post(admin, base + '/ai-judges/questions/generate')
+    assert result['generated'] == 0
+    assert len(result['failed']) == 1
+    assert '内容需要 1～3000 字' in result['failed'][0]['error']
+    room = admin.get(base).json()
+    assert room['rounds'][0]['questions'] == []
+
