@@ -57,10 +57,15 @@ def test_zero_one_two_players_and_external_judge_manual_flow(tmp_path):
     assert readiness['participant_count'] == 0
     assert readiness['external_judge'] is True
     assert readiness['manual_question_required'] is True
+    assert readiness['suggested_view'] == 'admin'
+    assert any('0 位' in item for item in readiness['blockers'])
     post(admin, base + '/start', expected=409)
 
     make_players(lab['app'], lab['code'], 1)
-    assert admin.get(base).json()['readiness']['participant_count'] == 1
+    readiness = admin.get(base).json()['readiness']
+    assert readiness['participant_count'] == 1
+    assert readiness['suggested_view'] == 'admin'
+    assert any('1 位' in item for item in readiness['blockers'])
     post(admin, base + '/start', expected=409)
 
     second = TestClient(lab['app'])
@@ -123,8 +128,14 @@ def test_combined_questions_over_6000_chars_block_start(tmp_path):
     admin, base = lab['admin'], lab['base']
     make_players(lab['app'], lab['code'], 2)
     judges = [add_ai_judge(admin, base, f'裁判 {index}') for index in range(3)]
-    for judge in judges:
-        submit_ai_question(admin, base, judge['id'], '题' * 3000)
+    # Simulate legacy / manually seeded oversized data; current submission routes
+    # reject a question before it can push the combined total past 6000 characters.
+    with db_open(lab['path']) as db:
+        for judge in judges:
+            db.execute('''INSERT INTO ai_judge_questions(
+                room_id,round_number,ai_judge_id,text,created_at)
+                VALUES(?,1,?,?,?)''',
+                (lab['room_id'],judge['id'],'题' * 3000,'2026-11-25T00:00:00+00:00'))
 
     readiness = admin.get(base).json()['readiness']
     assert readiness['question_count'] == 3
@@ -133,6 +144,24 @@ def test_combined_questions_over_6000_chars_block_start(tmp_path):
     assert any('6000' in item for item in readiness['blockers'])
     post(admin, base + '/start', expected=409)
 
+
+
+def test_manual_ai_question_submission_rejects_combined_overflow(tmp_path):
+    lab = make_lab(tmp_path)
+    admin, base = lab['admin'], lab['base']
+    make_players(lab['app'], lab['code'], 2)
+    first = add_ai_judge(admin, base, '手动裁判 A')
+    second = add_ai_judge(admin, base, '手动裁判 B')
+    third = add_ai_judge(admin, base, '手动裁判 C')
+
+    submit_ai_question(admin, base, first['id'], '甲' * 2980)
+    submit_ai_question(admin, base, second['id'], '乙' * 2980)
+    post(admin, f"{base}/ai-judges/{third['id']}/questions",
+         {'text': '丙' * 30}, expected=422)
+
+    room = admin.get(base).json()
+    assert len(room['rounds'][0]['questions']) == 2
+    assert room['readiness']['question_chars'] <= 6000
 
 def test_removed_and_soft_deleted_accounts_do_not_count_as_present_players(tmp_path):
     lab = make_lab(tmp_path)
