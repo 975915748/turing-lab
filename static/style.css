@@ -61,3 +61,19 @@ main{min-height:calc(100vh - 170px);padding:32px 0 44px}.card{background:var(--p
 .binding-row button{white-space:nowrap}
 @media(max-width:900px){.personal-layout{grid-template-columns:1fr}}
 @media(max-width:740px){.chat-meta time{margin-left:0}.binding-row{grid-template-columns:1fr}.binding-row button{width:100%}.personal-model-card,.model-form{padding:12px}.uid-row{align-items:start}}
+
+/* Personal model profiles: one accessible, independently collapsible card per profile. */
+.personal-model-card{padding:0;overflow:hidden}
+.personal-model-card>.model-config-summary{list-style:none;display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0;padding:15px;cursor:pointer}
+.personal-model-card>.model-config-summary::-webkit-details-marker{display:none}
+.personal-model-card>.model-config-summary:focus-visible{outline:3px solid var(--brand2);outline-offset:-3px;border-radius:11px}
+.model-config-summary strong{display:block;min-width:0;max-width:100%;white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+.model-config-chevron{width:9px;height:9px;flex:0 0 9px;border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);transform:rotate(45deg);margin:0 4px 4px 0;transition:transform .15s}
+.personal-model-card[open]>.model-config-summary .model-config-chevron{transform:rotate(225deg);margin-top:7px}
+.model-config-details{padding:0 15px 15px;min-width:0}
+.model-config-details>.tiny{overflow-wrap:anywhere;word-break:break-word}
+.model-test-result{margin:12px 0 0;font-size:.84rem;color:var(--muted);overflow-wrap:anywhere}
+.model-test-result:empty{display:none}
+.model-test-result.success{color:var(--success)}
+.model-test-result.failed{color:var(--danger)}
+@media(max-width:740px){.personal-model-card>.model-config-summary{padding:12px}.model-config-details{padding:0 12px 12px}}
