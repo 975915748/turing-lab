@@ -268,11 +268,14 @@ async function logout(page) {
       // A slow test of the old saved profile must not overwrite the new profile
       // or a newer test started after the profile has been saved.
       const testUrl = '**/api/me/models/' + ids[0] + '/test';
-      let releaseFirstTest, releaseSecondTest, firstTestStartedResolve, secondTestStartedResolve;
+      let releaseFirstTest, releaseSaveWindowTest, releaseNewTest;
+      let firstTestStartedResolve, saveWindowTestStartedResolve, newTestStartedResolve;
       const firstTestGate = new Promise(resolve => { releaseFirstTest = resolve; });
-      const secondTestGate = new Promise(resolve => { releaseSecondTest = resolve; });
+      const saveWindowTestGate = new Promise(resolve => { releaseSaveWindowTest = resolve; });
+      const newTestGate = new Promise(resolve => { releaseNewTest = resolve; });
       const firstTestStarted = new Promise(resolve => { firstTestStartedResolve = resolve; });
-      const secondTestStarted = new Promise(resolve => { secondTestStartedResolve = resolve; });
+      const saveWindowTestStarted = new Promise(resolve => { saveWindowTestStartedResolve = resolve; });
+      const newTestStarted = new Promise(resolve => { newTestStartedResolve = resolve; });
       let testRequestCount = 0;
       await page.route(testUrl, async route => {
         const index = ++testRequestCount;
@@ -281,8 +284,11 @@ async function logout(page) {
           firstTestStartedResolve();
           await firstTestGate;
         } else if (index === 2) {
-          secondTestStartedResolve();
-          await secondTestGate;
+          saveWindowTestStartedResolve();
+          await saveWindowTestGate;
+        } else if (index === 3) {
+          newTestStartedResolve();
+          await newTestGate;
         }
         await route.fulfill({ response });
       });
@@ -317,17 +323,22 @@ async function logout(page) {
       await page.waitForTimeout(30);
       assert.equal(testRequestCount, 1, '保存期间的点击不能发起新的测试请求');
 
-      // Simulate a late request that was created during the save window by an
-      // already-running client event; the post-save invalidation must kill it.
-      const saveWindowRequest = await page.evaluate(id => {
+      // Reproduce a request that slips into the save window through an already-
+      // queued caller. Its server-side test uses the old credential and returns late.
+      const saveWindowTestPromise = page.evaluate(async id => {
         const key = String(id), version = nextPersonalModelTestVersion(key);
         const request = { version, epoch: state.personalModelEpoch, uid: state.me?.user?.uid,
           profileSnapshot: personalModelTestFingerprint(state.personalModels.find(p => Number(p.id) === Number(id))) };
         state.personalModelTestPending[key] = version;
-        return request;
+        const result = await api('/api/me/models/' + id + '/test', { method: 'POST' });
+        const accepted = updateModelTestResult(id,
+          { ok: true, model: result.model, latency_ms: result.latency_ms }, request);
+        return { accepted, model: result.model };
       }, ids[0]);
+      await saveWindowTestStarted;
+      assert.equal(testRequestCount, 2, '竞态探针应在保存请求尚未提交时发起第二个模型测试');
 
-      // Keep the pre-save test response pending until a newer post-save test starts.
+      // Keep both old-credential test responses pending until the new test starts.
       releaseSave();
       const saveResponse = await saveResponsePromise;
       assert.equal(saveResponse.status(), 200, await saveResponse.text());
@@ -342,19 +353,24 @@ async function logout(page) {
       const newTestResponsePromise = page.waitForResponse(response =>
         response.url().endsWith('/api/me/models/' + ids[0] + '/test') && response.request().method() === 'POST');
       await firstAfterSave.locator('[data-action="test-personal-model"]').click();
-      await secondTestStarted;
+      await newTestStarted;
 
-      // Resolve the old request while the newer test is still pending.
+      // Both the pre-save request and the request started during save return
+      // while the new-profile test is pending. Neither may write test state.
       releaseFirstTest();
       const oldTestResponse = await oldTestResponsePromise;
       assert.equal(oldTestResponse.status(), 200);
+      releaseSaveWindowTest();
+      const saveWindowTestResult = await saveWindowTestPromise;
+      assert.equal(saveWindowTestResult.accepted, false,
+        '保存期间发起的旧凭据测试结果必须被保存完成后的失效标记拒绝');
       await page.waitForTimeout(30);
       assert.equal(await page.evaluate(id => state.modelTestResults[id] ?? null, ids[0]), null,
         '旧配置的迟到测试结果不能写入新配置状态');
       assert.equal(await firstAfterSave.locator('[data-action="test-personal-model"]').isDisabled(), true,
         '旧请求结束不能提前解除新测试的加载状态');
 
-      releaseSecondTest();
+      releaseNewTest();
       const newTestResponse = await newTestResponsePromise;
       assert.equal(newTestResponse.status(), 200);
       await firstAfterSave.locator('[data-model-test-result]').getByText('已保存配置连接测试成功', { exact: false }).waitFor();
