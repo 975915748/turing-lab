@@ -11,8 +11,9 @@ async function mutate(context, route, data, method = 'POST') {
   const me = meResponse.status() === 200 ? await meResponse.json() : null;
   const headers = me?.user ? { 'X-CSRF-Token': me.user.csrf } : {};
   const response = await context.request.fetch(site + route, { method, data, headers });
-  assert.equal(response.status(), 200,
-    method + ' ' + route + ': ' + response.status() + ' ' + await response.text());
+  if (response.status() !== 200) {
+    throw new Error(method + ' ' + route + ': ' + response.status() + ' ' + await response.text());
+  }
   return response.json();
 }
 
@@ -69,7 +70,13 @@ async function registerPlayer(browser, username, displayName) {
     assert.equal(await second.locator('summary').innerText(), '同名配置');
     assert.equal(await first.evaluate(el => el.open), false);
     assert.equal(await second.evaluate(el => el.open), false);
+    assert.equal(await page.getByRole('button', { name: '同名配置' }).count(), 2);
     assert.equal(await first.locator('form[data-form="personal-model-edit"]').isVisible(), false);
+    await first.locator('summary').focus();
+    await page.keyboard.press('Enter');
+    assert.equal(await first.evaluate(el => el.open), true);
+    await page.keyboard.press('Space');
+    assert.equal(await first.evaluate(el => el.open), false);
 
     await first.locator('summary').click();
     await first.locator('[name="name"]').fill('正在编辑的配置');
