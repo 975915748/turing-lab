@@ -289,7 +289,7 @@ async function screenshot(page, name) {
     await page.locator('[data-action="back"]').click();
     await page.locator(`[data-action="open"][data-id="${rid}"]`).click();
     await page.locator('[data-action="room-view"][data-view="admin"]').click();
-    await page.getByRole('heading', { name: '房主管理台', exact: true }).waitFor();
+    await page.getByRole('heading', { name: '参赛者管理', exact: true }).waitFor();
     assert.deepEqual(errors, []);
     console.log('Browser acceptance passed: ordinary hosts, reuse, global record deletion, admin accounts');
   } finally { await browser.close(); }

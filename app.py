@@ -1641,6 +1641,8 @@ def create_app(db_path=None):
             message=str(error)
         elif isinstance(error, HTTPException):
             message=str(error.detail)
+        elif isinstance(error, str):
+            message=error.strip() or '模型调用失败，请检查配置或稍后重试。'
         else:
             message='模型调用失败，请检查配置或稍后重试。'
         return message.replace('\n',' ')[:500]

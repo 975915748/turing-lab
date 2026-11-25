@@ -488,7 +488,7 @@ async function logout(page) {
       await addManualJudge.locator('[name="name"]').fill('手动转录 AI 裁判');
       await addManualJudge.locator('[name="model_profile_id"]').selectOption('');
       await addManualJudge.locator('[type="submit"]').click();
-      await page.locator('.feed-item').filter({ hasText: '手动转录 AI 裁判' }).waitFor();
+      await page.locator('#app').getByText('手动转录 AI 裁判', { exact: false }).first().waitFor();
 
       assert.equal(await page.locator('[data-action="generate-ai-questions"]').isDisabled(), true);
       await page.locator('[data-action="room-view"][data-view="admin"]').click();

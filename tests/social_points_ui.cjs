@@ -138,7 +138,7 @@ async function closePersonalCenter(page) {
     await pageA.locator(`[data-action="friend-note"][data-uid="${uidB}"]`).waitFor();
     pageA.once('dialog', dialog => dialog.accept('仅我可见的备注'));
     await pageA.locator(`[data-action="friend-note"][data-uid="${uidB}"]`).click();
-    await visible(pageA.getByText('仅我可见的备注'));
+    await visible(pageA.getByText('仅我可见的备注').first());
     await pageA.locator(`[data-action="friend-reset-note"][data-uid="${uidB}"]`).click();
     await visible(pageA.getByText('好友测试乙'));
 
