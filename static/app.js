@@ -85,10 +85,10 @@ function finishedActions(r){
 function renderMyPointsResult(r){
  const x=r.my_points_result;if(!x)return '';
  const delta=String(x.delta),change=delta==='0'?'0':delta.startsWith('-')?delta:'+'+delta;
- return \`<section class="card compact account-points-result"><div class="overline">ACCOUNT POINTS / MATCH RESULT</div><h2>本场账号积分</h2><div class="label-line"><strong>\${x.outcome==='win'?'胜利':'失败'}</strong><span class="pill \${x.outcome==='win'?'ok':'warn'}">\${esc(change)} 分</span></div><div class="stat-row"><div class="stat">更新后总积分 <strong>\${esc(x.points_after)}</strong></div><div class="stat">当前连胜 <strong>\${esc(x.streak_after)}</strong></div></div></section>\`;
+ return `<section class="card compact account-points-result"><div class="overline">ACCOUNT POINTS / MATCH RESULT</div><h2>本场账号积分</h2><div class="label-line"><strong>${x.outcome==='win'?'胜利':'失败'}</strong><span class="pill ${x.outcome==='win'?'ok':'warn'}">${esc(change)} 分</span></div><div class="stat-row"><div class="stat">更新后总积分 <strong>${esc(x.points_after)}</strong></div><div class="stat">当前连胜 <strong>${esc(x.streak_after)}</strong></div></div></section>`;
 }
 function renderReadyRoom(r){
- app.innerHTML=\`<div class="pagehead"><div><div class="overline">ROOM \${r.id} · 第 \${r.match_number} 场</div><h1>\${esc(r.title)}</h1></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button data-action="back">← 返回大厅</button></div></div>\${renderMyPointsResult(r)}<section class="card"><h2>\${r.can_manage?'开始下一场比赛':'等待再次开赛'}</h2>\${finishedActions(r)}</section>\`;
+ app.innerHTML=`<div class="pagehead"><div><div class="overline">ROOM ${r.id} · 第 ${r.match_number} 场</div><h1>${esc(r.title)}</h1></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button data-action="back">← 返回大厅</button></div></div>${renderMyPointsResult(r)}<section class="card"><h2>${r.can_manage?'开始下一场比赛':'等待再次开赛'}</h2>${finishedActions(r)}</section>`;
 }
 async function openRoom(id,options={}){clearDmState();state.roomId=id;state.selectedRound=options.round||null;state.roomView=options.view||'match';state.chat=[];state.chatDraft='';try{const r=await api(`/api/rooms/${id}`);state.room=r;state.typing={};state.selectedRound=options.round&&r.rounds.some(x=>x.number===options.round)?options.round:r.current_round;history.replaceState(null,'',`#room=${id}`);await loadPersonalModels().catch(()=>{});if(!r.is_judge&&r.status==='open')await loadRoomChat().catch(()=>{});renderRoom();connectWs(id);maybeNotifyJudge();}catch(e){state.roomId=null;state.room=null;state.chat=[];history.replaceState(null,'',location.pathname);toast(e.message);await loadLobby()}}
 async function loadLobby(){clearDmState();state.me=await api('/api/me');state.chat=[];state.chatDraft='';state.personalReturn=null;renderLobby()}
@@ -191,7 +191,7 @@ function maybeNotifyJudge(){
 function makeRoster(r){
  const submitted=new Set(r.rounds.find(x=>x.number===state.selectedRound)?.submitted||[]);
  const people=[...r.humans.map(h=>({...h,role:'人类',label:h.name})),...r.ais.map(a=>({...a,role:'AI',label:a.name}))].sort((a,b)=>a.alias.localeCompare(b.alias));
- return people.map(p=>\`<div class="roster-person"><div class="person-left"><span class="alias">\${esc(p.alias)}</span><div style="min-width:0"><span class="person-name" title="\${esc(p.label)}">\${esc(p.label)}</span><span class="roster-role">\${p.role==='人类'?'人类 · '+esc(p.uid):'AI 参赛位'}\${p.alias===r.mine?' · 我':''}</span></div></div><span class="pill \${submitted.has(p.alias)?'ok':''}" \${p.role==='人类'&&p.alias===r.mine?\`data-typing-alias="\${esc(p.alias)}"\`:''} title="本轮提交状态">\${submitted.has(p.alias)?'√':p.role==='人类'&&p.alias===r.mine?(state.selectedRound===r.current_round&&state.typing[p.alias]?'....':'X'):'—'}</span>\${p.role==='人类'&&p.alias!==r.mine?\`<button class="small" data-action="friend-from-room" data-uid="\${esc(p.uid)}">加好友</button>\`:''}</div>\`).join('')||D('等待人类玩家加入');
+ return people.map(p=>`<div class="roster-person"><div class="person-left"><span class="alias">${esc(p.alias)}</span><div style="min-width:0"><span class="person-name" title="${esc(p.label)}">${esc(p.label)}</span><span class="roster-role">${p.role==='人类'?'人类 · '+esc(p.uid):'AI 参赛位'}${p.alias===r.mine?' · 我':''}</span></div></div><span class="pill ${submitted.has(p.alias)?'ok':''}" ${p.role==='人类'&&p.alias===r.mine?`data-typing-alias="${esc(p.alias)}"`:''} title="本轮提交状态">${submitted.has(p.alias)?'√':p.role==='人类'&&p.alias===r.mine?(state.selectedRound===r.current_round&&state.typing[p.alias]?'....':'X'):'—'}</span>${p.role==='人类'&&p.alias!==r.mine?`<button class="small" data-action="friend-from-room" data-uid="${esc(p.uid)}">加好友</button>`:''}</div>`).join('')||D('等待人类玩家加入');
 }
 function profileReturnFromHash(){const m=/^#profile\?room=(\d+)&view=([^&]+)&round=(\d+)$/.exec(location.hash);return m?{roomId:Number(m[1]),view:decodeURIComponent(m[2]),round:Number(m[3])}:null;}
 function stopDmWs(){
@@ -223,7 +223,7 @@ function mergeLedgerEntries(...groups){
  return [...map.values()].sort((a,b)=>Number(b.id)-Number(a.id));
 }
 function dmMessageHtml(m){
- return \`<div class="feed-item dm-message \${m.mine?'mine':''}"><strong>\${m.mine?'我':esc(m.sender_name)}</strong><div class="feed-text">\${esc(m.text)}</div><div class="tiny muted">\${esc(shortDate(m.created_at))}</div></div>\`;
+ return `<div class="feed-item dm-message ${m.mine?'mine':''}"><strong>${m.mine?'我':esc(m.sender_name)}</strong><div class="feed-text">${esc(m.text)}</div><div class="tiny muted">${esc(shortDate(m.created_at))}</div></div>`;
 }
 function renderDmPanel(){
  const box=$('#dmPanel');if(!box)return;
@@ -233,7 +233,7 @@ function renderDmPanel(){
  const title=friend?.note||conv?.note||state.dmOtherName||uid;
  const canSend=conv?!!conv.can_send:state.dmCanSend;
  const pending=state.dmPending?.uid===uid?state.dmPending:null;
- box.innerHTML=\`<div class="divider"></div><div class="label-line"><h3>与 \${esc(title)}（\${esc(uid)}）私信</h3><button class="small" data-action="dm-close">收起</button></div><div class="feed" id="dmFeed" aria-live="polite">\${state.dmMessages.map(dmMessageHtml).join('')||D('暂无消息')}</div>\${state.dmHasMore?\`<button class="small" data-action="dm-older" data-uid="\${esc(uid)}">加载更早消息</button>\`:''}\${canSend?\`<form data-form="dm-send" data-uid="\${esc(uid)}"><textarea name="text" maxlength="2000" required placeholder="输入私信">\${esc(pending?.text||'')}</textarea><div class="form-actions"><span class="hint">纯文本 · 最多 2000 字</span><button class="primary" type="submit">发送</button></div></form>\`:D('好友关系已解除，只能查看历史消息。')}\`;
+ box.innerHTML=`<div class="divider"></div><div class="label-line"><h3>与 ${esc(title)}（${esc(uid)}）私信</h3><button class="small" data-action="dm-close">收起</button></div><div class="feed" id="dmFeed" aria-live="polite">${state.dmMessages.map(dmMessageHtml).join('')||D('暂无消息')}</div>${state.dmHasMore?`<button class="small" data-action="dm-older" data-uid="${esc(uid)}">加载更早消息</button>`:''}${canSend?`<form data-form="dm-send" data-uid="${esc(uid)}"><textarea name="text" maxlength="2000" required placeholder="输入私信">${esc(pending?.text||'')}</textarea><div class="form-actions"><span class="hint">纯文本 · 最多 2000 字</span><button class="primary" type="submit">发送</button></div></form>`:D('好友关系已解除，只能查看历史消息。')}`;
  const feed=$('#dmFeed');if(feed)feed.scrollTop=feed.scrollHeight;
 }
 async function markDmRead(uid,messageId,{refresh=true,accountUid=state.me?.user?.uid}={}){
@@ -281,7 +281,7 @@ function renderPointsLedger(){
  if(!state.pointsLedgerLoaded){el.innerHTML='';return;}
  const rows=state.pointsLedgerEntries.map(x=>{
   const delta=String(x.delta),sign=delta==='0'||delta.startsWith('-')?'':'+'; 
-  return \`<div class="feed-item">\${x.outcome==='win'?'胜利':'失败'} · 房间 \${esc(x.room_id)} 第 \${esc(x.match_number)} 场 · \${sign}\${esc(delta)} · 积分 \${esc(x.points_after)} · 连胜 \${esc(x.streak_after)} · \${esc(shortDate(x.settled_at))}</div>\`;
+  return `<div class="feed-item">${x.outcome==='win'?'胜利':'失败'} · 房间 ${esc(x.room_id)} 第 ${esc(x.match_number)} 场 · ${sign}${esc(delta)} · 积分 ${esc(x.points_after)} · 连胜 ${esc(x.streak_after)} · ${esc(shortDate(x.settled_at))}</div>`;
  }).join('')||D('暂无积分流水');
  el.innerHTML=rows+(state.pointsLedgerHasMore?'<button class="small spaced" data-action="points-ledger-more">加载更多</button>':'');
 }
@@ -292,7 +292,7 @@ async function refreshSocialUi(){
 function connectDmWs(){
  stopDmWs();const uid=state.me?.user?.uid;if(!uid||!location.hash.startsWith('#profile'))return;
  const proto=location.protocol==='https:'?'wss:':'ws:';
- const ws=new WebSocket(\`\${proto}//\${location.host}/ws/messages\`);state.dmSocket=ws;
+ const ws=new WebSocket(`${proto}//${location.host}/ws/messages`);state.dmSocket=ws;
  ws.onopen=async()=>{
   if(state.dmSocket!==ws||state.me?.user?.uid!==uid)return;
   try{await loadSocial();if(state.dmUid)await openDm(state.dmUid);else renderPersonalCenter();}catch{}
@@ -343,7 +343,7 @@ function connectDmWs(){
 async function openPersonalCenter(options={}){
  if(!options.fromHash){state.personalReturn=state.roomId&&state.room?{roomId:state.roomId,view:state.roomView,round:state.selectedRound}:null;}
  else if(!state.personalReturn)state.personalReturn=profileReturnFromHash();
- stopWs();const back=state.personalReturn;const hash=back?.roomId?\`#profile?room=\${back.roomId}&view=\${encodeURIComponent(back.view)}&round=\${back.round||1}\`:'#profile';history.replaceState(null,'',hash);
+ stopWs();const back=state.personalReturn;const hash=back?.roomId?`#profile?room=${back.roomId}&view=${encodeURIComponent(back.view)}&round=${back.round||1}`:'#profile';history.replaceState(null,'',hash);
  state.me=await api('/api/me');
  await loadPersonalModels();await loadModelOperationRecords();await loadSocial();renderPersonalCenter();connectDmWs();
 }
