@@ -85,6 +85,9 @@ def init_db(path):
             room_sql = old.execute("SELECT sql FROM sqlite_master WHERE name='rooms'").fetchone()
             needs_room_ids = bool(room_sql) and 'AUTOINCREMENT' not in room_sql['sql'].upper()
             if 'users' in old_tables and (
+                'model_operation_tasks' not in old_tables or
+                ('rooms' in old_tables and 'model_request_limit' not in {
+                    x['name'] for x in old.execute('PRAGMA table_info(rooms)')}) or
                 'model_profiles' not in old_tables or
                 ('model_profiles' in old_tables and 'owner_user_id' not in {
                     x['name'] for x in old.execute('PRAGMA table_info(model_profiles)')}) or
@@ -102,7 +105,10 @@ def init_db(path):
                 ('answers' in old_tables and 'edited_at' not in {
                     x['name'] for x in old.execute('PRAGMA table_info(answers)')})):
                 stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
-                backup_tag = ('v1_8' if 'model_profiles' in old_tables and 'owner_user_id' not in {
+                backup_tag = ('v1_9' if 'model_operation_tasks' not in old_tables or
+                                  ('rooms' in old_tables and 'model_request_limit' not in {
+                                      x['name'] for x in old.execute('PRAGMA table_info(rooms)')}) else
+                              'v1_8' if 'model_profiles' in old_tables and 'owner_user_id' not in {
                                   x['name'] for x in old.execute('PRAGMA table_info(model_profiles)')} else
                               'v1_1' if 'room_judges' not in old_tables else
                               'v1_2' if 'ai_judges' not in old_tables else
