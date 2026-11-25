@@ -158,7 +158,7 @@ def legacy_database(path):
 def snapshot(db):
     # Compare pre-existing application data, excluding later schema additions.
     tables = [r[0] for r in db.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('model_profiles','chat_messages')")]
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('model_profiles','chat_messages','model_operation_tasks')")]
     result = {}
     for name in tables:
         rows = [dict(r) for r in db.execute(f'SELECT * FROM "{name}" ORDER BY rowid')]
@@ -184,12 +184,12 @@ def test_legacy_migration_preserves_all_records_backup_and_passwords(tmp_path):
             assert row.pop('records_deleted') == 0
         assert after == before
         assert db.execute('PRAGMA foreign_key_check').fetchall() == []
-    backups = list(tmp_path.glob('legacy.pre-v1_4-*.sqlite3'))
+    backups = list(tmp_path.glob('legacy.pre-v1_9-*.sqlite3'))
     assert len(backups) == 1
     with db_open(backups[0]) as db:
         assert snapshot(db) == before
     create_app(path)
-    assert len(list(tmp_path.glob('legacy.pre-v1_4-*.sqlite3'))) == 1
+    assert len(list(tmp_path.glob('legacy.pre-v1_9-*.sqlite3'))) == 1
     assert seed_admin(path, 'legacy_admin', '不覆盖', 'new-password') is False
     # All original identities retain their IDs; old username login is explicit.
     for old_name, uid in (('legacy_admin', 'TL00000007'), ('legacy_player', 'TL00000023'), ('TL00000023', 'TL00000030')):

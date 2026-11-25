@@ -832,9 +832,14 @@ def check_judge_registration(db, room, user_id, viewer=None):
 
 
 def aliases(db, room_id):
+    room_status=db.execute('SELECT status FROM rooms WHERE id=?',(room_id,)).fetchone()
+    # A deleted account leaves an active match immediately, but its alias and
+    # historical answers remain visible in the finished match until restart.
+    include_deleted=bool(room_status and room_status['status']=='finished')
     humans = db.execute('''SELECT m.alias,m.user_id,u.display_name,u.username FROM members m
         JOIN users u ON u.id=m.user_id WHERE m.room_id=? AND m.removed_at IS NULL
-        AND u.deleted_at IS NULL ORDER BY m.alias''', (room_id,)).fetchall()
+        AND (u.deleted_at IS NULL OR ?) ORDER BY m.alias''',
+        (room_id,1 if include_deleted else 0)).fetchall()
     ais = db.execute('SELECT alias,name,model_profile_id FROM ai_players WHERE room_id=? ORDER BY alias', (room_id,)).fetchall()
     all_aliases = sorted([r['alias'] for r in humans] + [r['alias'] for r in ais])
     return humans, ais, all_aliases
@@ -989,7 +994,7 @@ def match_readiness(db, room):
                   not limit_reached and validation['question_chars']<=6000)
     blockers=[]
     if validation['participant_count']<2:
-        blockers.append(f'当前仅有 {validation["participant_count"]} 位在场参赛者，至少需要 2 位。')
+        blockers.append(f'当前仅有 {validation["participant_count"]} 位参赛者；至少需要两名在场参赛者才能开始统一作答。')
     if room['status']!='open':
         blockers.append('本场比赛已结束。')
     elif rnd['status']!='draft':
@@ -1003,7 +1008,7 @@ def match_readiness(db, room):
         notices.append(f'{manual_pending} 位真人 / 手动 AI 裁判尚未交题；已有至少一份合规问题时，房主仍可按现有规则确认开局。')
     if unavailable_ai_pending:
         notices.append(f'{unavailable_ai_pending} 位 AI 裁判配置不可用，请在 AI 裁判管理检查席位，并修复个人配置或更换绑定。')
-    if limit_reached and auto_pending:
+    if limit_reached:
         notices.append('本场模型请求次数已达上限；可调整上限或手动转录。')
     elif auto_pending:
         notices.append(f'{auto_pending} 位可用模型 AI 裁判尚未交题。')

@@ -417,6 +417,10 @@ function judgeAdminPanel(r){
   html+=judges.map(j=>'<div class="feed-item"><div class="label-line"><strong>'+esc(j.label)+'</strong><span class="pill '+(j.locked?'ok':'')+'">'+(j.locked?'✓ 已锁定':'未锁定')+'</span></div>'+
    '<div class="tiny muted">当前绑定：'+esc(bindingLabel(j))+'</div><form data-form="bind-ai-judge-model" data-id="'+j.id+'" class="binding-row"><select name="model_profile_id">'+modelBindingOptions(j)+'</select><button class="small" type="submit" '+(canEdit?'':'disabled')+'>更新绑定</button></form></div>').join('');
  }else html+=D('尚无 AI 裁判席。');
+ if(r.model_request_limit!==null&&r.model_request_limit!==undefined&&
+    Number(r.model_request_count)>=Number(r.model_request_limit)){
+  html+='<p class="hint">本场模型请求次数已达上限；可提高上限或手动转录。</p>';
+ }
  if(autoPending.length){
   html+='<div class="divider"></div><p class="hint">'+autoPending.length+' 位模型 AI 裁判尚未提交第 '+r.current_round+' 轮问题。</p>';
   if(participantCount<2)html+='<p class="hint">当前仅有 '+participantCount+' 位参赛者；至少需要两名在场参赛者才能出题，请先让两位参赛者加入。</p><button class="primary" data-action="generate-ai-questions" disabled>让模型自动生成本轮问题</button>';
@@ -446,7 +450,8 @@ function renderReadinessPanel(r){
  const notices=(x.notices||[]).map(message=>'<li>'+esc(message)+'</li>').join('');
  let actions='';
  if(x.can_generate_and_start)actions+='<button class="primary" data-action="start-round" data-generate-questions="true">生成问题并开始</button>';
- if(x.can_start)actions+='<button data-action="start-round" data-generate-questions="false">按已提交问题开始</button>';
+ else if(x.can_start)actions+='<button data-action="start-round" data-generate-questions="false">按已提交问题开始</button>';
+ else actions+='<button data-action="start-round" disabled>开始本轮</button>';
  if(!x.can_start&&!x.can_generate_and_start){
   if(x.participant_count<2)actions+='<button class="small" data-action="room-view" data-view="admin">前往房主管理台补足参赛者</button>';
   if(x.manual_question_required)actions+='<button class="small" data-action="focus-manual-question">前往外部裁判问题录入</button>';

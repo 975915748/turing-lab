@@ -143,7 +143,10 @@ def test_connection_and_game_calls_are_owner_scoped_and_cleaned_differently(oper
     player_room = lab['p1'].get(base).json()
     assert 'model_operations' not in player_room
     assert 'readiness' not in player_room
-    assert 'model_profiles' not in player_room['ais'][0]
+    assert player_room['ais'] == []
+    assert player_room['judges']
+    assert all('model_profile' not in judge and 'model_profile_id' not in judge
+               for judge in player_room['judges'])
     assert lab['p1'].get('/api/me/model-operations').json()['total'] == 0
 
     # Deleting a profile removes its standalone tests but preserves game-call history.
@@ -258,7 +261,7 @@ def test_inflight_result_does_not_resurrect_tasks_after_match_cleanup(operation_
         assert block['started'].wait(5), '模拟模型请求没有进入请求阶段'
         with db_open(lab['path']) as db:
             db.execute("UPDATE rooms SET status='finished' WHERE id=?", (lab['room_id'],))
-        post(admin, base + '/restart', {'match_number': 1})
+        post(admin, base + '/restart', {'match_number': 1, 'confirm': True})
         block['release'].set()
         result = future.result(timeout=15)
 
