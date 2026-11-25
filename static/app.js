@@ -223,7 +223,7 @@ function renderPersonalModelManager(){
   const id=String(p.id),draft=state.personalModelDrafts[id]||{};
   const title=String(draft.name||p.name);
   const expanded=state.personalModelExpanded[id]?'open':'';
-  let card='<details class="personal-model-card" data-personal-model data-id="'+p.id+'" '+expanded+'><summary class="personal-model-summary"><strong>'+esc(title)+'</strong></summary><div class="personal-model-details">'+
+  let card='<details class="personal-model-card" data-personal-model data-id="'+p.id+'" '+expanded+'><summary class="personal-model-summary" aria-expanded="'+(state.personalModelExpanded[id]?'true':'false')+'"><strong>'+esc(title)+'</strong></summary><div class="personal-model-details">'+
    '<div class="label-line"><span class="pill '+(p.credential_status==='ok'?'ok':'warn')+'">'+credentialStatusLabel(p)+'</span></div>'+
    '<div class="tiny muted">'+esc(p.model)+' · '+esc(p.base_url)+'</div>';
   if(p.credential_status==='needs_repair')card+='<p class="hint">此配置无法解密，请重新录入服务商 API Key 并保存。</p>';
@@ -425,7 +425,7 @@ async function downloadLog(){const id=state.roomId,n=state.selectedRound;const f
 async function downloadFullLog(){const id=state.roomId;const file=await api(`/api/rooms/${id}/log`,{raw:true});const href=URL.createObjectURL(file);const a=document.createElement('a');a.href=href;a.download=`room-${id}-full-log.md`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(href),1500)}
 app.addEventListener('toggle',e=>{
  if(e.target.matches('details[data-packet-panel]'))state.packetPanels[e.target.dataset.key]=e.target.open;
- if(e.target.matches('details[data-personal-model]'))state.personalModelExpanded[String(e.target.dataset.id)]=e.target.open;
+ if(e.target.matches('details[data-personal-model]')){state.personalModelExpanded[String(e.target.dataset.id)]=e.target.open;const summary=e.target.querySelector('summary');if(summary)summary.setAttribute('aria-expanded',e.target.open?'true':'false');}
 },true);
 app.addEventListener('input',e=>{
  if(e.target.dataset?.chatDraft!==undefined){state.chatDraft=e.target.value;return;}
