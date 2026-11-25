@@ -130,6 +130,7 @@ async function registerPlayer(browser, username, displayName) {
     assert.equal(await second.locator('[name="api_key"]').inputValue(), 'sk-unsaved-second-secret');
 
     await second.locator('[data-action="delete-personal-model"]').click();
+    await page.locator('#toast').filter({ hasText: '个人模型配置已删除' }).waitFor();
     await first.waitFor();
     assert.equal(await page.locator('details[data-personal-model]').count(), 1);
     assert.equal(await first.evaluate(el => el.open), true);
