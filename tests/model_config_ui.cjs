@@ -90,6 +90,11 @@ async function registerPlayer(browser, username, displayName) {
     await second.locator('summary').click();
     await second.locator('[name="model"]').fill('unsaved-model-two');
     await second.locator('[name="api_key"]').fill('sk-unsaved-second-secret');
+    await second.locator('[data-action="test-personal-model"]').click();
+    await page.locator('#toast').filter({ hasText: '模拟连接失败' }).waitFor();
+    assert.equal(await second.locator('[name="model"]').inputValue(), 'unsaved-model-two');
+    assert.equal(await second.locator('[name="api_key"]').inputValue(), 'sk-unsaved-second-secret');
+    assert.equal(await second.locator('[data-action="test-personal-model"]').isEnabled(), true);
     await page.evaluate(() => renderPersonalCenter());
     assert.equal(await first.evaluate(el => el.open), false);
     assert.equal(await second.evaluate(el => el.open), true);

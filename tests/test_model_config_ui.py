@@ -21,6 +21,8 @@ def model_config_site(tmp_path, monkeypatch):
     async def fake_chat(profile, messages, api_key):
         system = messages[0]['content']
         if 'connection test' in system:
+            if profile['model'] == 'fold-model-two':
+                raise app_module.ModelAPIError('模拟连接失败')
             return {'text': 'OK', 'usage': {'prompt_tokens': 4, 'completion_tokens': 1, 'total_tokens': 5}}
         if '你是多人图灵测试的独立裁判' in system:
             return {'text': '请描述一次你改变看法的经历。', 'usage': {}}
