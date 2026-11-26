@@ -570,12 +570,43 @@ def test_ai_judge_discards_verdict_if_match_evidence_changes(tmp_path, monkeypat
             assert verdict_resp.status_code == 200, verdict_resp.text
             result = verdict_resp.json()
             assert result['generated'] == 0
-            assert len(result['failed']) == 1
-            assert '资料在模型判断期间发生变化' in result['failed'][0]['error']
+            assert result['skipped'] == 1
+            assert result['failed'] == []
+            assert len(result['results']) == 1
+            stale_result = result['results'][0]
+            assert stale_result['judge_id'] == judge_id
+            assert stale_result['status'] == 'skipped'
+            assert stale_result['reason'] == '比赛资料发生变化，旧判决已作废。'
+
             state = (await admin.get(base)).json()
             assert state['judges'][0]['locked'] is False
-            assert state['rounds'][-1]['number'] == 2
-            assert state['rounds'][-1]['status'] == 'revealed'
+            assert len(state['rounds']) == 2
+            assert state['rounds'][0]['status'] == 'revealed'
+            second_round = state['rounds'][1]
+            assert second_round['number'] == 2
+            assert second_round['status'] == 'revealed'
+            assert {question['text'] for question in second_round['questions']} == {'第二轮新增问题'}
+            assert set(second_round['answers']) == {'A', 'B'}
+            assert {answer['text'] for answer in second_round['answers'].values()} == {'第二轮 A', '第二轮 B'}
+            assert set(second_round['submitted']) == {'A', 'B'}
+
+            with db_open(path) as db:
+                assert db.execute(
+                    'SELECT 1 FROM ai_judge_verdicts WHERE room_id=? AND ai_judge_id=?',
+                    (room_id, judge_id),
+                ).fetchone() is None
+                operation = db.execute(
+                    """SELECT state,error_message,result_applied
+                       FROM model_operation_tasks
+                       WHERE room_id=? AND purpose='judge_verdict'
+                         AND target_type='ai_judge' AND target_key=?
+                       ORDER BY id DESC LIMIT 1""",
+                    (room_id, str(judge_id)),
+                ).fetchone()
+            assert operation is not None
+            assert operation['state'] == 'stale'
+            assert operation['result_applied'] == 0
+            assert '资料在模型判断期间发生变化' in operation['error_message']
 
     asyncio.run(scenario())
 
