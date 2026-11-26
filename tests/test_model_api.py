@@ -503,7 +503,8 @@ def test_ai_judge_discards_verdict_if_match_evidence_changes(tmp_path, monkeypat
             room_resp = await async_post(admin, '/api/rooms', {'title': '判决版本探针'})
             assert room_resp.status_code == 200, room_resp.text
             room = room_resp.json()
-            base = f"/api/rooms/{room['room_id']}"
+            room_id = room['room_id']
+            base = f"/api/rooms/{room_id}"
 
             assert (await async_post(p1, '/api/register', {
                 'username': 'stale_a', 'display_name': 'A 真人',
