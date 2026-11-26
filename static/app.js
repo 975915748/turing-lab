@@ -36,15 +36,18 @@ function connectWs(roomId){stopWs();if(state.roomId!==roomId)return;
  const proto=location.protocol==='https:'?'wss:':'ws:';
  const ws=new WebSocket(`${proto}//${location.host}/ws/rooms/${roomId}`);state.ws=ws;
  ws.onopen=()=>{setConnection('在线',true);sendTypingFromDraft();if(!state.room?.is_judge)loadRoomChat().catch(()=>{})};
- ws.onmessage=async e=>{let m;try{m=JSON.parse(e.data)}catch{return}
- if(m.type==='room_updated' && state.roomId===roomId){await refreshRoom();}
+ ws.onmessage=async e=>{if(state.exitingRoom)return;let m;try{m=JSON.parse(e.data)}catch{return}
+ if(m.type==='room_updated' && state.roomId===roomId){
+  if(m.reason==='room_closed'){await loadLobby();toast('房主已关闭房间，记录已保留。');return;}
+  await refreshRoom();
+ }
  if(m.type==='chat_message'&&state.roomId===roomId&&!state.room?.is_judge&&m.match_number===state.room?.match_number&&state.room?.status==='open'){addChatMessage(m.message)}
  if(m.type==='chat_cleared'&&state.roomId===roomId&&m.match_number===state.room?.match_number){state.chat=[];state.chatDraft='';renderRoom()}
  if(m.type==='typing_status'&&state.roomId===roomId){state.typing=m.round===state.room?.current_round&&m.match_number===state.room?.match_number?(m.states||{}):{};updateTypingBadges()}};
- ws.onclose=e=>{if(state.roomId!==roomId||state.ws!==ws)return;if(e.code===1008){state.roomId=null;state.room=null;state.typing={};history.replaceState(null,'',location.pathname);loadLobby().then(()=>toast(e.reason==='房间已删除'?'房间已删除':'房间访问权限已失效或你已被移出')).catch(err=>toast(err.message));return;}setConnection('重连中',false);state.reconnect=setTimeout(()=>connectWs(roomId),3000)};
+ ws.onclose=e=>{if(state.exitingRoom||state.roomId!==roomId||state.ws!==ws)return;if(e.code===1008){state.roomId=null;state.room=null;state.typing={};history.replaceState(null,'',location.pathname);loadLobby().then(()=>toast(e.reason==='房间已删除'?'房间已删除':'房间访问权限已失效或你已被移出')).catch(err=>toast(err.message));return;}setConnection('重连中',false);state.reconnect=setTimeout(()=>connectWs(roomId),3000)};
  ws.onerror=()=>setConnection('连接异常',false);
 }
-async function refreshRoom(){if(!state.roomId||location.hash.startsWith('#profile'))return;try{const r=await api(`/api/rooms/${state.roomId}`);if(!state.room||r.current_round!==state.room.current_round||r.match_number!==state.room.match_number){state.selectedRound=r.current_round;state.lastTyping=null;state.typing={};}
+async function refreshRoom(){if(!state.roomId||location.hash.startsWith('#profile'))return;try{const r=await api(`/api/rooms/${state.roomId}`);if(state.exitingRoom||state.roomId!==r.id)return;if(!state.room||r.current_round!==state.room.current_round||r.match_number!==state.room.match_number){state.selectedRound=r.current_round;state.lastTyping=null;state.typing={};}
  if(state.room&&(r.match_number!==state.room.match_number||(!state.room.records_deleted&&r.records_deleted))){for(const key of Object.keys(state.drafts))if(key.startsWith(`${r.id}:`))delete state.drafts[key];const dialog=$('#judgeNotice');if(dialog?.open)dialog.close();state.roomView='match';state.chat=[];state.chatDraft='';}
  state.room=r;
  if(r.is_judge||r.status==='finished'){state.chat=[];state.chatDraft='';}else await loadRoomChat().catch(()=>{});
@@ -73,7 +76,7 @@ function renderLobby(){
  <section class="notice" style="margin-bottom:20px"><div class="label-line"><div><div class="tiny muted">你的登录 UID</div><strong class="code" id="accountUid">${esc(state.me.user.uid)}</strong></div><button class="small" data-action="copy-uid" data-uid="${esc(state.me.user.uid)}">复制 UID</button></div><p class="hint" style="margin:8px 0 0">请保存此 UID，下次使用它和密码登录。</p></section>
  <div class="grid2"><section class="card"><h2>加入已有房间</h2><form data-form="join"><label class="field">邀请码</label><input name="code" maxlength="20" required type="text" placeholder="例如 A1B2C3D4E5"><label class="field">加入身份</label><select name="role"><option value="player">参赛者</option>${isAdmin?"":'<option value="judge">真人裁判</option>'}</select><div class="form-actions"><button class="primary" type="submit">加入比赛 →</button></div></form></section>
  <section class="card"><h2>创建一场图灵测试</h2><form data-form="room"><label class="field">比赛名称</label><input type="text" name="title" maxlength="80" required placeholder="例如 人机辨识实验 #1"><label class="field">旧版手工转录裁判名（多裁判模式不使用）</label><input type="text" name="judge" maxlength="40" value="裁判" required><div class="form-actions"><button class="primary" type="submit">＋ 创建房间</button></div></form></section></div>
- <section class="spaced"><div class="label-line"><h2>${isAdmin?'全部房间':'我的房间'}</h2><span class="pill">${state.me.rooms.length} 个</span></div><div class="roomcards">${state.me.rooms.length?state.me.rooms.map(r=>`<div class="card flat room-card"><div class="overline">ROOM ${r.id}</div><h3>${esc(r.title)}</h3><div class="muted hint">${r.status==='finished'?'比赛已结束':'第 '+r.current_round+' 轮进行中'}${r.role==='judge'?' · 裁判席':r.role==='owner'?' · 我是房主':''}</div><div class="buttonrow"><button data-action="open" data-id="${r.id}">进入房间 →</button>${r.can_manage?`<button class="small danger" data-action="delete-room" data-id="${r.id}" data-match="${r.match_number}">删除房间</button>`:''}</div></div>`).join(''):D('尚未加入任何房间，可以创建房间或输入邀请码。')}</div></section>
+ <section class="spaced"><div class="label-line"><h2>${isAdmin?'全部房间':'我的房间'}</h2><span class="pill">${state.me.rooms.length} 个</span></div><div class="roomcards">${state.me.rooms.length?state.me.rooms.map(r=>`<div class="card flat room-card"><div class="overline">ROOM ${r.id}</div><h3>${esc(r.title)}</h3><div class="muted hint">${r.status==='closed'?'房间已关闭':r.status==='finished'?'比赛已结束':'第 '+r.current_round+' 轮进行中'}${r.role==='judge'?' · 裁判席':r.role==='owner'?' · 我是房主':''}</div><div class="buttonrow"><button data-action="open" data-id="${r.id}">进入房间 →</button>${r.can_manage?`<button class="small danger" data-action="delete-room" data-id="${r.id}" data-match="${r.match_number}">删除房间</button>`:''}</div></div>`).join(''):D('尚未加入任何房间，可以创建房间或输入邀请码。')}</div></section>
  ${completed.length?`<section class="spaced"><h2>已完赛房间记录</h2><p class="hint">任何已登录用户都可以清空这些房间的比赛记录。清空对所有人立即生效，房间本身保留。</p><div class="roomcards">${completed.map(r=>`<div class="card flat room-card"><div class="overline">ROOM ${r.id} · 第 ${r.match_number} 场</div><h3>${esc(r.title)}</h3><button class="danger small" data-action="delete-records" data-id="${r.id}" data-match="${r.match_number}">删除所有人的比赛记录</button></div>`).join('')}</div></section>`:''}`;
 }
 async function loadAccounts(){
@@ -93,11 +96,30 @@ function renderMyPointsResult(r){
  const delta=String(x.delta),change=delta==='0'?'0':delta.startsWith('-')?delta:'+'+delta;
  return `<section class="card compact account-points-result"><div class="overline">ACCOUNT POINTS / MATCH RESULT</div><h2>本场账号积分</h2><div class="label-line"><strong>${x.outcome==='win'?'胜利':'失败'}</strong><span class="pill ${x.outcome==='win'?'ok':'warn'}">${esc(change)} 分</span></div><div class="stat-row"><div class="stat">更新后总积分 <strong>${esc(x.points_after)}</strong></div><div class="stat">当前连胜 <strong>${esc(x.streak_after)}</strong></div></div></section>`;
 }
+async function leaveCurrentRoom(){
+ if(state.exitingRoom)return false;
+ const back=state.personalReturn;
+ const r=state.room||(back?.roomId?await api('/api/rooms/'+back.roomId):null);
+ if(r?.is_owner&&r.status==='open'&&!confirm('返回大厅将关闭房间，所有人退出当前比赛；记录保留，不结算积分。仅想退出参赛请取消，并到参赛者管理选择退赛。确定关闭房间？'))return false;
+ state.exitingRoom=true;
+ try{
+  if(r)await api('/api/rooms/'+r.id+'/leave',{method:'POST',body:{match_number:back?.matchNumber??r.match_number,confirm:true}});
+  if(r)for(const key of Object.keys(state.drafts))if(key.startsWith(r.id+':'))delete state.drafts[key];
+  const notice=$('#judgeNotice');if(notice?.open)notice.close();
+  await loadLobby();
+  return true;
+ }finally{state.exitingRoom=false;}
+}
+function renderClosedRoom(r){
+ const rounds=r.rounds.map(round=>'<section class="card"><h2>第 '+round.number+' 轮</h2><div class="question">'+esc(round.question||(round.questions||[]).map(q=>q.text).join('\n\n')||'尚未开启作答')+'</div><div class="feed spaced">'+Object.entries(round.answers||{}).map(([alias,a])=>'<article class="feed-item"><strong>'+esc(alias)+'</strong><div class="feed-text">'+esc(a.text)+'</div></article>').join('')+'</div><button class="small" data-action="closed-round-log" data-round="'+round.number+'">下载本轮 Log</button></section>').join('');
+ const packets=r.can_manage&&r.packets?.length?'<section class="card"><details><summary>单轮裁判包快照（'+r.packets.length+'）</summary><div class="feed spaced">'+r.packets.map(p=>'<div class="label-line"><strong>第 '+p.through_round+' 轮 · v'+p.version+'</strong><button class="small" data-action="view-packet" data-id="'+p.id+'">查看 / 复制</button></div>').join('')+'</div></details></section>':'';
+ app.innerHTML='<div class="pagehead"><div><h1>'+esc(r.title)+'</h1><h2>房间已关闭</h2><p class="muted">比赛已停止，记录保留，未结算积分。</p></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button data-action="back">← 返回大厅</button></div></div><div class="buttonrow spaced"><button data-action="download-full-log">下载整场 Log</button>'+(r.can_manage?'<button class="primary" data-action="restart-match">再次开赛</button>':'')+'</div><div class="stack spaced">'+rounds+packets+renderPublicChat(r)+'</div>';
+}
 function renderReadyRoom(r){
  app.innerHTML=`<div class="pagehead"><div><div class="overline">ROOM ${r.id} · 第 ${r.match_number} 场</div><h1>${esc(r.title)}</h1></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button data-action="back">← 返回大厅</button></div></div>${renderMyPointsResult(r)}<section class="card"><h2>${r.can_manage?'开始下一场比赛':'等待再次开赛'}</h2>${finishedActions(r)}</section>`;
 }
-async function openRoom(id,options={}){clearDmState();state.roomId=id;state.selectedRound=options.round||null;state.roomView=options.view||'match';state.chat=[];state.chatDraft='';try{const r=await api(`/api/rooms/${id}`);state.room=r;state.typing={};state.selectedRound=options.round&&r.rounds.some(x=>x.number===options.round)?options.round:r.current_round;history.replaceState(null,'',`#room=${id}`);await loadPersonalModels().catch(()=>{});if(!r.is_judge&&r.status==='open')await loadRoomChat().catch(()=>{});renderRoom();connectWs(id);maybeNotifyJudge();}catch(e){state.roomId=null;state.room=null;state.chat=[];history.replaceState(null,'',location.pathname);toast(e.message);await loadLobby()}}
-async function loadLobby(){clearDmState();state.me=await api('/api/me');state.chat=[];state.chatDraft='';state.personalReturn=null;renderLobby()}
+async function openRoom(id,options={}){clearDmState();state.roomId=id;state.selectedRound=options.round||null;state.roomView=options.view||'match';state.chat=[];state.chatDraft='';try{const r=await api(`/api/rooms/${id}`);state.room=r;state.typing={};state.selectedRound=options.round&&r.rounds.some(x=>x.number===options.round)?options.round:r.current_round;history.replaceState(null,'',`#room=${id}`);await loadPersonalModels().catch(()=>{});if(!r.is_judge&&r.status!=='finished')await loadRoomChat().catch(()=>{});renderRoom();connectWs(id);maybeNotifyJudge();}catch(e){state.roomId=null;state.room=null;state.chat=[];history.replaceState(null,'',location.pathname);toast(e.message);await loadLobby()}}
+async function loadLobby(){stopWs();state.roomId=null;state.room=null;history.replaceState(null,'',location.pathname);clearDmState();state.me=await api('/api/me');state.chat=[];state.chatDraft='';state.personalReturn=null;renderLobby()}
 
 async function loadPersonalModels(){
  const data=await api('/api/me/models'),next=data.models||[];
@@ -127,9 +149,9 @@ async function loadModelOperationRecords(){
  state.modelOperationTotal=data.total||0;
 }
 async function loadRoomChat(){
- const r=state.room;if(!r||r.is_judge||r.status!=='open'){state.chat=[];return;}
+ const r=state.room;if(!r||r.is_judge||r.status==='finished'){state.chat=[];return;}
  const data=await api(`/api/rooms/${r.id}/chat?match_number=${r.match_number}`);
- if(state.roomId===r.id&&state.room?.match_number===data.match_number&&state.room?.status==='open'&&!state.room?.is_judge)state.chat=data.messages||[];
+ if(state.roomId===r.id&&state.room?.match_number===data.match_number&&state.room?.status!=='finished'&&!state.room?.is_judge)state.chat=data.messages||[];
 }
 function chatMessageHtml(m){return `<article class="chat-message"><div class="chat-meta"><strong>${esc(m.sender_name)}</strong><span class="chat-uid">${esc(m.sender_uid)}</span><time>${esc(shortDate(m.created_at))}</time></div><div class="chat-body">${esc(m.text)}</div></article>`;}
 function addChatMessage(message){
@@ -142,7 +164,7 @@ function renderPublicChat(r){
  return `<section class="card chat-card"><div class="label-line"><div><div class="overline">ROOM CHAT / MATCH ${r.match_number}</div><h2>公共聊天</h2></div><span class="pill">${messages.length} 条消息</span></div>
  
  <div id="chatMessages" class="chat-list" aria-live="polite" aria-relevant="additions text">${messages.map(chatMessageHtml).join('')||D('暂无聊天消息')}</div>
- ${r.status==='open'?`<form data-form="chat" class="chat-compose"><label class="field" for="roomChatInput">发送消息</label><textarea id="roomChatInput" name="text" data-chat-draft maxlength="2000" required placeholder="输入纯文本消息（最多 2000 字）">${esc(state.chatDraft)}</textarea><div class="form-actions"><span class="hint">纯文本 · 2000 字以内</span><button class="primary" type="submit">发送</button></div></form>`:'<p class="hint spaced">本场比赛已完赛，公共聊天已关闭。</p>'}
+ ${r.status==='open'?`<form data-form="chat" class="chat-compose"><label class="field" for="roomChatInput">发送消息</label><textarea id="roomChatInput" name="text" data-chat-draft maxlength="2000" required placeholder="输入纯文本消息（最多 2000 字）">${esc(state.chatDraft)}</textarea><div class="form-actions"><span class="hint">纯文本 · 2000 字以内</span><button class="primary" type="submit">发送</button></div></form>`:'<p class="hint spaced">'+(r.status==='closed'?'房间已关闭，聊天记录保留。':'本场比赛已完赛，公共聊天已关闭。')+'</p>'}
  </section>`;
 }
 const myDraft=(name,defaultText='')=>esc(state.drafts[`${state.roomId}:${state.room?.match_number}:${state.selectedRound}:${name}`]??defaultText);
@@ -199,7 +221,7 @@ function makeRoster(r){
  const people=[...r.humans.map(h=>({...h,role:'人类',label:h.name})),...r.ais.map(a=>({...a,role:'AI',label:a.name}))].sort((a,b)=>a.alias.localeCompare(b.alias));
  return people.map(p=>`<div class="roster-person"><div class="person-left"><span class="alias">${esc(p.alias)}</span><div style="min-width:0"><span class="person-name" title="${esc(p.label)}">${esc(p.label)}</span><span class="roster-role">${p.role==='人类'?'人类 · '+esc(p.uid):'AI 参赛位'}${p.alias===r.mine?' · 我':''}</span></div></div><span class="pill ${submitted.has(p.alias)?'ok':''}" ${p.role==='人类'&&p.alias===r.mine?`data-typing-alias="${esc(p.alias)}"`:''} title="本轮提交状态">${submitted.has(p.alias)?'√':p.role==='人类'&&p.alias===r.mine?(state.selectedRound===r.current_round&&state.typing[p.alias]?'....':'X'):'—'}</span>${p.role==='人类'&&p.alias!==r.mine?`<button class="small" data-action="friend-from-room" data-uid="${esc(p.uid)}">加好友</button>`:''}</div>`).join('')||D('等待人类玩家加入');
 }
-function profileReturnFromHash(){const m=/^#profile\?room=(\d+)&view=([^&]+)&round=(\d+)$/.exec(location.hash);return m?{roomId:Number(m[1]),view:decodeURIComponent(m[2]),round:Number(m[3])}:null;}
+function profileReturnFromHash(){const m=/^#profile\?room=(\d+)&view=([^&]+)&round=(\d+)(?:&match=(\d+))?$/.exec(location.hash);return m?{roomId:Number(m[1]),view:decodeURIComponent(m[2]),round:Number(m[3]),matchNumber:m[4]?Number(m[4]):null}:null;}
 function stopDmWs(){
  if(state.dmReconnect)clearTimeout(state.dmReconnect);state.dmReconnect=null;
  if(state.dmSocket){const ws=state.dmSocket;state.dmSocket=null;ws.onclose=null;try{ws.close();}catch{}}
@@ -376,9 +398,9 @@ function connectDmWs(){
  ws.onerror=()=>{};
 }
 async function openPersonalCenter(options={}){
- if(!options.fromHash){state.personalReturn=state.roomId&&state.room?{roomId:state.roomId,view:state.roomView,round:state.selectedRound}:null;}
+ if(!options.fromHash){state.personalReturn=state.roomId&&state.room?{roomId:state.roomId,view:state.roomView,round:state.selectedRound,matchNumber:state.room.match_number}:null;}
  else if(!state.personalReturn)state.personalReturn=profileReturnFromHash();
- stopWs();const back=state.personalReturn;const hash=back?.roomId?`#profile?room=${back.roomId}&view=${encodeURIComponent(back.view)}&round=${back.round||1}`:'#profile';history.replaceState(null,'',hash);
+ stopWs();const back=state.personalReturn;const hash=back?.roomId?`#profile?room=${back.roomId}&view=${encodeURIComponent(back.view)}&round=${back.round||1}${back.matchNumber?'&match='+back.matchNumber:''}`:'#profile';history.replaceState(null,'',hash);
  state.me=await api('/api/me');
  await loadPersonalModels();await loadModelOperationRecords();await loadSocial();renderPersonalCenter();connectDmWs();
 }
@@ -736,7 +758,7 @@ function renderRoom(){
  const editing=document.activeElement;
  const editingDraft=editing?.dataset?.draft;
  const editingPos=typeof editing?.selectionStart==='number'?editing.selectionStart:null;
- const r=state.room;if(!r)return;if(r.records_deleted){renderReadyRoom(r);return;}if(r.is_judge){renderJudgeRoom(r);return;}const n=state.selectedRound||r.current_round;const round=r.rounds.find(x=>x.number===n)||r.rounds[r.rounds.length-1];const active=n===r.current_round;const finished=r.status==='finished';const canManage=r.can_manage;const humans=r.humans.length,ais=r.ais.length;const submitted=new Set(round.submitted);const locked=!!r.verdict_locked||(r.judges||[]).some(j=>j.locked);
+ const r=state.room;if(!r)return;if(r.status==='closed'){renderClosedRoom(r);return;}if(r.records_deleted){renderReadyRoom(r);return;}if(r.is_judge){renderJudgeRoom(r);return;}const n=state.selectedRound||r.current_round;const round=r.rounds.find(x=>x.number===n)||r.rounds[r.rounds.length-1];const active=n===r.current_round;const finished=r.status==='finished';const canManage=r.can_manage;const humans=r.humans.length,ais=r.ais.length;const submitted=new Set(round.submitted);const locked=!!r.verdict_locked||(r.judges||[]).some(j=>j.locked);
  const rtab=r.rounds.map(x=>`<button class="small ${x.number===n?'active':''}" data-action="round" data-id="${x.number}">第 ${x.number} 轮 ${x.status==='revealed'?'✓':''}</button>`).join('');
  const roster=[...r.humans.map(p=>({...p,role:'人类',label:p.name})),...r.ais.map(p=>({...p,role:'AI',label:p.name}))].sort((a,b)=>a.alias.localeCompare(b.alias));
  const answerView=round.status==='revealed'?roster.map(p=>`<div class="answer-card"><strong>${esc(p.alias)} · ${esc(p.label)}</strong><span class="pill" style="margin-left:7px">${p.role}</span><div class="tiny muted">${esc(shortDate(round.answers[p.alias]?.submitted_at))}</div>${round.answers[p.alias]?.edited_at?'<span class="pill">主持人已修订</span>':''}<div class="answer-content">${esc(round.answers[p.alias]?.text||'（无回答）')}</div></div>`).join(''):
@@ -748,7 +770,8 @@ function renderRoom(){
   ${active&&round.status==='collecting'&&!finished&&r.ais.some(a=>(!a.model_profile_id||a.model_profile?.credential_status!=='ok')&&!submitted.has(a.alias))?`<div class="divider"></div><form data-form="ai-answer"><label class="field">录入 AI 原始回答</label><select name="alias">${r.ais.filter(a=>(!a.model_profile_id||a.model_profile?.credential_status!=='ok')&&!submitted.has(a.alias)).map(a=>`<option value="${a.alias}">${a.alias} · ${esc(a.name)}</option>`).join('')}</select><label class="field">AI 回答（复制原文）</label><textarea name="answer" data-draft="ai-answer" maxlength="12000" required placeholder="请粘贴 AI 原样回答，不做修改…">${myDraft('ai-answer')}</textarea><div class="fom-actions"><button class="primary" type="submit">录入 AI 回答</button></div></form>`:''}
  ${r.invite_code?`<div class="notice"><div class="muted tiny">房间邀请码（房主 / 管理员可见）</div><div class="label-line"><strong class="code">${esc(r.invite_code)}</strong><button class="small" data-action="copy-code">复制</button></div></div>`:''}
  ${(r.rounds[0].status==='draft'||r.roster_recovery)&&active&&!finished?`<div class="divider"></div><label class="field">${r.roster_recovery?'补足本轮参赛者（至少 2 人）':'增加 AI 参赛位（最多总计 8 人）'}</label><form data-form="add-ai"><input name="name" maxlength="60" placeholder="AI 来源，如 GPT-6" required><label class="field">模型配置</label><select name="model_profile_id">${modelProfileOptions(r)}</select><div class="form-actions"><button type="submit">＋ 添加 AI</button></div></form>${r.roster_recovery?'<p class="hint">账号退赛后人数不足，可补齐至 2 人再开启本轮；历史代号和回答保留。</p>':''}`:''}
- ${!r.mine&&(r.rounds[0].status==='draft'||r.roster_recovery)&&!finished?`<button class="small" data-action="admin-join">作为人类玩家加入</button>`:''}
+ ${!r.mine&&(!r.self_withdrawn||!r.match_started)&&(r.rounds[0].status==='draft'||r.roster_recovery)&&!finished?`<button class="small" data-action="admin-join">作为人类玩家加入</button>`:''}
+ ${r.mine&&!finished?'<div class="divider"></div><button class="danger" data-action="withdraw">退赛（保留管理权限）</button>':''}
  ${renderAIBindingControls(r)}
  ${active&&!finished&&!locked&&['collecting','revealed'].includes(round.status)&&r.ais.some(a=>submitted.has(a.alias))?`<div class="divider"></div><form data-form="edit-ai-answer"><h3>修订 AI 参赛者回复</h3><p class="hint">仅能修改当前轮、下一轮开始之前的 AI 回复。已公开的修改将实时通知裁判，历史修订保留供审计；已锁定判决时不可修改。</p><label class="field">AI 参赛者</label><select name="alias" data-ai-edit-select>${r.ais.filter(a=>submitted.has(a.alias)).map(a=>`<option value="${esc(a.alias)}">${esc(a.alias)} · ${esc(a.name)}</option>`).join('')}</select><label class="field">修改后的回复</label><textarea name="text" data-ai-edit-text maxlength="12000" required>${esc(r.ai_edits?.[r.ais.find(a=>submitted.has(a.alias))?.alias]||'')}</textarea><div class="form-actions"><button type="submit">保存修订并同步</button></div></form>`:''}
  ${active&&!finished&&!locked&&r.humans.length&&roster.length>2?`<div class="divider"></div><h3>移除人类参赛者</h3><p class="hint">移除后该账号无法重新加入房间；历史已提交回答仍保留。</p>${r.humans.map(h=>`<div class="label-line" style="gap:8px;margin:8px 0"><span>${esc(h.alias)} · ${esc(h.name)}</span><button class="small danger" data-action="remove-human" data-id="${h.user_id}">移出房间</button></div>`).join('')}`:''}
@@ -835,7 +858,8 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
   }
   if(action==='personal-center')await openPersonalCenter();
   if(action==='personal-back')await returnFromPersonalCenter();
-  if(action==='back'){history.replaceState(null,'',location.pathname);await loadLobby()}
+  if(action==='back')await leaveCurrentRoom();
+  if(action==='closed-round-log'){state.selectedRound=Number(b.dataset.round);await downloadLog();}
   if(action==='manage-users')await loadAccounts();
   if(action==='toggle-password-reset'){const form=b.closest('[data-account-uid]').querySelector('form');form.classList.toggle('hide');if(!form.classList.contains('hide'))form.querySelector('input').focus();}
   if(action==='delete-account'){
@@ -926,6 +950,12 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
    const person=state.room.humans.find(h=>h.user_id===Number(b.dataset.id));
    if(person&&confirm(`确定将 ${person.alias} · ${person.name} 移出房间吗？历史回答会保留，但对方不能重新加入。`)){
     await api(`/api/rooms/${state.roomId}/members/${person.user_id}/remove`,{method:'POST'});await refreshRoom();toast('已移出参赛者');
+   }
+  }
+  if(action==='withdraw'){
+   if(confirm('仅退出自己的参赛身份？房间将继续运行，管理权限保留。本场已开赛则不能重新参赛。')){
+    await api('/api/rooms/'+state.roomId+'/withdraw',{method:'POST',body:{match_number:state.room.match_number,confirm:true}});
+    await refreshRoom();toast('已退赛，仍可管理比赛');
    }
   }
   if(action==='admin-join'){await api('/api/join',{method:'POST',body:{code:state.room.invite_code}});await refreshRoom();toast('已作为玩家加入')}
@@ -1103,7 +1133,8 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
 // 页面在后台休眠、网络断线或切回标签页时，重新核对轮次完成状态。
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&state.roomId&&state.me)refreshRoom()});
 window.addEventListener('focus',()=>{if(state.roomId&&state.me)refreshRoom()});
-window.addEventListener('hashchange',async()=>{if(!state.me)return;if(location.hash.startsWith('#profile')){if(!state.personalReturn)state.personalReturn=profileReturnFromHash();await openPersonalCenter({fromHash:true});return;}const m=/^#room=(\d+)$/.exec(location.hash);if(m&&Number(m[1])!==state.roomId)await openRoom(Number(m[1]));else if(!m&&state.roomId)await loadLobby()});
+window.addEventListener('hashchange',async event=>{if(!state.me)return;if(location.hash.startsWith('#profile')){if(!state.personalReturn)state.personalReturn=profileReturnFromHash();await openPersonalCenter({fromHash:true});return;}const m=/^#room=(\d+)$/.exec(location.hash);if(m&&Number(m[1])!==state.roomId)await openRoom(Number(m[1]));else if(!m&&(state.roomId||state.personalReturn?.roomId)){const oldHash=new URL(event.oldURL).hash;try{if(!await leaveCurrentRoom())history.replaceState(null,'',oldHash);}catch(err){history.replaceState(null,'',oldHash);toast(err.message);}}});
 setInterval(()=>{if(state.roomId && state.me && (!state.ws||state.ws.readyState!==WebSocket.OPEN))refreshRoom()},15000);
 init();
+
 

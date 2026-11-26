@@ -169,6 +169,14 @@ def ensure_app_schema(db, now):
     room_columns = {row["name"] for row in db.execute("PRAGMA table_info(rooms)")}
     if "match_started_at" not in room_columns:
         db.execute("ALTER TABLE rooms ADD COLUMN match_started_at TEXT")
+    if "closed_at" not in room_columns:
+        db.execute("ALTER TABLE rooms ADD COLUMN closed_at TEXT")
+    member_columns = {row["name"] for row in db.execute("PRAGMA table_info(members)")}
+    if "leave_reason" not in member_columns:
+        db.execute("ALTER TABLE members ADD COLUMN leave_reason TEXT")
+    judge_columns = {row["name"] for row in db.execute("PRAGMA table_info(room_judges)")}
+    if "left_at" not in judge_columns:
+        db.execute("ALTER TABLE room_judges ADD COLUMN left_at TEXT")
     # Older active matches are backfilled from the server-side start event.
     db.execute(
         """UPDATE rooms SET match_started_at=(
@@ -871,3 +879,4 @@ def register_social_routes(
             clients.discard(websocket)
             if not clients and hub.account_groups.get(user_id) is clients:
                 hub.account_groups.pop(user_id, None)
+
