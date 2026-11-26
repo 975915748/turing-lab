@@ -324,6 +324,10 @@ select option{background:var(--bg-2)}
 .mode-card b{display:block;color:#fff;font-size:13px}
 .mode-card i{display:block;color:var(--dim);font-size:10px;margin-top:3px;font-style:normal}
 </style>
+<script>
+/* 直接双击打开时本页位于 static 目录内，需用同目录相对路径；经服务端访问时则走 /static。 */
+document.write('<link rel="stylesheet" href="' + (location.protocol === 'file:' ? '' : 'static/') + 'style.css?v=2.2.0">');
+</script>
 </head>
 <body data-theme="cyber">
 <!-- 背景层 -->
@@ -340,14 +344,10 @@ select option{background:var(--bg-2)}
       <span id="page-title" style="margin-left:14px">登录页</span>
     </div>
     <div class="top-right">
-      <div class="theme-switch" title="切换主题配色">
-        <i class="on" data-t="cyber" style="background:linear-gradient(135deg,#22d3ee,#a78bfa)"></i>
-        <i data-t="matrix" style="background:linear-gradient(135deg,#34d399,#22d3ee)"></i>
-        <i data-t="sunset" style="background:linear-gradient(135deg,#fb7185,#fbbf24)"></i>
-      </div>
-      <span id="conn-badge" class="uid-pill" title="联机模式需启动 server.py；直接打开文件为离线模式">检测联机…</span>
+      <span id="conn-badge" class="uid-pill" title="联机模式由主服务提供；直接打开文件为离线模式">检测联机…</span>
       <div id="user-bar" class="row" style="display:none">
         <span class="uid-pill">UID <b id="my-uid">-</b></span>
+        <button class="btn sm" onclick="switchPage('hub')">观测台</button>
         <button class="btn sm" onclick="switchPage('center')">个人中心</button>
         <button class="btn sm ghost" onclick="logout()">退出</button>
       </div>
@@ -355,28 +355,126 @@ select option{background:var(--bg-2)}
   </header>
 
   <main>
-    <!-- 登录 / 注册 -->
-    <section id="page-login" class="page">
-      <div class="card login-card">
-        <div class="logo-big"><span>T</span></div>
-        <div class="center"><b style="font-size:18px">图灵测试平台</b><div class="dim" style="font-size:12px">实时多人 · 独立裁判 · AI 对垒</div></div>
-        <div class="login-tabs">
-          <button class="active" onclick="switchLoginTab('login')">登录</button>
-          <button onclick="switchLoginTab('register')">注册</button>
-        </div>
+    <!-- 星图导航：登录与注册收纳在 Life 的二级节点中 -->
+    <section id="page-login" class="page orbit-page">
+      <svg class="gothic-architecture" viewBox="0 0 620 760" aria-hidden="true">
+        <g fill="none" stroke="currentColor" stroke-width="1">
+          <path d="M62 738V278l42-78 42 78v460M104 200V74M82 120h44M50 280h108M74 738V388h60v350"/>
+          <path d="M74 388q30-82 60 0M80 468q24-64 48 0M80 550q24-64 48 0M82 632q22-58 44 0"/>
+          <path d="M168 738V342l54-104 54 104v396M222 238V112M197 164h50M156 344h132M184 738V438h76v300"/>
+          <path d="M184 438q38-108 76 0M190 534q32-84 64 0M190 628q32-84 64 0"/>
+          <path d="M300 738V286l38-70 38 70v452M338 216V96M316 142h44M288 288h100M314 738V410h48v328"/>
+          <path d="M314 410q24-80 48 0M314 504q24-80 48 0M314 600q24-80 48 0"/>
+          <path d="M404 738V370l56-118 56 118v368M460 252V126M435 178h50M392 372h136M422 738V460h76v278"/>
+          <path d="M422 460q38-112 76 0M430 560q30-88 60 0M430 648q30-88 60 0"/>
+          <path d="M0 738h590M12 710h560M18 306Q220 248 402 294M0 350Q264 282 566 330" stroke-dasharray="2 7"/>
+        </g>
+      </svg>
+      <div class="manuscript-date"><b id="manuscript-time">16:53</b><span id="manuscript-date">WED · 11 NOV</span></div>
+      <div class="manuscript-heading"><span>OBSERVATION ATLAS · 001</span><h1>Human &amp; Machine</h1><p>天文星图与人工心智的观测手稿</p></div>
+      <div id="orbit-navigation" class="orbit-navigation" aria-label="登录与注册">
+        <svg class="orbit-drawing" viewBox="0 0 1000 700" preserveAspectRatio="none" aria-hidden="true">
+          <path d="M50 610Q318 170 930 96" class="manuscript-line dashed"/>
+          <path d="M80 652Q478 428 982 528" class="manuscript-line"/>
+          <path d="M180 0Q410 310 880 700" class="manuscript-line ghost"/>
+          <ellipse cx="630" cy="320" rx="250" ry="176" class="manuscript-line dashed"/>
+          <ellipse cx="630" cy="320" rx="326" ry="112" class="manuscript-line ghost" transform="rotate(-24 630 320)"/>
+          <path d="M214 392Q362 564 504 604T858 464" class="manuscript-line constellation-line"/>
+          <g class="star-ticks"><path d="M120 584v16m-8-8h16M344 540v16m-8-8h16M796 490v16m-8-8h16M906 166v16m-8-8h16"/></g>
+        </svg>
+        <div class="star-dust" aria-hidden="true"></div>
+        <button id="core-entry" class="orbit-core" type="button" aria-label="打开登录" aria-haspopup="dialog">
+          <span class="core-grain"></span><span class="core-eye"></span><span class="core-label">TURING<br><small>开始观测</small></span>
+        </button>
+        <svg class="white-bird-orbit" viewBox="0 0 1000 700" preserveAspectRatio="none" aria-hidden="true">
+          <g class="bird-revolution">
+            <path class="white-bird" d="M812 286q42-34 96-12-38 4-62 42-4-26-34-30Z"/>
+            <path class="white-bird" d="M754 164q30-24 68-8-28 4-44 30-4-18-24-22Z"/>
+            <path class="white-bird" d="M818 452q34-28 78-10-30 4-50 34-4-20-28-24Z"/>
+            <path class="white-bird" d="M474 324q26-22 60-8-24 4-38 26-4-16-22-18Z"/>
+          </g>
+        </svg>
+        <button class="orbit-entry auth-entry entry-login" type="button" data-auth="login"><i></i><span><b>Login</b><small>登录</small></span></button>
+        <button class="orbit-entry auth-entry entry-register" type="button" data-auth="register"><i></i><span><b>Register</b><small>注册</small></span></button>
+      </div>
+      <div class="manuscript-footnote"><span>FIG. 01 · CELESTIAL INDEX</span><span>选择登录或注册 · 进入观测台</span></div>
+
+      <aside id="auth-sheet" class="auth-sheet" aria-label="身份认证" hidden>
+        <button id="auth-close" class="auth-close" type="button">关闭 <span>Close</span></button>
+        <div class="auth-overline" id="auth-overline">OBSERVER ACCESS · 观测者入口</div>
+        <h2 id="auth-title">登录 <span>Login</span></h2>
+        <p id="auth-description">沿着星轨返回你的观察档案。</p>
         <div id="form-login">
-          <div class="field"><label>用户名</label><input id="login-name" placeholder="请输入用户名" autocomplete="username" /></div>
-          <div class="field"><label>密码</label><input id="login-pwd" type="password" placeholder="请输入密码" autocomplete="current-password" /></div>
-          <button class="btn primary" style="width:100%;margin-top:6px" onclick="doLogin()">登录</button>
+          <div class="field"><label>用户名 · Username</label><input id="login-name" placeholder="请输入用户名" autocomplete="username" /></div>
+          <div class="field"><label>密码 · Password</label><input id="login-pwd" type="password" placeholder="请输入密码" autocomplete="current-password" /></div>
+          <button class="btn primary" style="width:100%;margin-top:12px" onclick="doLogin()">登录 · Enter</button>
         </div>
         <div id="form-register" style="display:none">
-          <div class="field"><label>用户名（1~40 字符，唯一）</label><input id="reg-name" placeholder="设置一个登录用户名" /></div>
-          <div class="field"><label>密码（≥8 位）</label><input id="reg-pwd" type="password" /></div>
-          <div class="field"><label>确认密码</label><input id="reg-pwd2" type="password" /></div>
-          <button class="btn primary" style="width:100%" onclick="doRegister()">注册账号</button>
-          <div class="dim" style="font-size:11px;margin-top:8px">用户名唯一，密码用于登录；注册后系统自动分配内部 UID</div>
+          <div class="field"><label>用户名 · Username</label><input id="reg-name" placeholder="1~40 字符，唯一" /></div>
+          <div class="field"><label>密码 · Password</label><input id="reg-pwd" type="password" placeholder="至少 8 位" /></div>
+          <div class="field"><label>确认密码 · Confirm</label><input id="reg-pwd2" type="password" /></div>
+          <button class="btn primary" style="width:100%;margin-top:12px" onclick="doRegister()">建立档案 · Register</button>
         </div>
-        <div class="dim center" style="font-size:11px;margin-top:14px">联机模式：运行 <span class="cyan">python server.py</span>，所有设备访问 <span class="cyan">http://房主IP:8000</span>；直接打开文件则为本地离线模式</div>
+        <div class="auth-switch"><button id="auth-other" type="button">没有档案？前往注册</button></div>
+        <div class="auth-note">联机时，所有设备访问同一服务地址；直接打开文件则为本地离线模式。</div>
+      </aside>
+    </section>
+
+    <!-- 观测台：登录后的中转页 -->
+    <section id="page-hub" class="page orbit-page hub-page" style="display:none">
+      <svg class="gothic-architecture" viewBox="0 0 620 760" aria-hidden="true">
+        <g fill="none" stroke="currentColor" stroke-width="1">
+          <path d="M62 738V278l42-78 42 78v460M104 200V74M82 120h44M50 280h108M74 738V388h60v350"/>
+          <path d="M74 388q30-82 60 0M80 468q24-64 48 0M80 550q24-64 48 0M82 632q22-58 44 0"/>
+          <path d="M168 738V342l54-104 54 104v396M222 238V112M197 164h50M156 344h132M184 738V438h76v300"/>
+          <path d="M184 438q38-108 76 0M190 534q32-84 64 0M190 628q32-84 64 0"/>
+          <path d="M300 738V286l38-70 38 70v452M338 216V96M316 142h44M288 288h100M314 738V410h48v328"/>
+          <path d="M314 410q24-80 48 0M314 504q24-80 48 0M314 600q24-80 48 0"/>
+          <path d="M404 738V370l56-118 56 118v368M460 252V126M435 178h50M392 372h136M422 738V460h76v278"/>
+          <path d="M422 460q38-112 76 0M430 560q30-88 60 0M430 648q30-88 60 0"/>
+          <path d="M0 738h590M12 710h560M18 306Q220 248 402 294M0 350Q264 282 566 330" stroke-dasharray="2 7"/>
+        </g>
+      </svg>
+      <div class="manuscript-date"><b id="hub-time">16:53</b><span id="hub-date">WED · 11 NOV</span></div>
+      <div class="manuscript-heading"><span>OBSERVATION ATLAS · 002</span><h1>Choose Your Field</h1><p>选择一处观测场，进入图灵实验</p></div>
+      <div class="orbit-navigation hub-stage" aria-label="比赛入口">
+        <svg class="orbit-drawing" viewBox="0 0 1000 700" preserveAspectRatio="none" aria-hidden="true">
+          <path d="M60 624Q330 208 936 118" class="manuscript-line"/>
+          <path d="M96 660Q470 436 968 530" class="manuscript-line dashed"/>
+          <ellipse cx="620" cy="330" rx="300" ry="204" class="manuscript-line dashed"/>
+          <ellipse cx="620" cy="330" rx="238" ry="128" class="manuscript-line ghost" transform="rotate(-18 620 330)"/>
+          <path d="M214 402Q356 590 512 612T858 486" class="manuscript-line constellation-line"/>
+          <g class="star-ticks"><path d="M148 574v16m-8-8h16M412 556v16m-8-8h16M812 438v16m-8-8h16M902 190v16m-8-8h16"/></g>
+        </svg>
+        <div class="star-dust" aria-hidden="true"></div>
+        <div class="orbit-core hub-core" aria-hidden="true">
+          <span class="core-grain"></span><span class="core-eye"></span>
+        </div>
+        <svg class="white-bird-orbit" viewBox="0 0 1000 700" preserveAspectRatio="none" aria-hidden="true">
+          <g class="bird-revolution">
+            <path class="white-bird" d="M812 286q42-34 96-12-38 4-62 42-4-26-34-30Z"/>
+            <path class="white-bird" d="M754 164q30-24 68-8-28 4-44 30-4-18-24-22Z"/>
+            <path class="white-bird" d="M818 452q34-28 78-10-30 4-50 34-4-20-28-24Z"/>
+            <path class="white-bird" d="M474 324q26-22 60-8-24 4-38 26-4-16-22-18Z"/>
+          </g>
+        </svg>
+        <button class="orbit-entry hub-entry entry-classic" type="button" data-hub="classic"><i></i><span><b>Classic</b><small>普通比赛</small></span></button>
+        <button class="orbit-entry hub-entry entry-discern" type="button" data-hub="discern"><i></i><span><b>Discern</b><small>进阶比赛</small></span></button>
+        <button class="orbit-entry hub-entry entry-rank" type="button" data-hub="rank"><i></i><span><b>Ranking</b><small>排行榜</small></span></button>
+      </div>
+      <div class="manuscript-footnote"><span>FIG. 02 · THREE FIELDS</span><span>普通比赛 / 进阶比赛 / 排行榜</span></div>
+    </section>
+
+    <!-- 排行榜 -->
+    <section id="page-rank" class="page" style="display:none">
+      <div class="card rank-card">
+        <h3>排行榜 <span class="rank-sub">Leaderboard</span></h3>
+        <p class="rank-note">所有已结算房间的累计得分，按星图档案排序。</p>
+        <div id="rank-list" class="rank-list"><div class="dim">正在读取星图档案…</div></div>
+        <div class="row rank-actions">
+          <button class="btn" onclick="loadLeaderboard()">刷新 · Refresh</button>
+          <button class="btn ghost" onclick="switchPage('hub')">返回观测台</button>
+        </div>
       </div>
     </section>
 
@@ -756,10 +854,10 @@ const DB = {
   apiCfg(){ return Store.get("turing_api_"+ (App.uid||"_"), []); }
 };
 
-/* ---------- 1.1 联机 API 层（后端 server.py；不可用时自动降级为本地模式） ---------- */
+/* ---------- 1.1 联机 API 层（由主 FastAPI 服务提供；不可用时自动降级为本地模式） ---------- */
 const Api = {
   online: false,
-  base: "",
+  base: "/game",
   _pushTimers: {},
   async ping(){
     try{
@@ -842,12 +940,12 @@ function escapeHtml(s){ const d=document.createElement("div"); d.textContent=s; 
 
 /* ---------- 4. 页面切换 ---------- */
 function switchPage(p){
-  ["login","hall","room","center"].forEach(k=>{
+  ["login","hub","hall","room","rank","center"].forEach(k=>{
     const el = $("page-"+k); if(!el) return;
     // 登录页需 flex 布局才能让卡片水平垂直居中，其余页用 block
     el.style.display = (k===p) ? (k==="login"?"flex":"block") : "none";
   });
-  $("page-title").innerText = {login:"登录页",hall:"比赛大厅",room:"房间现场",center:"个人中心"}[p]||"";
+  $("page-title").innerText = {login:"登录页",hub:"观测台",hall:"比赛大厅",room:"房间现场",rank:"排行榜",center:"个人中心"}[p]||"";
   if(p==="center"){ $("center-uid").value=App.uid; $("center-name").value=App.username; renderApiList(); }
   if(p==="room"){ startPolling(); renderRoom(); } else if(p!=="room"){ stopPolling(); }
   if(p==="hall"){ renderRoomList(); } else { stopHallPolling(); }
@@ -947,13 +1045,78 @@ async function doLogin(){
 function afterLogin(){
   $("user-bar").style.display="flex";
   $("my-uid").innerText=App.uid;
-  switchPage("hall");
+  const sheet=$("auth-sheet"), nav=$("orbit-navigation");
+  if(sheet) sheet.hidden=true;
+  if(nav) nav.classList.remove("auth-visible");
+  switchPage("hub");
 }
 function logout(){
   App.uid=""; App.username=""; App.currentRoomId=null;
   DB.setSession(null); stopPolling();
   $("user-bar").style.display="none";
   switchPage("login");
+}
+
+/* ---------- 6.1 观测台与排行榜 ---------- */
+function enterField(mode){
+  AppMode = mode==="discern" ? "discern" : "classic";
+  selectMode(AppMode);
+  switchPage("hall");
+}
+function openRank(){
+  switchPage("rank");
+  loadLeaderboard();
+}
+function bindHubEntries(){
+  document.querySelectorAll("[data-hub]").forEach(btn=>{
+    btn.addEventListener("click", ()=>{
+      const target = btn.dataset.hub;
+      if(target==="rank") openRank();
+      else enterField(target);
+    });
+  });
+}
+function localLeaderboard(){
+  const board = {};
+  Object.values(DB.rooms()).forEach(room=>{
+    const names = {};
+    (room.players||[]).forEach(p=>{ if(p&&p.uid) names[p.uid]=p.name; });
+    Object.entries(room.scores||{}).forEach(([uid,score])=>{
+      const pts = Number(score)||0;
+      const item = board[uid] || (board[uid]={uid, name:names[uid]||uid, score:0, games:0});
+      item.score += pts; item.games += 1;
+      if(names[uid]) item.name = names[uid];
+    });
+  });
+  return Object.values(board).sort((a,b)=>b.score-a.score);
+}
+async function loadLeaderboard(){
+  const box = $("rank-list");
+  if(!box) return;
+  box.innerHTML = '<div class="dim">正在读取星图档案…</div>';
+  let rows = [];
+  if(Api.online){
+    const r = await Api.get("/api/leaderboard");
+    if(r.status===200 && r.data && Array.isArray(r.data.leaderboard)) rows = r.data.leaderboard;
+  }else{
+    rows = localLeaderboard();
+  }
+  renderLeaderboard(rows);
+}
+function renderLeaderboard(rows){
+  const box = $("rank-list");
+  if(!box) return;
+  if(!rows.length){
+    box.innerHTML = '<div class="dim">暂无得分记录。完成一场比赛后，星图会记录你的成绩。</div>';
+    return;
+  }
+  box.innerHTML = rows.map((row,i)=>`
+    <div class="rank-row">
+      <span class="rank-no">${String(i+1).padStart(2,"0")}</span>
+      <span class="rank-name">${escapeHtml(row.name||row.uid||"—")}<small>${escapeHtml(row.uid||"")}</small></span>
+      <span class="rank-games">${row.games||0} 场</span>
+      <span class="rank-pts">${Number(row.score)||0}</span>
+    </div>`).join("");
 }
 
 /* ---------- 7. 房间 ---------- */
@@ -2114,6 +2277,7 @@ function voteItem(itemId, verdict){
 /* ---------- 22. 启动 ---------- */
 (async function init(){
   initCanvas();
+  bindHubEntries();
   const t = localStorage.getItem("turing_theme");
   if(t){ document.body.setAttribute("data-theme", t);
     document.querySelectorAll(".theme-switch i").forEach(x=>x.classList.toggle("on", x.dataset.t===t)); }
@@ -2132,6 +2296,9 @@ function voteItem(itemId, verdict){
   }
   switchPage("login");
 })();
+</script>
+<script>
+document.write('<script src="' + (location.protocol === 'file:' ? '' : 'static/') + 'app.js?v=2.2.0"><\/script>');
 </script>
 </body>
 </html>

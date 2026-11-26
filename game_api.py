@@ -1,64 +1,24 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-图灵实验室 Turing Lab —— 零依赖联机后端
-------------------------------------------------
-仅使用 Python 标准库，无需 pip 安装任何依赖。
+"""网页对局模块的 JSON API，由主 FastAPI 应用挂载到 /game/api。"""
+from __future__ import annotations
 
-启动：
-    python server.py            # 默认 8000 端口
-    python server.py 8080       # 指定端口
-
-联机：
-    房主启动后，所有设备访问  http://房主局域网IP:8000
-    邀请码由服务器生成并保证全局唯一。
-
-离线：
-    不启动本服务、直接双击 index.html 时，前端自动降级为本地 localStorage 模式。
-"""
 import hashlib
 import json
 import os
 import random
 import secrets
-import socket
-import sys
 import threading
 import time
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from pathlib import Path
+from urllib.parse import parse_qs
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-DATA_FILE = os.path.join(ROOT, "data.json")
-LOCK = threading.RLock()
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
+
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-
-STATE = {"users": {}, "rooms": {}, "chats": {}}
 
 
 def now_ms():
     return int(time.time() * 1000)
-
-
-def load_state():
-    global STATE
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        STATE = {
-            "users": data.get("users") or {},
-            "rooms": data.get("rooms") or {},
-            "chats": data.get("chats") or {},
-        }
-    except Exception:
-        STATE = {"users": {}, "rooms": {}, "chats": {}}
-
-
-def save_state():
-    tmp = DATA_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(STATE, f, ensure_ascii=False)
-    os.replace(tmp, DATA_FILE)
 
 
 def hash_pwd(pwd, salt):
@@ -193,32 +153,57 @@ def merge_room(old, new):
     return r
 
 
-# ---------------- API 实现 ----------------
+class GameStore:
+    def __init__(self, path):
+        self.path = Path(path)
+        self.lock = threading.RLock()
+        self.state = {"users": {}, "rooms": {}, "chats": {}}
+        self.load()
 
-def api_register(body):
+    def load(self):
+        try:
+            with self.path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.state = {
+                "users": data.get("users") or {},
+                "rooms": data.get("rooms") or {},
+                "chats": data.get("chats") or {},
+            }
+        except Exception:
+            self.state = {"users": {}, "rooms": {}, "chats": {}}
+
+    def save(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(self.state, f, ensure_ascii=False)
+        os.replace(tmp, self.path)
+
+
+def api_register(store, body):
     name = (body.get("name") or "").strip()
     pwd = body.get("pwd") or ""
     if not name or len(name) > 40:
         return 400, {"error": "用户名 1~40 字符"}
     if len(pwd) < 8:
         return 400, {"error": "密码至少 8 位"}
-    for u in STATE["users"].values():
+    for u in store.state["users"].values():
         if u.get("name") == name:
             return 409, {"error": "用户名已被占用"}
-    uid = next_uid(STATE["users"])
+    uid = next_uid(store.state["users"])
     salt = secrets.token_hex(8)
-    STATE["users"][uid] = {
+    store.state["users"][uid] = {
         "uid": uid, "name": name, "salt": salt,
         "hash": hash_pwd(pwd, salt), "createdAt": now_ms(),
     }
-    save_state()
+    store.save()
     return 200, {"uid": uid, "name": name}
 
 
-def api_login(body):
+def api_login(store, body):
     name = (body.get("name") or "").strip()
     pwd = body.get("pwd") or ""
-    for uid, u in STATE["users"].items():
+    for uid, u in store.state["users"].items():
         if u.get("name") == name:
             if u.get("hash") == hash_pwd(pwd, u.get("salt", "")):
                 return 200, {"uid": uid, "name": name}
@@ -226,26 +211,26 @@ def api_login(body):
     return 404, {"error": "账号不存在"}
 
 
-def api_profile(body):
+def api_profile(store, body):
     uid = body.get("uid") or ""
     name = (body.get("name") or "").strip()
     if not name or len(name) > 40:
         return 400, {"error": "用户名 1~40 字符"}
-    if uid not in STATE["users"]:
+    if uid not in store.state["users"]:
         return 401, {"error": "账号不存在"}
-    for k, u in STATE["users"].items():
+    for k, u in store.state["users"].items():
         if k != uid and u.get("name") == name:
             return 409, {"error": "用户名已被占用"}
-    STATE["users"][uid]["name"] = name
-    save_state()
+    store.state["users"][uid]["name"] = name
+    store.save()
     return 200, {"ok": True}
 
 
-def api_change_pwd(body):
+def api_change_pwd(store, body):
     uid = body.get("uid") or ""
     old = body.get("oldPwd") or ""
     new = body.get("newPwd") or ""
-    u = STATE["users"].get(uid)
+    u = store.state["users"].get(uid)
     if not u:
         return 401, {"error": "账号不存在"}
     if u.get("hash") != hash_pwd(old, u.get("salt", "")):
@@ -254,31 +239,31 @@ def api_change_pwd(body):
         return 400, {"error": "新密码 8~200 位"}
     u["salt"] = secrets.token_hex(8)
     u["hash"] = hash_pwd(new, u["salt"])
-    save_state()
+    store.save()
     return 200, {"ok": True}
 
 
-def api_create_room(body):
+def api_create_room(store, body):
     name = (body.get("name") or "").strip()
     owner = body.get("owner") or ""
     owner_name = (body.get("ownerName") or "").strip() or "房主"
     if not name:
         return 400, {"error": "请填写比赛名称"}
-    if owner and owner not in STATE["users"]:
+    if owner and owner not in store.state["users"]:
         return 401, {"error": "账号不存在，请重新登录"}
-    code = new_code(STATE["rooms"])
+    code = new_code(store.state["rooms"])
     room = default_room(code, name, body.get("mode") or "classic", owner, owner_name)
-    STATE["rooms"][code] = room
-    save_state()
+    store.state["rooms"][code] = room
+    store.save()
     return 200, {"room": room}
 
 
-def api_join(body):
+def api_join(store, body):
     code = (body.get("code") or "").strip().upper()
     uid = body.get("uid") or ""
     name = (body.get("name") or "").strip() or "玩家"
     role = body.get("role") or "player"
-    room = STATE["rooms"].get(code)
+    room = store.state["rooms"].get(code)
     if not room:
         return 404, {"error": "房间不存在，请核对邀请码"}
     if not uid:
@@ -295,78 +280,78 @@ def api_join(body):
         if not any(p.get("uid") == uid and not p.get("isAI") for p in players):
             players.append({"uid": uid, "name": name, "isAI": False,
                             "isOwner": room.get("owner") == uid})
-    save_state()
+    store.save()
     return 200, {"room": room}
 
 
-def api_save_room(body):
+def api_save_room(store, body):
     incoming = body.get("room") or {}
     code = incoming.get("id")
     if not code:
         return 400, {"error": "缺少房间号"}
-    old = STATE["rooms"].get(code)
+    old = store.state["rooms"].get(code)
     if not old:
         return 404, {"error": "房间不存在"}
-    STATE["rooms"][code] = merge_room(old, incoming)
-    save_state()
+    store.state["rooms"][code] = merge_room(old, incoming)
+    store.save()
     return 200, {"ok": True}
 
 
-def api_delete_room(body):
+def api_delete_room(store, body):
     code = body.get("code")
     uid = body.get("uid")
-    room = STATE["rooms"].get(code)
+    room = store.state["rooms"].get(code)
     if not room:
         return 404, {"error": "房间不存在"}
     if room.get("owner") != uid:
         return 403, {"error": "仅房主可删除房间"}
-    STATE["rooms"].pop(code, None)
-    STATE["chats"].pop(code, None)
-    save_state()
+    store.state["rooms"].pop(code, None)
+    store.state["chats"].pop(code, None)
+    store.save()
     return 200, {"ok": True}
 
 
-def api_set_chat(body):
+def api_set_chat(store, body):
     code = body.get("code")
     if not code:
         return 400, {"error": "缺少房间号"}
-    STATE["chats"][code] = body.get("chat") or []
-    save_state()
+    store.state["chats"][code] = body.get("chat") or []
+    store.save()
     return 200, {"ok": True}
 
 
-def dispatch(method, path, body, query):
+def dispatch(store, method, path, body, query):
     if path == "/api/health":
-        return 200, {"ok": True, "rooms": len(STATE["rooms"]), "users": len(STATE["users"])}
+        return 200, {"ok": True, "rooms": len(store.state["rooms"]), "users": len(store.state["users"])}
 
     if path == "/api/register" and method == "POST":
-        return api_register(body)
+        return api_register(store, body)
     if path == "/api/login" and method == "POST":
-        return api_login(body)
+        return api_login(store, body)
     if path == "/api/profile" and method == "POST":
-        return api_profile(body)
+        return api_profile(store, body)
     if path == "/api/changePwd" and method == "POST":
-        return api_change_pwd(body)
+        return api_change_pwd(store, body)
     if path == "/api/createRoom" and method == "POST":
-        return api_create_room(body)
+        return api_create_room(store, body)
     if path == "/api/join" and method == "POST":
-        return api_join(body)
+        return api_join(store, body)
     if path == "/api/room" and method == "POST":
-        return api_save_room(body)
+        return api_save_room(store, body)
     if path == "/api/deleteRoom" and method == "POST":
-        return api_delete_room(body)
+        return api_delete_room(store, body)
     if path == "/api/chat" and method == "POST":
-        return api_set_chat(body)
+        return api_set_chat(store, body)
 
     if path == "/api/room" and method == "GET":
         code = (query.get("code") or [""])[0].strip().upper()
-        room = STATE["rooms"].get(code)
+        room = store.state["rooms"].get(code)
         return (200, {"room": room}) if room else (404, {"error": "房间不存在"})
 
     if path == "/api/rooms" and method == "GET":
         uid = (query.get("uid") or [""])[0]
         rooms = []
-        for r in STATE["rooms"].values():
+        for r in store.state["rooms"].values():
             if (not uid or r.get("owner") == uid
                     or any(p.get("uid") == uid for p in r.get("players") or [])
                     or any(j.get("uid") == uid for j in r.get("judges") or [])):
@@ -374,118 +359,59 @@ def dispatch(method, path, body, query):
         rooms.sort(key=lambda x: x.get("createdAt") or 0, reverse=True)
         return 200, {"rooms": rooms}
 
+    if path == "/api/leaderboard" and method == "GET":
+        users = store.state["users"]
+        board = {}
+        for room in store.state["rooms"].values():
+            names = {
+                p.get("uid"): p.get("name")
+                for p in (room.get("players") or [])
+                if isinstance(p, dict) and p.get("uid")
+            }
+            for uid, score in (room.get("scores") or {}).items():
+                if not isinstance(uid, str) or not uid:
+                    continue
+                try:
+                    points = float(score)
+                except (TypeError, ValueError):
+                    continue
+                item = board.setdefault(uid, {"uid": uid, "name": "", "score": 0.0, "games": 0})
+                item["score"] += points
+                item["games"] += 1
+                name = names.get(uid) or (users.get(uid) or {}).get("name")
+                if name:
+                    item["name"] = name
+        rows = sorted(board.values(), key=lambda x: (-x["score"], x["uid"]))[:50]
+        for row in rows:
+            row["score"] = round(row["score"], 1)
+            row["name"] = row["name"] or row["uid"]
+        return 200, {"leaderboard": rows}
+
     if path == "/api/chat" and method == "GET":
         code = (query.get("code") or [""])[0].strip().upper()
-        return 200, {"chat": STATE["chats"].get(code, [])}
+        return 200, {"chat": store.state["chats"].get(code, [])}
 
     return 404, {"error": "接口不存在"}
 
 
-class Handler(SimpleHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
+def create_game_router(data_file):
+    store = GameStore(data_file)
+    router = APIRouter()
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=ROOT, **kwargs)
-
-    def log_message(self, fmt, *args):
-        pass
-
-    def end_headers(self):
-        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        super().end_headers()
-
-    def do_OPTIONS(self):
-        self.send_response(204)
-        self.send_header("Content-Length", "0")
-        self.end_headers()
-
-    def do_GET(self):
-        parsed = urlparse(self.path)
-        if parsed.path.startswith("/api/"):
-            with LOCK:
-                status, payload = dispatch("GET", parsed.path, {}, parse_qs(parsed.query))
-            return self._send_json(status, payload)
-        return super().do_GET()
-
-    def do_POST(self):
-        parsed = urlparse(self.path)
-        if parsed.path.startswith("/api/"):
-            length = int(self.headers.get("Content-Length") or 0)
-            raw = self.rfile.read(length) if length else b"{}"
+    @router.api_route("/{endpoint:path}", methods=["GET", "POST"], include_in_schema=False)
+    async def game_endpoint(endpoint: str, request: Request):
+        body = {}
+        if request.method == "POST":
             try:
-                body = json.loads(raw.decode("utf-8") or "{}")
-            except Exception:
+                body = await request.json()
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 body = {}
-            with LOCK:
-                status, payload = dispatch("POST", parsed.path, body, {})
-            return self._send_json(status, payload)
-        return super().do_POST()
+            if not isinstance(body, dict):
+                body = {}
+        with store.lock:
+            status, payload = dispatch(
+                store, request.method, "/api/" + endpoint, body, parse_qs(request.url.query)
+            )
+        return JSONResponse(payload, status_code=status)
 
-    def _send_json(self, status, payload):
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-
-class Server(ThreadingHTTPServer):
-    daemon_threads = True
-
-    def handle_error(self, request, client_address):
-        # 浏览器关闭标签页产生的连接重置属正常现象，不打印堆栈
-        exc = sys.exc_info()[1]
-        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
-            return
-        super().handle_error(request, client_address)
-
-
-def lan_ips():
-    ips = set()
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ips.add(s.getsockname()[0])
-        s.close()
-    except Exception:
-        pass
-    try:
-        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ips.add(info[4][0])
-    except Exception:
-        pass
-    return [ip for ip in ips if not ip.startswith("127.")]
-
-
-def main():
-    port = 8000
-    if len(sys.argv) > 1:
-        try:
-            port = int(sys.argv[1])
-        except ValueError:
-            print("端口参数无效，使用默认 8000")
-    load_state()
-    server = Server(("0.0.0.0", port), Handler)
-    print("=" * 58)
-    print("  图灵实验室 Turing Lab —— 联机后端已启动")
-    print("=" * 58)
-    print("  本机访问 : http://127.0.0.1:%d" % port)
-    for ip in lan_ips():
-        print("  局域网   : http://%s:%d" % (ip, port))
-    print("  数据文件 : %s" % DATA_FILE)
-    print("  提示：所有参赛设备访问同一地址即可联机；按 Ctrl+C 停止")
-    print("=" * 58)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\n服务已停止")
-    finally:
-        server.server_close()
-
-
-if __name__ == "__main__":
-    main()
+    return router
