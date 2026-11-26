@@ -306,7 +306,10 @@ function friendDmButton(page, uid) {
     await pageB.screenshot({ path: path.join(artifacts, 'social-points-result-desktop.png'), fullPage: true, animations: 'disabled' });
     await pageC.screenshot({ path: path.join(artifacts, 'social-points-independent-judge.png'), fullPage: true, animations: 'disabled' });
 
-    // Delay A's successful send response, switch this browser to C, and open C-B.
+    // Reopen A-B before delaying its send response, then switch this browser to C and open C-B.
+    await friendDmButton(pageA, uidB).click();
+    const delayedDmForm = pageA.locator('form[data-form="dm-send"]');
+    await visible(delayedDmForm);
     const delayedText = 'A 账号切换后的迟到私信';
     let releaseDelayedResponse, signalDelayedResponseReady;
     const delayedGate = new Promise(resolve => { releaseDelayedResponse = resolve; });
@@ -321,8 +324,8 @@ function friendDmButton(page, uid) {
       await delayedGate;
       await route.fulfill({ response });
     });
-    await pageA.locator('form[data-form="dm-send"] textarea[name="text"]').fill(delayedText);
-    await pageA.locator('form[data-form="dm-send"] button[type="submit"]').click();
+    await delayedDmForm.locator('textarea[name="text"]').fill(delayedText);
+    await delayedDmForm.locator('button[type="submit"]').click();
     await delayedReady;
     await pageA.locator('#logoutBtn').click();
     await pageA.locator('form[data-form="login"]').waitFor();
