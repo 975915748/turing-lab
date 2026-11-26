@@ -1,0 +1,2137 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="description" content="图灵实验室 v2.0 — 实时多人图灵测试平台" />
+<title>图灵实验室 · Turing Lab v2.0</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2305070d'/%3E%3Cpath d='M16 4l10 5.5v13L16 28 6 22.5v-13z' fill='none' stroke='%2322d3ee' stroke-width='1.6'/%3E%3Ccircle cx='16' cy='16' r='3.4' fill='%2322d3ee'/%3E%3Ccircle cx='16' cy='16' r='6.2' fill='none' stroke='%23a78bfa' stroke-width='1' stroke-dasharray='3 3'/%3E%3C/svg%3E" />
+<style>
+/* ============ 设计令牌（零外部依赖，可离线部署） ============ */
+:root{
+  --bg:#04060c; --bg-2:#0a0f1e; --panel:rgba(13,18,33,.66); --panel-solid:#0b1120;
+  --line:rgba(56,189,248,.16); --line-strong:rgba(56,189,248,.38);
+  --cyan:#22d3ee; --blue:#3b82f6; --violet:#a78bfa; --magenta:#e879f9;
+  --text:#e8f0fb; --muted:#8aa0c2; --dim:#5b6b88;
+  --ok:#34d399; --warn:#fbbf24; --err:#f87171;
+  --radius:14px; --glow:0 0 24px rgba(34,211,238,.25);
+}
+[data-theme="matrix"]{ --cyan:#34d399; --blue:#10b981; --violet:#22d3ee; --magenta:#a3e635; --glow:0 0 24px rgba(52,211,153,.28); }
+[data-theme="sunset"]{ --cyan:#fb7185; --blue:#f472b6; --violet:#fbbf24; --magenta:#fda4af; --glow:0 0 24px rgba(251,113,133,.28); }
+
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; color:var(--text); font:14px/1.55 "Segoe UI",-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+  background:var(--bg); overflow:hidden; letter-spacing:.2px;
+}
+/* ============ 动态背景层 ============ */
+.bg-layer{position:fixed;inset:0;z-index:0;pointer-events:none}
+.bg-grad{background:
+  radial-gradient(900px 600px at 12% 8%, rgba(59,130,246,.18), transparent 60%),
+  radial-gradient(800px 600px at 92% 18%, rgba(167,139,250,.16), transparent 60%),
+  radial-gradient(700px 700px at 50% 110%, rgba(34,211,238,.14), transparent 60%),
+  linear-gradient(180deg,var(--bg) 0%,var(--bg-2) 100%);}
+.bg-grid{
+  background-image:linear-gradient(rgba(56,189,248,.07) 1px,transparent 1px),linear-gradient(90deg,rgba(56,189,248,.07) 1px,transparent 1px);
+  background-size:38px 38px;
+  mask-image:radial-gradient(ellipse 90% 80% at 50% 40%,#000 40%,transparent 100%);
+  animation:gridmove 22s linear infinite;
+}
+@keyframes gridmove{from{background-position:0 0,0 0}to{background-position:38px 38px,38px 38px}}
+.bg-scan{background:linear-gradient(180deg,transparent,rgba(34,211,238,.05) 50%,transparent);height:30%;top:-30%;animation:scan 7s linear infinite}
+@keyframes scan{to{transform:translateY(420%)}}
+#bg-canvas{position:fixed;inset:0;z-index:0;opacity:.55;pointer-events:none}
+
+/* ============ 布局 ============ */
+#app{position:relative;z-index:2;height:100vh;display:flex;flex-direction:column}
+header.topbar{
+  height:56px;flex-shrink:0;display:flex;align-items:center;justify-content:space-between;padding:0 18px;
+  background:linear-gradient(180deg,rgba(10,15,30,.9),rgba(10,15,30,.55));
+  border-bottom:1px solid var(--line);backdrop-filter:blur(14px);
+}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700}
+.brand .logo{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;
+  background:linear-gradient(135deg,var(--cyan),var(--violet));box-shadow:var(--glow);color:#04060c;font-weight:900}
+.brand b{font-size:16px;background:linear-gradient(90deg,var(--cyan),var(--violet));-webkit-background-clip:text;background-clip:text;color:transparent}
+.brand small{color:var(--dim);font-weight:500;margin-left:6px}
+#page-title{color:var(--muted);font-size:13px}
+.top-right{display:flex;align-items:center;gap:10px}
+main{flex:1;overflow:hidden;position:relative}
+.page{position:absolute;inset:0;overflow:auto;padding:18px;animation:fadein .35s ease}
+@keyframes fadein{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.page::-webkit-scrollbar{width:8px;height:8px}
+.page::-webkit-scrollbar-thumb{background:linear-gradient(var(--cyan),var(--violet));border-radius:6px}
+.page::-webkit-scrollbar-track{background:transparent}
+
+/* ============ 通用组件 ============ */
+.card{
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px;
+  backdrop-filter:blur(12px);position:relative;overflow:hidden;transition:border-color .25s,transform .25s,box-shadow .25s;
+}
+.card::before{content:"";position:absolute;inset:0 0 auto 0;height:1px;background:linear-gradient(90deg,transparent,var(--cyan),transparent);opacity:.6}
+.card:hover{border-color:var(--line-strong);box-shadow:var(--glow)}
+.card h3{margin:0 0 12px;font-size:15px;display:flex;align-items:center;gap:8px;color:#fff}
+.card h3::before{content:"";width:3px;height:14px;background:linear-gradient(var(--cyan),var(--violet));border-radius:2px}
+.grid{display:grid;gap:14px}
+.grid-2{grid-template-columns:repeat(2,1fr)}
+.grid-3{grid-template-columns:repeat(3,1fr)}
+@media(max-width:1000px){.grid-2,.grid-3{grid-template-columns:1fr}}
+
+label{font-size:12px;color:var(--muted)}
+input,textarea,select{
+  width:100%;background:rgba(4,6,12,.7);border:1px solid var(--line);border-radius:8px;
+  padding:9px 11px;color:var(--text);font:inherit;outline:none;transition:border-color .2s,box-shadow .2s;margin-top:4px;
+}
+input:focus,textarea:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(34,211,238,.15)}
+input::placeholder,textarea::placeholder{color:var(--dim)}
+textarea{resize:vertical}
+select option{background:var(--bg-2)}
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:6px;cursor:pointer;border:1px solid var(--line);
+  background:linear-gradient(180deg,rgba(30,41,59,.8),rgba(15,23,42,.8));color:var(--text);
+  padding:8px 14px;border-radius:8px;font:inherit;font-weight:600;transition:.2s;white-space:nowrap;
+}
+.btn:hover{border-color:var(--line-strong);transform:translateY(-1px)}
+.btn:active{transform:translateY(0)}
+.btn.primary{background:linear-gradient(135deg,var(--cyan),var(--blue));color:#04121a;border-color:transparent;box-shadow:var(--glow)}
+.btn.primary:hover{filter:brightness(1.1)}
+.btn.ghost{background:transparent}
+.btn.danger{color:var(--err);border-color:rgba(248,113,113,.4)}
+.btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
+.btn.sm{padding:5px 10px;font-size:12px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.muted{color:var(--muted)}.dim{color:var(--dim)}.ok{color:var(--ok)}.warn{color:var(--warn)}.err{color:var(--err)}
+.cyan{color:var(--cyan)}.violet{color:var(--violet)}
+.center{text-align:center}
+.spin{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ============ 登录页 ============ */
+#page-login{display:flex;align-items:center;justify-content:center}
+.login-card{width:420px;max-width:92vw;padding:28px}
+.logo-big{width:64px;height:64px;border-radius:16px;margin:0 auto 10px;display:grid;place-items:center;
+  background:conic-gradient(from 0deg,var(--cyan),var(--violet),var(--magenta),var(--cyan));
+  animation:spin 8s linear infinite;box-shadow:0 0 40px rgba(34,211,238,.5)}
+.logo-big span{width:50px;height:50px;border-radius:12px;background:var(--bg);display:grid;place-items:center;font-size:22px;font-weight:900;color:var(--cyan)}
+.login-tabs{display:flex;background:rgba(4,6,12,.6);border-radius:10px;padding:4px;margin:18px 0}
+.login-tabs button{flex:1;padding:9px;border:none;background:transparent;color:var(--muted);cursor:pointer;border-radius:7px;font:inherit;font-weight:600;transition:.25s}
+.login-tabs button.active{background:linear-gradient(135deg,var(--cyan),var(--blue));color:#04121a;box-shadow:var(--glow)}
+.field{margin-bottom:13px}
+.checkline{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
+.checkline input{width:auto;margin:0}
+
+/* ============ 顶部用户区 / 主题切换 ============ */
+.theme-switch{display:flex;gap:3px;background:rgba(4,6,12,.6);padding:3px;border-radius:8px;border:1px solid var(--line)}
+.theme-switch i{width:18px;height:18px;border-radius:50%;cursor:pointer;display:block;border:2px solid transparent}
+.theme-switch i.on{border-color:#fff}
+.uid-pill{font-size:12px;color:var(--muted);background:rgba(34,211,238,.08);border:1px solid var(--line);padding:4px 10px;border-radius:20px}
+.uid-pill b{color:var(--cyan)}
+
+/* ============ 数据看板（创新点1：实时数据面板） ============ */
+.dash{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:14px}
+@media(max-width:900px){.dash{grid-template-columns:repeat(2,1fr)}}
+.metric{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;position:relative;overflow:hidden}
+.metric .k{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1px}
+.metric .v{font-size:26px;font-weight:800;margin-top:4px;font-variant-numeric:tabular-nums;
+  background:linear-gradient(90deg,var(--cyan),var(--violet));-webkit-background-clip:text;background-clip:text;color:transparent}
+.metric .s{font-size:11px;color:var(--dim);margin-top:2px}
+.metric::after{content:"";position:absolute;right:-20px;top:-20px;width:70px;height:70px;border-radius:50%;
+  background:radial-gradient(circle,var(--cyan),transparent 70%);opacity:.18}
+.live-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);margin-right:5px;box-shadow:0 0 8px var(--ok);animation:pulse 1.6s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* ============ 比赛现场 ============ */
+.room-grid{display:grid;grid-template-columns:1.4fr 1fr;gap:14px}
+@media(max-width:1000px){.room-grid{grid-template-columns:1fr}}
+.q-box{background:rgba(4,6,12,.6);border:1px dashed var(--line);border-radius:10px;padding:14px;min-height:110px}
+.q-box .q-text{white-space:pre-wrap;color:#dbeafe}
+.q-img{margin-top:10px}
+.q-img img{max-width:100%;border-radius:10px;border:1px solid var(--line);display:block}
+.answer-area textarea{height:120px}
+/* 选手面板 */
+.player-list{display:flex;flex-direction:column;gap:8px}
+.player-chip{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;
+  background:rgba(4,6,12,.5);border:1px solid var(--line);transition:.2s}
+.player-chip.answered{border-color:rgba(52,211,153,.45)}
+.player-chip .avatar{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;font-weight:800;
+  background:linear-gradient(135deg,var(--blue),var(--violet));color:#fff;font-size:13px;flex-shrink:0}
+.player-chip.ai .avatar{background:linear-gradient(135deg,var(--cyan),var(--magenta))}
+.player-chip .meta{flex:1;min-width:0}
+.player-chip .nm{font-weight:600}
+.player-chip .sub{font-size:11px;color:var(--dim)}
+.ai-bar{height:5px;background:rgba(255,255,255,.08);border-radius:3px;overflow:hidden;margin-top:4px}
+.ai-bar i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--magenta));transition:width .6s}
+.status-chip{font-size:10px;padding:2px 8px;border-radius:20px;font-weight:700}
+.st-wait{background:rgba(251,191,36,.15);color:var(--warn)}
+.st-done{background:rgba(52,211,153,.15);color:var(--ok)}
+.st-think{background:rgba(34,211,238,.15);color:var(--cyan)}
+.typing{display:inline-flex;gap:3px;align-items:center}
+.typing i{width:5px;height:5px;border-radius:50%;background:var(--cyan);animation:blink 1.2s infinite}
+.typing i:nth-child(2){animation-delay:.2s}.typing i:nth-child(3){animation-delay:.4s}
+@keyframes blink{0%,60%,100%{opacity:.25;transform:translateY(0)}30%{opacity:1;transform:translateY(-3px)}}
+
+/* ============ 聊天 ============ */
+.chat-box{height:300px;overflow-y-auto;padding:8px;background:rgba(4,6,12,.5);border:1px solid var(--line);border-radius:10px;display:flex;flex-direction:column;gap:6px}
+.chat-box::-webkit-scrollbar{width:5px}.chat-box::-webkit-scrollbar-thumb{background:var(--line-strong);border-radius:4px}
+.msg{padding:7px 10px;border-radius:9px;background:rgba(30,41,59,.4);border-left:2px solid var(--line);font-size:13px;animation:slidein .25s}
+@keyframes slidein{from{opacity:0;transform:translateX(-6px)}to{opacity:1;transform:none}}
+.msg .who{font-size:11px;color:var(--cyan);font-weight:600}
+.msg .who .u{color:var(--dim);font-weight:400}
+.msg .t{font-size:10px;color:var(--dim);float:right}
+.msg.me{background:rgba(34,211,238,.08);border-left-color:var(--cyan)}
+.chat-input{display:flex;gap:8px;margin-top:8px}
+
+/* ============ 房间标签页 ============ */
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:14px;flex-wrap:wrap}
+.tabs button{padding:10px 16px;background:transparent;border:none;color:var(--muted);cursor:pointer;font:inherit;font-weight:600;
+  border-bottom:2px solid transparent;transition:.2s}
+.tabs button:hover{color:var(--text)}
+.tabs button.active{color:var(--cyan);border-bottom-color:var(--cyan);text-shadow:0 0 10px rgba(34,211,238,.6)}
+
+/* ============ 创新点2：AI 检测雷达 ============ */
+.radar-wrap{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+.radar-wrap svg{flex-shrink:0}
+.radar-legend{flex:1;min-width:180px;display:flex;flex-direction:column;gap:6px}
+.radar-legend .lg{display:flex;align-items:center;gap:8px;font-size:12px}
+.radar-legend .lg .dot{width:10px;height:10px;border-radius:3px}
+
+/* ============ 创新点3：作答时间线 ============ */
+.timeline{position:relative;padding-left:6px;margin-top:8px}
+.tl-row{display:flex;align-items:center;gap:8px;margin-bottom:7px;font-size:12px}
+.tl-row .who{width:90px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tl-row .track{flex:1;height:8px;background:rgba(255,255,255,.06);border-radius:5px;position:relative;overflow:hidden}
+.tl-row .fill{height:100%;border-radius:5px;background:linear-gradient(90deg,var(--cyan),var(--violet));transition:width .6s}
+.tl-row .sec{width:52px;text-align:right;color:var(--dim);font-variant-numeric:tabular-nums}
+
+/* ============ 揭晓动画（创新点4） ============ */
+.reveal-mask{position:fixed;inset:0;z-index:50;background:rgba(2,4,10,.82);backdrop-filter:blur(6px);
+  display:none;align-items:center;justify-content:center;flex-direction:column;gap:20px}
+.reveal-mask.show{display:flex;animation:fadein .4s}
+.reveal-title{font-size:34px;font-weight:900;letter-spacing:6px;
+  background:linear-gradient(90deg,var(--cyan),var(--violet),var(--magenta));-webkit-background-clip:text;background-clip:text;color:transparent;
+  text-shadow:0 0 30px rgba(167,139,250,.5);animation:glitch 1.2s steps(2) infinite}
+@keyframes glitch{0%,100%{transform:translate(0)}20%{transform:translate(-2px,1px)}40%{transform:translate(2px,-1px)}60%{transform:translate(-1px,2px)}}
+.reveal-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;max-width:900px;width:90%}
+.reveal-card{padding:22px;border-radius:14px;text-align:center;background:var(--panel);border:1px solid var(--line);
+  animation:flipin .6s both}
+.reveal-card:nth-child(2){animation-delay:.15s}.reveal-card:nth-child(3){animation-delay:.3s}.reveal-card:nth-child(4){animation-delay:.45s}
+@keyframes flipin{from{opacity:0;transform:rotateY(90deg) scale(.8)}to{opacity:1;transform:none}}
+.reveal-card .tag{font-size:11px;letter-spacing:2px;color:var(--muted)}
+.reveal-card .name{font-size:18px;font-weight:700;margin:6px 0}
+.reveal-card .verdict{font-size:24px;font-weight:900}
+.reveal-card.human .verdict{color:var(--ok)}.reveal-card.ai .verdict{color:var(--magenta)}
+.confetti{position:absolute;width:8px;height:14px;top:-20px;opacity:.9;animation:fall linear forwards}
+@keyframes fall{to{transform:translateY(110vh) rotate(720deg);opacity:0}}
+
+/* ============ Toast ============ */
+#toasts{position:fixed;top:70px;right:18px;z-index:60;display:flex;flex-direction:column;gap:8px}
+.toast{padding:10px 16px;border-radius:10px;background:var(--panel-solid);border:1px solid var(--line-strong);
+  box-shadow:var(--glow);font-size:13px;animation:slidein .25s;max-width:320px}
+.toast.ok{border-color:rgba(52,211,153,.5)}.toast.err{border-color:rgba(248,113,113,.5)}
+
+/* ============ 房间列表卡片 ============ */
+.room-card{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px;border-radius:10px;
+  background:rgba(4,6,12,.5);border:1px solid var(--line);margin-bottom:8px;transition:.2s}
+.room-card:hover{border-color:var(--line-strong)}
+.room-card .inv{font-family:monospace;color:var(--cyan);font-weight:700}
+
+/* 裁判列表 */
+.judge-row{display:flex;align-items:center;justify-content:space-between;padding:9px 12px;border-radius:9px;
+  background:rgba(4,6,12,.5);border:1px solid var(--line);margin-bottom:6px}
+.lock-badge{font-size:10px;padding:2px 8px;border-radius:20px;font-weight:700}
+.lock-badge.locked{background:rgba(52,211,153,.15);color:var(--ok)}
+.lock-badge.open{background:rgba(251,191,36,.15);color:var(--warn)}
+
+/* API 配置列表 */
+.api-row{display:flex;align-items:center;justify-content:space-between;padding:9px 12px;border-radius:9px;
+  background:rgba(4,6,12,.5);border:1px solid var(--line);margin-bottom:6px;gap:8px;flex-wrap:wrap}
+
+/* ============ AI 智能判别模式（进阶比赛形式） ============ */
+.discern-layout{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:1000px){.discern-layout{grid-template-columns:1fr}}
+/* 裁判素材提交 */
+.submit-zone{
+  border:1.5px dashed var(--line-strong);border-radius:12px;padding:18px;text-align:center;
+  background:rgba(4,6,12,.45);cursor:pointer;transition:.2s;position:relative;min-height:140px;
+  display:grid;place-items:center;
+}
+.submit-zone:hover,.submit-zone.drag{border-color:var(--cyan);box-shadow:var(--glow);background:rgba(34,211,238,.04)}
+.submit-zone.drag::after{content:"释放以上传";position:absolute;inset:0;display:grid;place-items:center;color:var(--cyan);font-weight:700;background:rgba(4,6,12,.75);border-radius:10px}
+.submit-zone b{display:block;color:var(--cyan);font-size:14px}
+.submit-zone i{display:block;font-size:11px;color:var(--dim);margin-top:4px}
+/* 素材墙 */
+.item-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}
+.item-card{
+  border:1px solid var(--line);border-radius:12px;background:rgba(4,6,12,.5);overflow:hidden;
+  transition:.2s;position:relative;
+}
+.item-card:hover{border-color:var(--line-strong);transform:translateY(-2px)}
+.item-card .thumb{width:100%;aspect-ratio:1;display:grid;place-items:center;background:linear-gradient(135deg,rgba(59,130,246,.1),rgba(167,139,250,.1));
+  overflow:hidden}
+.item-card .thumb img,.item-card .thumb canvas{width:100%;height:100%;object-fit:contain;display:block}
+.item-card .txt-thumb{padding:16px;color:#dbeafe;font-size:13px;line-height:1.6;max-height:100%;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:6;-webkit-box-orient:vertical}
+.item-card .foot{padding:10px;display:flex;justify-content:space-between;align-items:center;gap:8px}
+.item-card .tag{font-size:10px;padding:2px 8px;border-radius:20px;font-weight:700;letter-spacing:1px}
+.tag-img{background:rgba(34,211,238,.15);color:var(--cyan)}
+.tag-txt{background:rgba(167,139,250,.15);color:var(--violet)}
+/* 选手判别表单 */
+.vote-row{display:flex;align-items:center;gap:10px;padding:12px;border-radius:10px;background:rgba(4,6,12,.5);border:1px solid var(--line);margin-bottom:8px}
+.vote-row .nm{width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;font-size:12px}
+.vote-row .vote-btn{padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:transparent;color:var(--muted);cursor:pointer;font-size:12px;font-weight:700}
+.vote-row .vote-btn:hover{border-color:var(--line-strong)}
+.vote-row .vote-btn.picked-human{background:rgba(52,211,153,.15);border-color:rgba(52,211,153,.5);color:var(--ok)}
+.vote-row .vote-btn.picked-ai{background:rgba(232,121,249,.15);border-color:rgba(232,121,249,.5);color:var(--magenta)}
+.vote-row .score{font-size:12px;color:var(--dim);margin-left:auto}
+/* AI 分析结果卡片 */
+.ai-result{border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:12px;background:rgba(4,6,12,.45);position:relative;overflow:hidden}
+.ai-result::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:linear-gradient(var(--cyan),var(--violet))}
+.verdict-big{font-size:20px;font-weight:900;margin-bottom:6px}
+.verdict-big .human{color:var(--ok)}
+.verdict-big .ai{color:var(--magenta)}
+.verdict-big .conf{font-size:12px;color:var(--dim);font-weight:500;margin-left:10px}
+.feature-row{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px}
+.feature-row .fname{width:100px;color:var(--muted);flex-shrink:0}
+.feature-row .fbar{flex:1;height:8px;background:rgba(255,255,255,.06);border-radius:4px;overflow:hidden}
+.feature-row .fbar i{display:block;height:100%;border-radius:4px;transition:width .6s}
+.feature-row .fval{width:56px;text-align:right;color:var(--dim);font-variant-numeric:tabular-nums}
+.explain-box{
+  margin-top:12px;padding:12px 14px;border-radius:10px;background:rgba(34,211,238,.06);border-left:3px solid var(--cyan);
+  font-size:13px;line-height:1.8;color:#dbeafe;white-space:pre-wrap;
+}
+.explain-box::before{content:"🧠 AI 科普解说";display:block;color:var(--cyan);font-size:11px;letter-spacing:1px;margin-bottom:4px;font-weight:700}
+/* 真相标签 */
+.truth-badge{position:absolute;top:8px;right:8px;font-size:10px;padding:3px 8px;border-radius:20px;font-weight:700;z-index:2}
+.truth-badge.tr-human{background:rgba(52,211,153,.2);color:var(--ok);border:1px solid rgba(52,211,153,.4)}
+.truth-badge.tr-ai{background:rgba(232,121,249,.2);color:var(--magenta);border:1px solid rgba(232,121,249,.4)}
+.scoreboard{display:flex;flex-direction:column;gap:6px}
+.score-row{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:9px;background:rgba(4,6,12,.4);border:1px solid var(--line);font-size:13px}
+.score-row .bar-wrap{flex:1;height:6px;background:rgba(255,255,255,.05);border-radius:3px;overflow:hidden}
+.score-row .bar-fill{height:100%;background:linear-gradient(90deg,var(--cyan),var(--violet));transition:width .8s}
+.score-row .pts{font-weight:800;color:var(--cyan);min-width:48px;text-align:right;font-variant-numeric:tabular-nums}
+/* 上传面板 */
+.upload-row{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.upload-row input[type="file"]{display:none}
+.upload-row button{flex:1}
+.text-submit textarea{width:100%;height:100px;margin-top:10px;border-radius:10px}
+.source-toggle{display:flex;gap:0;margin-top:10px;background:rgba(4,6,12,.5);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.source-toggle button{flex:1;padding:7px 0;background:transparent;border:none;color:var(--muted);cursor:pointer;font:inherit;font-weight:600;transition:.2s}
+.source-toggle button.on{background:linear-gradient(135deg,var(--cyan),var(--blue));color:#04121a}
+/* 经典/进阶形式选择 */
+.mode-select{display:flex;gap:8px}
+.mode-card{flex:1;padding:12px;border:1px solid var(--line);border-radius:10px;cursor:pointer;transition:.2s;background:rgba(4,6,12,.4);text-align:center}
+.mode-card:hover{border-color:var(--line-strong)}
+.mode-card.on{border-color:var(--cyan);box-shadow:var(--glow);background:rgba(34,211,238,.06)}
+.mode-card b{display:block;color:#fff;font-size:13px}
+.mode-card i{display:block;color:var(--dim);font-size:10px;margin-top:3px;font-style:normal}
+</style>
+</head>
+<body data-theme="cyber">
+<!-- 背景层 -->
+<div class="bg-layer bg-grad"></div>
+<div class="bg-layer bg-grid"></div>
+<div class="bg-layer bg-scan"></div>
+<canvas id="bg-canvas"></canvas>
+
+<div id="app">
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">T</div>
+      <div><b>图灵实验室</b><small>Turing Lab v2.0</small></div>
+      <span id="page-title" style="margin-left:14px">登录页</span>
+    </div>
+    <div class="top-right">
+      <div class="theme-switch" title="切换主题配色">
+        <i class="on" data-t="cyber" style="background:linear-gradient(135deg,#22d3ee,#a78bfa)"></i>
+        <i data-t="matrix" style="background:linear-gradient(135deg,#34d399,#22d3ee)"></i>
+        <i data-t="sunset" style="background:linear-gradient(135deg,#fb7185,#fbbf24)"></i>
+      </div>
+      <span id="conn-badge" class="uid-pill" title="联机模式需启动 server.py；直接打开文件为离线模式">检测联机…</span>
+      <div id="user-bar" class="row" style="display:none">
+        <span class="uid-pill">UID <b id="my-uid">-</b></span>
+        <button class="btn sm" onclick="switchPage('center')">个人中心</button>
+        <button class="btn sm ghost" onclick="logout()">退出</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- 登录 / 注册 -->
+    <section id="page-login" class="page">
+      <div class="card login-card">
+        <div class="logo-big"><span>T</span></div>
+        <div class="center"><b style="font-size:18px">图灵测试平台</b><div class="dim" style="font-size:12px">实时多人 · 独立裁判 · AI 对垒</div></div>
+        <div class="login-tabs">
+          <button class="active" onclick="switchLoginTab('login')">登录</button>
+          <button onclick="switchLoginTab('register')">注册</button>
+        </div>
+        <div id="form-login">
+          <div class="field"><label>用户名</label><input id="login-name" placeholder="请输入用户名" autocomplete="username" /></div>
+          <div class="field"><label>密码</label><input id="login-pwd" type="password" placeholder="请输入密码" autocomplete="current-password" /></div>
+          <button class="btn primary" style="width:100%;margin-top:6px" onclick="doLogin()">登录</button>
+        </div>
+        <div id="form-register" style="display:none">
+          <div class="field"><label>用户名（1~40 字符，唯一）</label><input id="reg-name" placeholder="设置一个登录用户名" /></div>
+          <div class="field"><label>密码（≥8 位）</label><input id="reg-pwd" type="password" /></div>
+          <div class="field"><label>确认密码</label><input id="reg-pwd2" type="password" /></div>
+          <button class="btn primary" style="width:100%" onclick="doRegister()">注册账号</button>
+          <div class="dim" style="font-size:11px;margin-top:8px">用户名唯一，密码用于登录；注册后系统自动分配内部 UID</div>
+        </div>
+        <div class="dim center" style="font-size:11px;margin-top:14px">联机模式：运行 <span class="cyan">python server.py</span>，所有设备访问 <span class="cyan">http://房主IP:8000</span>；直接打开文件则为本地离线模式</div>
+      </div>
+    </section>
+
+    <!-- 大厅 -->
+    <section id="page-hall" class="page" style="display:none">
+      <div class="grid grid-2">
+        <div class="card">
+          <h3>创建一场图灵测试</h3>
+          <div class="field"><label>比赛名称</label><input id="room-name" placeholder="例如：周末图灵挑战赛" /></div>
+          <div class="field">
+            <label>比赛形式（经典图灵 / 进阶判别）</label>
+            <div class="mode-select">
+              <div class="mode-card on" data-mode="classic" onclick="selectMode('classic')">
+                <b>经典图灵</b><i>裁判出题 · 玩家扮演 · 猜身份</i>
+              </div>
+              <div class="mode-card" data-mode="discern" onclick="selectMode('discern')">
+                <b>进阶判别</b><i>裁判提交图/文 · 判别人创/AI · AI 科普解说</i>
+              </div>
+            </div>
+          </div>
+          <button class="btn primary" onclick="createRoom()" style="margin-top:8px">创建房间（房主）</button>
+          <div class="dim" style="font-size:11px;margin-top:8px">邀请码由系统自动生成，每个房间唯一；同一账号创建不同赛事也会得到不同邀请码</div>
+          <div id="new-room-info" style="display:none;margin-top:12px;padding:10px;border-radius:9px;background:rgba(52,211,153,.1);border:1px solid rgba(52,211,153,.3)">
+            <span class="ok">✓ 房间创建成功，邀请码：</span><span id="invite-code" class="cyan" style="font-family:monospace;font-weight:700"></span>
+            <button class="btn sm" style="margin-left:8px" onclick="copyInvite()">复制</button>
+          </div>
+        </div>
+        <div class="card">
+          <h3>加入已有房间</h3>
+          <div class="field"><label>邀请码</label><input id="join-code" placeholder="输入房主提供的邀请码" /></div>
+          <div class="field"><label>加入身份</label>
+            <select id="join-role">
+              <option value="player">参赛者</option>
+              <option value="judge">真人裁判</option>
+            </select>
+          </div>
+          <button class="btn primary" onclick="joinRoom()">加入比赛</button>
+          <div class="dim" style="font-size:11px;margin-top:8px">房主也可以担任真人裁判或参赛者，身份进入房间后可随时切换</div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <h3>我的房间列表 <span class="dim" style="font-size:11px;font-weight:400">（每 2 秒自动刷新状态）</span></h3>
+        <div id="room-list"><div class="dim">暂无房间</div></div>
+      </div>
+    </section>
+
+    <!-- 房间主页面 -->
+    <section id="page-room" class="page" style="display:none">
+      <!-- 房间信息条：邀请码 / 我的身份（房主也可切换裁判/参赛者） -->
+      <div class="card" id="room-banner" style="margin-bottom:14px;padding:12px 16px"></div>
+
+      <!-- 真人裁判出题：文字 / 图片 -->
+      <div class="card" id="judge-q-panel" style="display:none;margin-bottom:14px">
+        <h3>裁判出题 <span class="dim" style="font-size:11px;font-weight:400">（真人裁判 / 房主 · 支持文字与图片）</span></h3>
+        <div class="mode-select">
+          <div class="mode-card on" data-jq="text" onclick="setJqKind('text')"><b>📝 文字题目</b><i>录入一段问题</i></div>
+          <div class="mode-card" data-jq="image" onclick="setJqKind('image')"><b>🖼️ 图片题目</b><i>上传图片作为题目</i></div>
+        </div>
+        <div id="jq-text-wrap" style="margin-top:10px">
+          <textarea id="judge-q-text" placeholder="输入本轮题目，例如：请描述这张图里不合理的地方…"></textarea>
+        </div>
+        <div id="jq-image-wrap" style="display:none;margin-top:10px">
+          <div class="submit-zone" onclick="document.getElementById('judge-q-file').click()">
+            <b>⬆ 点击上传题目图片</b><i>支持 JPG / PNG / WebP，自动压缩</i>
+            <input type="file" id="judge-q-file" accept="image/*" style="display:none" />
+          </div>
+          <img id="judge-q-preview" alt="题目预览" style="display:none;max-width:100%;border-radius:10px;margin-top:10px" />
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn primary" onclick="submitJudgeQuestion(false)">加入待开局队列</button>
+          <button class="btn" onclick="submitJudgeQuestion(true)">立即发布为本轮题目</button>
+          <span class="dim" id="jq-status" style="font-size:11px"></span>
+        </div>
+      </div>
+
+      <!-- 实时数据看板 -->
+      <div class="dash" id="dashboard"></div>
+
+      <div class="tabs">
+        <button class="active" onclick="switchRoomTab('game')" id="rt-game">比赛现场</button>
+        <button onclick="switchRoomTab('discern')" id="rt-discern">进阶判别</button>
+        <button onclick="switchRoomTab('host')" id="rt-host">房主管理台</button>
+        <button onclick="switchRoomTab('judge-manage')" id="rt-judge-manage">真人裁判管理</button>
+        <button onclick="switchRoomTab('ai-judge')" id="rt-ai-judge">AI 裁判管理</button>
+      </div>
+
+      <!-- 比赛现场 -->
+      <div id="room-game">
+        <div class="room-grid">
+          <div class="card">
+            <h3>本轮题目 <span id="round-badge" class="dim" style="font-size:12px;font-weight:400"></span></h3>
+            <div class="q-box"><div id="current-q" class="dim">等待裁判出题…</div></div>
+            <div style="margin-top:14px" class="answer-area">
+              <label>你的作答</label>
+              <textarea id="player-answer" placeholder="在此输入你的回答，提交后所有参赛者可见"></textarea>
+              <div class="row" style="margin-top:8px">
+                <button class="btn primary" onclick="submitAnswer()">提交作答</button>
+                <span class="dim" id="answer-status"></span>
+              </div>
+            </div>
+
+            <!-- 创新点2：AI 检测雷达 -->
+            <div style="margin-top:18px">
+              <h3>AI 嫌疑雷达 <span class="dim" style="font-size:11px;font-weight:400">五维实时分析 · 综合裁判投票</span></h3>
+              <div class="radar-wrap">
+                <svg id="radar" width="220" height="220" viewBox="-110 -110 220 220"></svg>
+                <div class="radar-legend" id="radar-legend"></div>
+              </div>
+            </div>
+
+            <!-- 创新点3：作答时间线 -->
+            <div style="margin-top:18px">
+              <h3>作答时间线 <span class="dim" style="font-size:11px;font-weight:400">响应速度是图灵测试的重要线索</span></h3>
+              <div class="timeline" id="timeline"></div>
+            </div>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:14px">
+            <div class="card">
+              <h3>参赛选手</h3>
+              <div class="player-list" id="player-list"></div>
+            </div>
+            <div class="card">
+              <h3>公共聊天 <span class="dim" style="font-size:11px;font-weight:400">仅参赛者/房主/管理员可见</span></h3>
+              <div class="chat-box" id="chat-box"></div>
+              <div class="chat-input">
+                <input id="chat-input" placeholder="输入消息（最多2000字符）" maxlength="2000" />
+                <button class="btn primary" onclick="sendChat()">发送</button>
+              </div>
+              <div class="dim" style="font-size:11px;margin-top:6px">裁判无法查看公共聊天；正式揭晓后聊天记录自动清除</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 房主控制台 -->
+      <!-- 进阶判别（真人裁判主导，AI 后台化） -->
+      <div id="room-discern" style="display:none">
+        <!-- 裁判素材提交区（仅房主/真人裁判可见） -->
+        <div class="card" id="discern-submit-panel">
+          <h3>裁判素材提交（图片 / 文字）</h3>
+          <div class="dim" style="font-size:12px;margin-bottom:10px">房主/真人裁判向房间提交「待判别素材」，并由裁判亲自填写**真相答案**（🧑 人类 / 🤖 AI 生成）——此答案对参赛者隐藏，用于最终计分；AI 引擎在提交时后台静默分析，不影响裁判判准</div>
+          <div class="mode-select">
+            <div class="mode-card on" data-kind="image" onclick="setItemKind('image')">
+              <b>🖼️ 图片素材</b><i>JPG/PNG/WebP，≤5MB</i>
+            </div>
+            <div class="mode-card" data-kind="text" onclick="setItemKind('text')">
+              <b>📝 文字素材</b><i>粘贴一段话，≤2000 字</i>
+            </div>
+          </div>
+          <div id="submit-image" style="margin-top:10px">
+            <div class="submit-zone" id="drop-zone" onclick="document.getElementById('item-file').click()">
+              <b>⬆ 点击或拖拽上传图片</b><i>支持本地 JPG / PNG / WebP</i>
+              <input type="file" id="item-file" accept="image/*" style="display:none" />
+            </div>
+            <div class="source-toggle">
+              <button class="on" onclick="setItemSource('human')">🧑 真答案：人类作品</button>
+              <button onclick="setItemSource('ai')">🤖 真答案：AI 生成</button>
+            </div>
+            <div class="upload-row">
+              <button class="btn primary" onclick="submitItem()">📤 提交素材并封存答案</button>
+              <button class="btn ghost" onclick="runAllAiAnalysis(true)" title="裁判工具：强制触发后台 AI 引擎对所有素材分析（正常提交会自动触发）">🛠 裁判工具：触发后台 AI 分析</button>
+            </div>
+          </div>
+          <div id="submit-text" style="display:none" class="text-submit">
+            <textarea id="item-text" placeholder="粘贴一段文字素材（文章、诗歌、广告文案、聊天记录等），≤2000 字"></textarea>
+            <div class="source-toggle">
+              <button class="on" onclick="setItemSource('human')">🧑 真答案：人类作品</button>
+              <button onclick="setItemSource('ai')">🤖 真答案：AI 生成</button>
+            </div>
+            <div class="upload-row">
+              <button class="btn primary" onclick="submitItem()">📤 提交素材并封存答案</button>
+              <button class="btn ghost" onclick="runAllAiAnalysis(true)" title="裁判工具：强制触发后台 AI 引擎对所有素材分析">🛠 裁判工具：触发后台 AI 分析</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 素材墙 + 选手判别（裁判 / 所有玩家可见） -->
+        <div class="discern-layout" style="margin-top:14px">
+          <div class="card">
+            <h3>裁判素材墙 <span class="dim" style="font-size:11px;font-weight:400">（共 <b id="item-count">0</b> 份）</span></h3>
+            <div class="dim" style="font-size:11px;margin-bottom:8px">真相答案由裁判封存，未公布前仅裁判/房主能查看；参赛者只能看到素材本身</div>
+            <div id="item-wall"><div class="dim">暂无素材，裁判请先提交</div></div>
+          </div>
+          <div class="card">
+            <h3>参赛者判别面板</h3>
+            <div class="dim" style="font-size:12px;margin-bottom:10px">对每份素材独立选择「🧑 人类 / 🤖 AI」，可随时修改；提交后答案封存，裁判公布前其他人看不到你的选择</div>
+            <div id="vote-panel"></div>
+          </div>
+        </div>
+
+        <!-- 裁判公布 & 算分（仅裁判/房主操作） -->
+        <div class="card" id="reveal-panel" style="margin-top:14px">
+          <h3>🔒 裁判公布答案 &amp; 算分 <span class="dim" style="font-size:11px;font-weight:400">（裁判/房主操作）</span></h3>
+          <div class="dim" style="font-size:12px;margin-bottom:10px">点击后：① 揭晓所有素材的裁判真答案 ② 计算参赛者得分 ③ 自动触发 AI 引擎生成**科普解说 + 判别依据**，在下方复盘解说区按素材展开展示</div>
+          <div class="row">
+            <button class="btn primary" onclick="revealAllDiscern()">🔓 全部公布 &amp; 算分 &amp; AI 生成解说</button>
+            <button class="btn ghost" onclick="revealOnePending()" title="仅公布还未公布的素材（裁判可分批）">🔑 仅公布未封存素材</button>
+            <button class="btn danger ghost" onclick="resetDiscern()">🔄 清空素材再次开赛</button>
+          </div>
+          <div class="dim" style="font-size:11px;margin-top:8px">计分规则：每份素材判对 <b class="ok">+3</b>，判错 <b class="err">-2</b>；AI 引擎判别不参与计分，仅用于赛后复盘解说</div>
+        </div>
+
+        <!-- 复盘解说区（裁判公布答案后自动渲染） -->
+        <div class="card" style="margin-top:14px" id="explain-panel">
+          <h3>🧠 AI 复盘解说 <span class="dim" style="font-size:11px;font-weight:400">（裁判公布答案后自动生成；可配置接入 ForensicNet / GLTR 等后端 API）</span></h3>
+          <div id="explain-box">
+            <div class="dim center" style="padding:30px">
+              等待裁判公布答案…公布后，AI 视觉 / 文本引擎将自动为每份素材生成<br>📐 判别依据 + 🧪 技术原理 + 💡 科普小知识 + ❓ 开放思考
+            </div>
+          </div>
+        </div>
+
+        <!-- 排行榜 -->
+        <div class="card" style="margin-top:14px">
+          <h3>🏆 本轮排行榜</h3>
+          <div id="scoreboard"><div class="dim">尚未揭晓</div></div>
+        </div>
+      </div>
+
+      <div id="room-host" style="display:none" class="grid grid-2">
+        <div class="card">
+          <h3>统一作答与揭晓（独立裁判流程）</h3>
+          <div class="dim" style="font-size:12px;margin-bottom:10px">开局前至少需要一份裁判问题，汇总问题上限 6000 字</div>
+          <div class="row">
+            <button class="btn primary" onclick="startRound()">开始统一作答</button>
+            <button class="btn" onclick="nextRound()">开启下一轮</button>
+            <button class="btn" onclick="revealAll()">全部裁判已锁定 · 正式揭晓</button>
+          </div>
+          <div id="pending-q-info" class="dim" style="font-size:12px;margin-top:8px">暂无待开局的裁判问题</div>
+          <div class="dim" style="font-size:11px;margin-top:10px">点击后浏览器按顺序请求：补生成 AI 裁判问题 → 开启本轮 → 生成 AI 参赛者回答</div>
+        </div>
+        <div class="card">
+          <h3>手动发布问题（无独立裁判房间专用）</h3>
+          <textarea id="manual-q" style="height:80px" placeholder="录入外部裁判的问题"></textarea>
+          <div class="row" style="margin-top:8px">
+            <button class="btn" onclick="manualPublishQ()">向所有玩家发布问题</button>
+            <button class="btn" onclick="genAiReply()">自动生成模型 AI 回复</button>
+          </div>
+        </div>
+        <div class="card">
+          <h3>房间操作</h3>
+          <div class="row">
+            <button class="btn" onclick="reuseRoom()">再次开赛（复用房间）</button>
+            <button class="btn" onclick="downloadLog()">下载整场 Log</button>
+            <button class="btn danger" onclick="delRoom()">删除房间（永久清除所有数据）</button>
+          </div>
+        </div>
+        <div class="card">
+          <h3>模拟观战助手</h3>
+          <div class="dim" style="font-size:12px;margin-bottom:8px">为演示实时刷新，可向房间注入一名 AI 选手与一名模拟裁判</div>
+          <div class="row">
+            <button class="btn sm" onclick="addSimBot('player')">+ 模拟 AI 选手</button>
+            <button class="btn sm" onclick="addSimBot('judge')">+ 模拟裁判</button>
+            <button class="btn sm" onclick="simJudgeQuestion()">模拟裁判出题</button>
+            <button class="btn sm" onclick="simJudgeLock()">模拟裁判锁定判断</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 真人裁判管理 -->
+      <div id="room-judge-manage" style="display:none" class="card">
+        <h3>真人裁判名单 &amp; 锁定状态</h3>
+        <div id="judge-list"><div class="dim">暂无真人裁判</div></div>
+        <div class="dim" style="font-size:11px;margin-top:10px">限制：房主/本房间参赛者不能担任本房间真人裁判；同一账号同一时间只能在一个未完赛房间担任裁判</div>
+      </div>
+
+      <!-- AI 裁判管理 -->
+      <div id="room-ai-judge" style="display:none" class="grid grid-2">
+        <div class="card">
+          <h3>添加 AI 裁判席位</h3>
+          <select id="ai-judge-config" style="margin-bottom:8px">
+            <option value="manual">手动转录</option>
+            <option value="my-api">使用我的个人模型配置</option>
+          </select>
+          <button class="btn" onclick="addAiJudge()">新增 AI 裁判席位</button>
+          <div id="ai-judge-list" style="margin-top:12px"></div>
+        </div>
+        <div class="card">
+          <h3>AI 裁判操作</h3>
+          <div class="row">
+            <button class="btn" onclick="autoGenQ()">让模型自动生成本轮问题</button>
+            <button class="btn" onclick="autoJudgeFinal()">让模型自动完成最终判断</button>
+          </div>
+          <div style="margin-top:12px">
+            <label>手动录入 AI 裁判问题</label>
+            <textarea id="ai-judge-q" style="height:80px;margin-top:4px"></textarea>
+            <button class="btn sm" style="margin-top:8px" onclick="saveAiJudgeQ()">保存录入问题</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 个人中心 -->
+    <section id="page-center" class="page" style="display:none">
+      <div class="grid grid-2">
+        <div class="card">
+          <h3>基本资料</h3>
+          <div class="field"><label>UID（只读，可复制）</label>
+            <div class="row" style="margin-top:4px"><input id="center-uid" readonly style="flex:1" /><button class="btn" onclick="copyUid()">复制</button></div>
+          </div>
+          <div class="field"><label>用户名（可修改，允许重名）</label><input id="center-name" /></div>
+          <button class="btn primary" onclick="saveProfile()">保存资料</button>
+          <div style="margin-top:16px;border-top:1px solid var(--line);padding-top:14px">
+            <h3 style="font-size:14px">修改密码</h3>
+            <input class="field" type="password" id="old-pwd" placeholder="当前密码" />
+            <input class="field" type="password" id="new-pwd" placeholder="新密码 8~200 位" />
+            <input class="field" type="password" id="new-pwd2" placeholder="确认新密码" />
+            <button class="btn" onclick="changePwd()">修改密码</button>
+            <div class="warn" style="font-size:11px;margin-top:6px">修改成功后，所有登录会话失效，需要重新登录</div>
+          </div>
+        </div>
+        <div class="card">
+          <h3>个人模型 API 配置（OpenAI 兼容协议）</h3>
+          <div class="field"><label>配置名称</label><input id="api-name" /></div>
+          <div class="field"><label>Base URL（不要带 /chat/completions）</label><input id="api-base" placeholder="https://api.openai.com/v1" /></div>
+          <div class="grid grid-2">
+            <div class="field"><label>模型名称</label><input id="api-model" /></div>
+            <div class="field"><label>采样温度 0~2</label><input id="api-temp" value="0.7" /></div>
+          </div>
+          <div class="grid grid-2">
+            <div class="field"><label>最大输出 Token</label><input id="api-max" value="2048" /></div>
+            <div class="field"><label>请求超时（秒）</label><input id="api-timeout" value="60" /></div>
+          </div>
+          <div class="field"><label>API Key</label><input id="api-key" type="password" /></div>
+          <div class="row">
+            <button class="btn primary" onclick="saveApiConfig()">保存配置</button>
+            <button class="btn" onclick="testApi()">测试连接</button>
+          </div>
+          <div class="dim" style="font-size:11px;margin-top:8px">配置仅本人可见；服务器端 Fernet 加密存储密钥；仅支持 HTTPS 公网地址</div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <h3>我的 API 配置列表</h3>
+        <div id="api-list"><div class="dim">暂无配置</div></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- 揭晓遮罩 -->
+<div class="reveal-mask" id="reveal-mask">
+  <div class="reveal-title">IDENTITY REVEAL</div>
+  <div class="dim">身份正式揭晓</div>
+  <div class="reveal-grid" id="reveal-grid"></div>
+  <button class="btn primary" onclick="closeReveal()">关闭</button>
+</div>
+
+<div id="toasts"></div>
+
+<script>
+/* ===================================================================
+   图灵实验室 v2.0 —— 前端内核
+   - 零外部依赖：所有样式内联，可离线 / file:// / 任意静态托管部署
+   - 实时刷新引擎：localStorage 模拟后端 + 轮询 + storage 跨标签事件
+   - 创新点：实时数据看板 / AI 嫌疑雷达 / 作答时间线 / 身份揭晓动画 / 主题切换 / 打字指示器
+   =================================================================== */
+
+/* ---------- 1. 存储层（模拟后端，可替换为真实 fetch API） ---------- */
+const Store = {
+  get(k, d){ try{ const v = localStorage.getItem(k); return v==null ? d : JSON.parse(v); }catch(e){ return d; } },
+  set(k, v){ localStorage.setItem(k, JSON.stringify(v)); },
+  rm(k){ localStorage.removeItem(k); }
+};
+const DB = {
+  users(){ return Store.get("turing_users", {}); },
+  setUsers(u){ Store.set("turing_users", u); },
+  rooms(){ return Store.get("turing_rooms", {}); },
+  setRooms(r){ Store.set("turing_rooms", r); },
+  room(id){ return (DB.rooms())[id] || null; },
+  saveRoom(room){ const all = DB.rooms(); all[room.id] = room; DB.setRooms(all); Api.pushRoom(room); },
+  cacheRoom(room){ const all = DB.rooms(); all[room.id] = room; DB.setRooms(all); },
+  chat(roomId){ return Store.get("turing_chat_"+roomId, []); },
+  setChat(roomId, c){ Store.set("turing_chat_"+roomId, c); Api.pushChat(roomId, c); },
+  session(){ return Store.get("turing_session", null); },
+  setSession(s){ Store.set("turing_session", s); },
+  apiCfg(){ return Store.get("turing_api_"+ (App.uid||"_"), []); }
+};
+
+/* ---------- 1.1 联机 API 层（后端 server.py；不可用时自动降级为本地模式） ---------- */
+const Api = {
+  online: false,
+  base: "",
+  _pushTimers: {},
+  async ping(){
+    try{
+      const r = await fetch(this.base + "/api/health", {cache:"no-store"});
+      if(!r.ok) throw 0;
+      const j = await r.json();
+      this.online = !!j.ok;
+    }catch(e){ this.online = false; }
+    const badge = $("conn-badge");
+    if(badge){
+      badge.innerHTML = this.online ? '🟢 联机模式' : '⚪ 离线模式';
+      badge.style.borderColor = this.online ? 'rgba(52,211,153,.45)' : 'var(--line)';
+    }
+    return this.online;
+  },
+  async req(path, opts){
+    const r = await fetch(this.base + path, Object.assign({cache:"no-store"}, opts||{}));
+    let data = null;
+    try{ data = await r.json(); }catch(e){}
+    return { status:r.status, ok:r.ok, data };
+  },
+  get(path){ return this.req(path); },
+  post(path, body){ return this.req(path, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body||{})}); },
+  pushRoom(room){
+    if(!this.online || !room || !room.id) return;
+    const id = room.id, self = this;
+    clearTimeout(this._pushTimers[id]);
+    this._pushTimers[id] = setTimeout(async ()=>{
+      try { await self.post("/api/room", {room}); }
+      catch(e){}
+      finally { delete self._pushTimers[id]; }
+    }, 120);
+  },
+  pushChat(roomId, list){
+    if(!this.online) return;
+    this.post("/api/chat", {code:roomId, chat:list}).catch(()=>{});
+  },
+  async createRoom(name, mode){
+    const r = await this.post("/api/createRoom", {name, mode, owner:App.uid, ownerName:App.username});
+    return r.status===200 && r.data ? r.data.room : null;
+  },
+  async join(code, role){
+    const r = await this.post("/api/join", {code, uid:App.uid, name:App.username, role});
+    return r.status===200 && r.data ? r.data : {error:(r.data&&r.data.error)||"加入失败"};
+  },
+  async fetchRoom(code){
+    const r = await this.get("/api/room?code="+encodeURIComponent(code));
+    return r.status===200 && r.data ? r.data.room : null;
+  },
+  async fetchRooms(uid){
+    const r = await this.get("/api/rooms?uid="+encodeURIComponent(uid||""));
+    return r.status===200 && r.data ? r.data.rooms : null;
+  },
+  async fetchChat(code){
+    const r = await this.get("/api/chat?code="+encodeURIComponent(code));
+    return r.status===200 && r.data ? r.data.chat : null;
+  }
+};
+
+/* ---------- 2. 全局状态 ---------- */
+const App = {
+  uid: "", username: "", currentRoomId: null,
+  pollTimer: null, lastSync: 0, roomTab: "game", hallTimer: null
+};
+
+/* ---------- 3. 工具 ---------- */
+const $ = id => document.getElementById(id);
+function toast(msg, type=""){
+  const el = document.createElement("div");
+  el.className = "toast "+type; el.textContent = msg;
+  $("toasts").appendChild(el);
+  setTimeout(()=>{ el.style.opacity=0; el.style.transition=".3s"; setTimeout(()=>el.remove(),300); }, 2600);
+}
+function now(){ return Date.now(); }
+function fmtTime(ts){ const d=new Date(ts); return d.toLocaleTimeString("zh-CN",{hour12:false}); }
+function hashColor(s){ let h=0; for(const c of s) h=(h*31+c.charCodeAt(0))>>>0; const hue=h%360; return `hsl(${hue},70%,60%)`; }
+function uidAvatar(name){ return (name||"?").slice(0,1).toUpperCase(); }
+function rand(min,max){ return Math.floor(Math.random()*(max-min+1))+min; }
+function escapeHtml(s){ const d=document.createElement("div"); d.textContent=s; return d.innerHTML; }
+
+/* ---------- 4. 页面切换 ---------- */
+function switchPage(p){
+  ["login","hall","room","center"].forEach(k=>{
+    const el = $("page-"+k); if(!el) return;
+    // 登录页需 flex 布局才能让卡片水平垂直居中，其余页用 block
+    el.style.display = (k===p) ? (k==="login"?"flex":"block") : "none";
+  });
+  $("page-title").innerText = {login:"登录页",hall:"比赛大厅",room:"房间现场",center:"个人中心"}[p]||"";
+  if(p==="center"){ $("center-uid").value=App.uid; $("center-name").value=App.username; renderApiList(); }
+  if(p==="room"){ startPolling(); renderRoom(); } else if(p!=="room"){ stopPolling(); }
+  if(p==="hall"){ renderRoomList(); } else { stopHallPolling(); }
+}
+function switchLoginTab(tab){
+  document.querySelectorAll(".login-tabs button").forEach((b,i)=>b.classList.toggle("active", (tab==="login"&&i===0)||(tab==="register"&&i===1)));
+  $("form-login").style.display = tab==="login"?"block":"none";
+  $("form-register").style.display = tab==="register"?"block":"none";
+}
+function switchRoomTab(tab){
+  App.roomTab = tab;
+  ["game","discern","host","judge-manage","ai-judge"].forEach(k=>{
+    const rt = $("rt-"+k); if(rt) rt.classList.toggle("active", k===tab);
+    const rp = $("room-"+k); if(rp) rp.style.display = (k===tab)?"block":"none";
+  });
+  if(tab==="judge-manage") renderJudgeList();
+  if(tab==="ai-judge") renderAiJudgeList();
+  if(tab==="discern") renderDiscern();
+}
+
+/* ---------- 5. 实时刷新引擎（核心：解决“比赛页面不刷新”） ---------- */
+function startPolling(){
+  stopPolling();
+  (async ()=>{ await syncRoomFromServer(); renderRoom(); })();
+  App.pollTimer = setInterval(async ()=>{
+    await syncRoomFromServer();
+    if(App.currentRoomId) renderRoom();
+    App.lastSync = now();
+  }, 1500);
+}
+function stopPolling(){ if(App.pollTimer){ clearInterval(App.pollTimer); App.pollTimer=null; } }
+function stopHallPolling(){ if(App.hallTimer){ clearInterval(App.hallTimer); App.hallTimer=null; } }
+// 从联机后端拉取最新房间 + 聊天；本地模式直接返回
+async function syncRoomFromServer(){
+  if(!Api.online || !App.currentRoomId) return;
+  if(Api._pushTimers[App.currentRoomId]) return;   // 本地刚改完，等推送落地再拉，避免覆盖
+  const room = await Api.fetchRoom(App.currentRoomId);
+  if(!room) return;
+  DB.cacheRoom(room);
+  const chat = await Api.fetchChat(App.currentRoomId);
+  if(chat) Store.set("turing_chat_"+App.currentRoomId, chat);
+}
+// 跨标签实时同步：另一标签写入 localStorage 时本标签立即刷新
+window.addEventListener("storage", (e)=>{
+  if(e.key && e.key.startsWith("turing_")){
+    if($("page-room").style.display!=="none") renderRoom();
+    if($("page-hall").style.display!=="none") renderRoomList();
+  }
+});
+
+/* ---------- 6. 认证（用户名 + 密码；联机走后端，离线走本地） ---------- */
+function nextUid(users){
+  let i = Object.keys(users).length + 1, uid;
+  do { uid = "TL" + String(i).padStart(8,"0"); i++; } while(users[uid]);
+  return uid;
+}
+async function doRegister(){
+  const name = $("reg-name").value.trim();
+  const pwd = $("reg-pwd").value, pwd2 = $("reg-pwd2").value;
+  if(!name || name.length>40) return toast("用户名 1~40 字符","err");
+  if(pwd.length<8) return toast("密码至少 8 位","err");
+  if(pwd!==pwd2) return toast("两次密码不一致","err");
+  if(Api.online){
+    const r = await Api.post("/api/register", {name, pwd});
+    if(r.status!==200 || !r.data || !r.data.uid) return toast((r.data&&r.data.error)||"注册失败","err");
+    App.uid = r.data.uid; App.username = r.data.name || name;
+  } else {
+    const users = DB.users();
+    if(Object.values(users).some(u=>u.name===name)) return toast("用户名已被占用","err");
+    const newUid = nextUid(users);
+    users[newUid] = { name, pwd, createdAt: now() };
+    DB.setUsers(users);
+    App.uid = newUid; App.username = name;
+  }
+  DB.setSession({uid:App.uid, name:App.username});
+  toast("注册成功！UID："+App.uid,"ok");
+  afterLogin();
+}
+async function doLogin(){
+  const name = $("login-name").value.trim();
+  const pwd = $("login-pwd").value;
+  if(!name) return toast("请输入用户名","err");
+  if(Api.online){
+    const r = await Api.post("/api/login", {name, pwd});
+    if(r.status!==200 || !r.data || !r.data.uid) return toast((r.data&&r.data.error)||"登录失败","err");
+    App.uid = r.data.uid; App.username = r.data.name || name;
+  } else {
+    const users = DB.users();
+    const hit = Object.entries(users).find(([,u])=>u.name===name);
+    if(!hit) return toast("账号不存在","err");
+    if(hit[1].pwd!==pwd) return toast("密码错误","err");
+    App.uid = hit[0]; App.username = hit[1].name;
+  }
+  DB.setSession({uid:App.uid, name:App.username});
+  afterLogin();
+}
+function afterLogin(){
+  $("user-bar").style.display="flex";
+  $("my-uid").innerText=App.uid;
+  switchPage("hall");
+}
+function logout(){
+  App.uid=""; App.username=""; App.currentRoomId=null;
+  DB.setSession(null); stopPolling();
+  $("user-bar").style.display="none";
+  switchPage("login");
+}
+
+/* ---------- 7. 房间 ---------- */
+let AppMode = "classic";
+function selectMode(m){ AppMode = m; document.querySelectorAll(".mode-card[data-mode]").forEach(x=>x.classList.toggle("on", x.dataset.mode===m)); }
+function genInvite(){
+  const A = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let s = "";
+  for(let i=0;i<6;i++) s += A[rand(0,A.length-1)];
+  return "R" + s;
+}
+async function createRoom(){
+  const rname = $("room-name").value.trim();
+  if(!rname) return toast("请填写比赛名称","err");
+  const isDiscern = AppMode==="discern";
+  let room = null;
+  if(Api.online){
+    room = await Api.createRoom(rname, AppMode);
+    if(!room || !room.id) return toast("创建失败：请确认后端已启动","err");
+    DB.cacheRoom(room);
+  } else {
+    // 离线模式：生成不重复的邀请码
+    let code;
+    do { code = genInvite(); } while(DB.room(code));
+    room = {
+      id:code, name:rname, invite:code, owner:App.uid, ownerName:App.username,
+      mode: AppMode,
+      status:"ready", round:0, startedAt:null,
+      players:[{uid:App.uid,name:App.username,isAI:false,isOwner:true}],
+      judges:[], aiJudges:[],
+      questions:{}, questionImages:{}, answers:{}, pendingQ:[], roundSources:{}, finalJudgments:{},
+      items:[], votes:{}, aiVerdicts:{}, scores:{},
+      revealed:false, revealResult:null,
+      createdAt:now()
+    };
+    DB.saveRoom(room);
+  }
+  App.currentRoomId = room.id;
+  $("new-room-info").style.display="block";
+  $("invite-code").innerText = room.invite;
+  toast(`房间已创建 · 邀请码 ${room.invite}`,"ok");
+  switchPage("room");
+  if(isDiscern) setTimeout(()=>switchRoomTab("discern"), 80);
+}
+function copyInvite(){
+  navigator.clipboard.writeText($("invite-code").innerText).then(()=>toast("邀请码已复制","ok"));
+}
+function copyRoomInvite(){
+  const room = DB.room(App.currentRoomId); if(!room) return;
+  navigator.clipboard.writeText(room.invite||room.id).then(()=>toast("邀请码已复制","ok"));
+}
+async function joinRoom(){
+  const code = ($("join-code").value||"").trim().toUpperCase();
+  const role = $("join-role").value;
+  if(!code) return toast("请输入邀请码","err");
+  let room = null;
+  if(Api.online){
+    const r = await Api.join(code, role);
+    if(!r || !r.room) return toast((r&&r.error)||"房间不存在","err");
+    room = r.room;
+    DB.cacheRoom(room);
+  } else {
+    room = DB.room(code) || DB.room(code.toUpperCase());
+    if(!room) return toast("房间不存在","err");
+    applyRoomRole(room, role);
+    DB.saveRoom(room);
+  }
+  App.currentRoomId = room.id;
+  toast("加入成功","ok");
+  switchPage("room");
+}
+// 房主/玩家身份切换：参赛者 ↔ 真人裁判
+function applyRoomRole(room, role){
+  if(role==="judge"){
+    room.players = room.players.filter(p=> p.isAI || p.uid!==App.uid);
+    if(!room.judges.some(j=>j.uid===App.uid))
+      room.judges.push({uid:App.uid, name:App.username, locked:false, joinedAt:now(), isOwner:room.owner===App.uid});
+  } else {
+    room.judges = room.judges.filter(j=>j.uid!==App.uid);
+    if(!room.players.some(p=>p.uid===App.uid))
+      room.players.push({uid:App.uid, name:App.username, isAI:false, isOwner:room.owner===App.uid});
+  }
+}
+function setMyRole(role){
+  const room = DB.room(App.currentRoomId); if(!room) return;
+  if(role==="judge"){ room._removeFromPlayers=[App.uid]; room._removeFromJudges=[]; }
+  else { room._removeFromJudges=[App.uid]; room._removeFromPlayers=[]; }
+  applyRoomRole(room, role);
+  DB.saveRoom(room);
+  toast(role==="judge"?"已切换为真人裁判":"已切换为参赛者","ok");
+  renderRoom();
+  if(App.roomTab==="discern") renderDiscern();
+  if(App.roomTab==="judge-manage") renderJudgeList();
+}
+async function renderRoomList(){
+  let rooms = null;
+  if(Api.online){
+    rooms = await Api.fetchRooms(App.uid);
+    if(rooms){
+      const all = DB.rooms();
+      rooms.forEach(r=>{ all[r.id] = all[r.id] ? Object.assign({}, all[r.id], r) : r; });
+      DB.setRooms(all);
+    }
+  }
+  const all = DB.rooms();
+  const mine = Object.values(all).filter(r=> r.owner===App.uid || (r.players||[]).some(p=>p.uid===App.uid) || (r.judges||[]).some(j=>j.uid===App.uid));
+  if(!mine.length){ $("room-list").innerHTML='<div class="dim">暂无房间</div>'; return; }
+  $("room-list").innerHTML = mine.map(r=>`
+    <div class="room-card">
+      <div><b>${escapeHtml(r.name)}</b> <span class="inv">${r.invite||r.id}</span>
+        <span class="tag ${r.mode==='discern'?'tag-img':'tag-txt'}" style="margin-left:6px">${r.mode==='discern'?'进阶判别':'经典图灵'}</span>
+        <div class="dim" style="font-size:11px">选手 ${(r.players||[]).length} · 裁判 ${(r.judges||[]).length} · 状态 <span class="${r.revealed?'ok':'cyan'}">${r.revealed?'已揭晓':'进行中'}</span></div>
+      </div>
+      <div class="row">
+        <button class="btn sm" onclick="enterRoom('${r.id}')">进入</button>
+        <button class="btn sm ghost" onclick="navigator.clipboard.writeText('${r.invite||r.id}');toast('邀请码已复制','ok')">复制码</button>
+      </div>
+    </div>`).join("");
+  // 大厅每 2 秒自动刷新
+  if(!App.hallTimer){
+    App.hallTimer = setInterval(()=>{ if($("page-hall").style.display!=="none") renderRoomList(); }, 2000);
+  }
+}
+function enterRoom(id){ App.currentRoomId=id; switchPage("room"); }
+
+/* ---------- 8. 渲染：比赛现场（轮询调用，实现自动刷新） ---------- */
+function renderRoom(){
+  const room = DB.room(App.currentRoomId);
+  if(!room){ App.currentRoomId=null; switchPage("hall"); return; }
+  renderBanner(room);
+  renderDashboard(room);
+  renderQuestion(room);
+  renderPlayers(room);
+  renderChat(room);
+  renderRadar(room);
+  renderTimeline(room);
+  renderPendingQ(room);
+  renderJudgeQuestionPanel(room);
+  if(App.roomTab==="discern") renderDiscern();
+  else if(App.roomTab==="judge-manage") renderJudgeList();
+  else if(App.roomTab==="ai-judge") renderAiJudgeList();
+}
+function renderBanner(room){
+  const el = $("room-banner"); if(!el) return;
+  const isPlayer = (room.players||[]).some(p=>p.uid===App.uid && !p.isAI);
+  const isJudge = (room.judges||[]).some(j=>j.uid===App.uid);
+  const isOwner = room.owner===App.uid;
+  el.innerHTML = `
+    <div class="row" style="justify-content:space-between;align-items:center;gap:10px">
+      <div class="row" style="gap:8px;align-items:center">
+        <b style="font-size:15px">${escapeHtml(room.name)}</b>
+        <span class="tag ${room.mode==='discern'?'tag-img':'tag-txt'}">${room.mode==='discern'?'进阶判别':'经典图灵'}</span>
+        <span class="dim" style="font-size:12px;margin-left:6px">邀请码</span>
+        <b class="cyan" style="font-family:monospace;font-size:15px;letter-spacing:1px">${room.invite||room.id}</b>
+        <button class="btn sm" onclick="copyRoomInvite()">复制邀请码</button>
+        ${isOwner?'<span class="violet" style="font-size:11px">房主</span>':''}
+      </div>
+      <div class="row" style="gap:6px;align-items:center">
+        <span class="dim" style="font-size:12px">我的身份</span>
+        <button class="btn sm ${isPlayer?'primary':''}" onclick="setMyRole('player')">参赛者</button>
+        <button class="btn sm ${isJudge?'primary':''}" onclick="setMyRole('judge')">真人裁判</button>
+      </div>
+    </div>`;
+}
+function renderJudgeQuestionPanel(room){
+  const el = $("judge-q-panel"); if(!el) return;
+  const isJudge = room.owner===App.uid || (room.judges||[]).some(j=>j.uid===App.uid);
+  el.style.display = isJudge ? "block" : "none";
+}
+function renderPendingQ(room){
+  const el = $("pending-q-info"); if(!el) return;
+  const pq = room.pendingQ || [];
+  const chars = pq.reduce((a,x)=>a+(x.text||"").length,0);
+  if(!pq.length){ el.innerHTML='<span class="dim">暂无待开局的裁判问题（去“真人/AI 裁判管理”或点“模拟裁判出题”）</span>'; return; }
+  el.innerHTML = `已收到 <b class="cyan">${pq.length}</b> 份待开局裁判问题 · 汇总 <b class="${chars>6000?'err':'ok'}">${chars}</b>/6000 字 · 可点击“开始统一作答”`;
+}
+
+function renderDashboard(room){
+  const online = room.players.length + room.judges.length;
+  const curQ = room.questions[room.round] || ((room.questionImages&&room.questionImages[room.round]||[]).length ? "【图片题目】" : "");
+  const answered = room.round ? Object.keys(room.answers[room.round]||{}).length : 0;
+  const total = room.players.length;
+  const elapsed = room.startedAt ? Math.floor((now()-room.startedAt)/1000) : 0;
+  const mm=String(Math.floor(elapsed/60)).padStart(2,"0"), ss=String(elapsed%60).padStart(2,"0");
+  // AI 置信度 = 所有选手平均 AI 概率
+  const probs = room.players.map(p=> aiProbability(room,p));
+  const avg = probs.length? Math.round(probs.reduce((a,b)=>a+b,0)/probs.length):0;
+  const syncText = App.lastSync? fmtTime(App.lastSync) : "--:--:--";
+  $("dashboard").innerHTML = `
+    <div class="metric"><div class="k"><span class="live-dot"></span>实时同步</div><div class="v" style="font-size:18px">LIVE</div><div class="s">更新 ${syncText}</div></div>
+    <div class="metric"><div class="k">在线人数</div><div class="v">${online}</div><div class="s">选手 ${room.players.length} · 裁判 ${room.judges.length}</div></div>
+    <div class="metric"><div class="k">当前轮次</div><div class="v">${room.round||0}</div><div class="s">${curQ?'已出题':'待出题'}</div></div>
+    <div class="metric"><div class="k">作答进度</div><div class="v">${answered}/${total}</div><div class="s">本轮提交数</div></div>
+    <div class="metric"><div class="k">AI 置信度</div><div class="v">${avg}%</div><div class="s">已用 ${mm}:${ss}</div></div>`;
+}
+
+function renderQuestion(room){
+  $("round-badge").innerText = room.round? `第 ${room.round} 轮` : "";
+  const q = room.questions[room.round];
+  const imgs = (room.questionImages && room.questionImages[room.round]) || [];
+  let html = q ? `<div class="q-text">${escapeHtml(q)}</div>` : "";
+  if(imgs.length) html += imgs.map(im=>`<div class="q-img"><img src="${im.data}" alt="题目图片" /></div>`).join("");
+  $("current-q").innerHTML = html
+    ? `${html}<div class="dim" style="font-size:11px;margin-top:8px">出题时间 ${fmtTime(room.roundStart || room.startedAt || now())}</div>`
+    : "等待裁判出题…";
+  // 提交状态
+  const myAns = room.round && room.answers[room.round] && room.answers[room.round][App.uid];
+  $("answer-status").innerText = myAns? "✓ 已提交" : "";
+  $("answer-status").className = myAns? "ok" : "dim";
+}
+
+function renderPlayers(room){
+  const cur = room.round;
+  const box = $("player-list");
+  box.innerHTML = room.players.map(p=>{
+    const ans = cur && room.answers[cur] && room.answers[cur][p.uid];
+    let status, badge;
+    if(!cur || !(room.questions[cur])){ status=""; badge='<span class="status-chip st-wait">待开局</span>'; }
+    else if(p.isAI && !ans){ status='<span class="typing"><i></i><i></i><i></i></span> 思考中'; badge='<span class="status-chip st-think">AI思考</span>'; }
+    else if(ans){ status=`<span class="ok">${fmtTime(ans.time)} 已作答</span>`; badge='<span class="status-chip st-done">已提交</span>'; }
+    else { status="等待作答"; badge='<span class="status-chip st-wait">未提交</span>'; }
+    const prob = aiProbability(room,p);
+    return `<div class="player-chip ${p.isAI?'ai':''} ${ans?'answered':''}">
+      <div class="avatar">${uidAvatar(p.name)}</div>
+      <div class="meta">
+        <div class="nm">${escapeHtml(p.name)} ${p.isAI?'<span class="cyan" style="font-size:10px">[AI]</span>':''} ${p.isOwner?'<span class="violet" style="font-size:10px">[房主]</span>':''}</div>
+        <div class="sub">${status}</div>
+        <div class="ai-bar"><i style="width:${prob}%"></i></div>
+      </div>
+      ${badge}
+    </div>`;
+  }).join("") || '<div class="dim">暂无选手</div>';
+}
+
+/* ---------- 9. AI 概率模型（演示用：基于响应速度与裁判投票） ---------- */
+function aiProbability(room, player){
+  if(player.isAI){
+    // AI 响应快且稳定，给较高嫌疑，但留波动
+    const base = 78;
+    const vote = judgeVoteFor(room, player.uid);
+    return Math.min(98, base + (vote-50)*0.3 + rand(-4,4));
+  }
+  // 真人：响应越慢嫌疑越低；偶尔被误判
+  const cur = room.round;
+  const ans = cur && room.answers[cur] && room.answers[cur][player.uid];
+  let p = 30;
+  if(ans && room.startedAt){
+    const sec = (ans.time - (room.roundStart||room.startedAt))/1000;
+    p = Math.max(5, 60 - sec*2); // 答得越快越像 AI
+  }
+  const vote = judgeVoteFor(room, player.uid);
+  return Math.round(Math.min(90, p + (vote-50)*0.25));
+}
+function judgeVoteFor(room, playerUid){
+  // 裁判锁定判断中，判该选手为 AI 的比例
+  const jud = room.finalJudgments||{};
+  const v = Object.values(jud).filter(j=> j && j.verdict && j.verdict[playerUid]==="AI").length;
+  const total = Object.keys(jud).length || 1;
+  return Math.round(v/total*100);
+}
+
+/* ---------- 10. 创新点2：AI 检测雷达（纯 SVG） ---------- */
+function renderRadar(room){
+  const svg = $("radar");
+  const dims = ["响应速度","语言自然度","一致性","情感表达","知识广度"];
+  const N = dims.length;
+  const R = 85;
+  // 选当前最“可疑”的选手作为雷达主角，另取一人对比
+  const sorted = [...room.players].sort((a,b)=> aiProbability(room,b)-aiProbability(room,a));
+  const focus = sorted[0];
+  const compare = sorted[1];
+  function poly(player, fill, stroke){
+    const pts = [];
+    for(let i=0;i<N;i++){
+      const angle = -Math.PI/2 + i*2*Math.PI/N;
+      const base = aiProbability(room, player);
+      // 每个维度给一点差异
+      const dimVal = Math.max(8, Math.min(100, base + Math.sin(i*1.7+player.uid.length)*12));
+      const r = R * dimVal/100;
+      pts.push(`${(Math.cos(angle)*r).toFixed(1)},${(Math.sin(angle)*r).toFixed(1)}`);
+    }
+    return `<polygon points="${pts.join(" ")}" fill="${fill}" stroke="${stroke}" stroke-width="1.5"/>`;
+  }
+  let grid="";
+  for(let g=1;g<=4;g++){
+    const rr = R*g/4;
+    const pts=[];
+    for(let i=0;i<N;i++){ const a=-Math.PI/2+i*2*Math.PI/N; pts.push(`${(Math.cos(a)*rr).toFixed(1)},${(Math.sin(a)*rr).toFixed(1)}`); }
+    grid += `<polygon points="${pts.join(" ")}" fill="none" stroke="rgba(56,189,248,.15)" stroke-width="1"/>`;
+  }
+  let axes="";
+  for(let i=0;i<N;i++){
+    const a=-Math.PI/2+i*2*Math.PI/N;
+    axes += `<line x1="0" y1="0" x2="${(Math.cos(a)*R).toFixed(1)}" y2="${(Math.sin(a)*R).toFixed(1)}" stroke="rgba(56,189,248,.2)"/>`;
+    axes += `<text x="${(Math.cos(a)*(R+14)).toFixed(1)}" y="${(Math.sin(a)*(R+14)).toFixed(1)}" fill="#8aa0c2" font-size="10" text-anchor="middle" dominant-baseline="middle">${dims[i]}</text>`;
+  }
+  // 扫描线
+  const sweep = `<line x1="0" y1="0" x2="0" y2="${-R}" stroke="url(#sweep)" stroke-width="2">
+    <animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="4s" repeatCount="indefinite"/></line>
+    <defs><linearGradient id="sweep" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#22d3ee" stop-opacity="0"/><stop offset="100%" stop-color="#22d3ee" stop-opacity="1"/></linearGradient></defs>`;
+  svg.innerHTML = grid + axes
+    + (compare? poly(compare, "rgba(167,139,250,.15)", "#a78bfa"):"")
+    + (focus? poly(focus, "rgba(34,211,238,.25)", "#22d3ee"):"")
+    + sweep;
+  const legend = $("radar-legend");
+  legend.innerHTML = (focus? `<div class="lg"><span class="dot" style="background:#22d3ee"></span>${escapeHtml(focus.name)} · 嫌疑 <b class="cyan">${aiProbability(room,focus)}%</b></div>`:"")
+    + (compare? `<div class="lg"><span class="dot" style="background:#a78bfa"></span>${escapeHtml(compare.name)} · 嫌疑 <b class="violet">${aiProbability(room,compare)}%</b></div>`:"")
+    + `<div class="dim" style="font-size:11px;margin-top:6px">数据每 1.5s 刷新，综合裁判投票与行为特征</div>`;
+}
+
+/* ---------- 11. 创新点3：作答时间线 ---------- */
+function renderTimeline(room){
+  const cur = room.round;
+  const box = $("timeline");
+  if(!cur || !room.questions[cur]){ box.innerHTML='<div class="dim">本轮尚未出题</div>'; return; }
+  const start = room.roundStart || room.startedAt || now();
+  const maxSec = 60;
+  const rows = room.players.map(p=>{
+    const ans = room.answers[cur] && room.answers[cur][p.uid];
+    const sec = ans? Math.max(1, Math.round((ans.time-start)/1000)) : null;
+    const w = sec? Math.min(100, sec/maxSec*100) : 0;
+    return `<div class="tl-row">
+      <div class="who">${escapeHtml(p.name)}${p.isAI?' <span class="cyan">AI</span>':''}</div>
+      <div class="track"><div class="fill" style="width:${w}%"></div></div>
+      <div class="sec">${sec? sec+'s':'—'}</div>
+    </div>`;
+  }).join("");
+  box.innerHTML = rows;
+}
+
+/* ---------- 12. 聊天 ---------- */
+function sendChat(){
+  const room = DB.room(App.currentRoomId); if(!room) return;
+  const txt = $("chat-input").value.trim();
+  if(!txt) return toast("消息不能为空","err");
+  if(txt.length>2000) return toast("消息长度超限","err");
+  const isJudge = room.judges.some(j=>j.uid===App.uid);
+  if(isJudge) return toast("裁判无法在公共聊天发言","err");
+  const list = DB.chat(room.id);
+  list.push({name:App.username, uid:App.uid, time:now(), msg:txt});
+  DB.setChat(room.id, list);
+  $("chat-input").value="";
+  renderChat(room);
+}
+function renderChat(room){
+  const box = $("chat-box");
+  const list = DB.chat(room.id);
+  const isJudge = room.judges.some(j=>j.uid===App.uid);
+  if(isJudge){ box.innerHTML='<div class="dim center" style="padding:20px">裁判身份不可见公共聊天内容</div>'; return; }
+  if(room.revealed){ box.innerHTML='<div class="dim center" style="padding:20px">本场已正式揭晓，聊天记录已清除</div>'; return; }
+  box.innerHTML = list.map(c=>`<div class="msg ${c.uid===App.uid?'me':''}">
+    <span class="t">${fmtTime(c.time)}</span>
+    <span class="who">${escapeHtml(c.name)} <span class="u">(${c.uid})</span></span>
+    <div>${escapeHtml(c.msg)}</div></div>`).join("") || '<div class="dim center" style="padding:20px">暂无消息</div>';
+  box.scrollTop = box.scrollHeight;
+}
+
+/* ---------- 13. 作答提交 ---------- */
+function submitAnswer(){
+  const room = DB.room(App.currentRoomId); if(!room) return;
+  if(!room.round || !room.questions[room.round]) return toast("当前轮尚未出题","err");
+  const txt = $("player-answer").value.trim();
+  if(!txt) return toast("请输入作答内容","err");
+  if(!room.answers[room.round]) room.answers[room.round]={};
+  if(room.answers[room.round][App.uid]) return toast("本轮已提交作答","warn");
+  room.answers[room.round][App.uid] = { text:txt, time:now() };
+  DB.saveRoom(room);
+  $("player-answer").value="";
+  toast("作答已提交","ok");
+  renderRoom();
+  // 若还有 AI 选手未答，触发模拟 AI 作答
+  triggerAiIfNeeded(room);
+}
+
+/* ---------- 14. 房主流程 ---------- */
+function startRound(){
+  const room = DB.room(App.currentRoomId); if(!room) return;
+  // 消费待开局的裁判问题队列（任何轮次、任何来源提交的问题都先入队，开局统一汇总）
+  const pending = room.pendingQ || [];
+  if(pending.length===0) return toast("开局前至少需要一份裁判问题，请先让裁判出题","err");
+  const merged = pending.map(x=>`【${x.from}】\n${x.text}`).join("\n\n");
+  if(merged.length>6000) return toast("汇总问题超过 6000 字","err");
+  room.round = (room.round||0) + 1;
+  room.questions[room.round] = merged;
+  room.questionImages = room.questionImages||{};
+  room.questionImages[room.round] = pending.filter(x=>x.image).map(x=>({data:x.image, from:x.from}));
+  room.roundSources = room.roundSources||{};
+  room.roundSources[room.round] = pending.slice();
+  room.pendingQ = [];
+  room.answers[room.round] = {};
+  room.startedAt = room.startedAt || now();
+  room.roundStart = now();
+  room.status = "playing";
+  DB.saveRoom(room);
+  toast(`第 ${room.round} 轮已开始：已汇总 ${pending.length} 份裁判问题并发布`,"ok");
+  renderRoom();
+  triggerAiIfNeeded(room);
+}
+function nextRound(){
+  const room = DB.room(App.currentRoomId); if(!room) return;
+  toast("开启下一轮，浏览器尝试触发 AI 裁判出题…","ok");
+  autoGenQ();
+  setTimeout(()=>startRound(), 400);
+}
+function manualPublishQ(){
+  const room = DB.room(App.currentRoomId); if(!room) return;
+  const q = $("manual-q").value.trim();
+  if(!q) return toast("请输入问题","err");
+  room.round = room.round || 1;
+  room.questions[room.round] = q;
+  room.answers[room.round] = room.answers[room.round]||{};
+  room.roundStart = now();
+  room.startedAt = room.startedAt || now();
+  DB.saveRoom(room);
+  toast("问题已发布给所有玩家","ok");
+  renderRoom();
+}
+function genAiReply(){
+  const room = DB.room(App.currentRoomId); if(!room) return;
+  triggerAiIfNeeded(room, true);
+  toast("已触发 AI 参赛者生成回复","ok");
+}
+function triggerAiIfNeeded(room, force=false){
+  const cur = room.round;
+  if(!cur || !room.questions[cur]) return;
+  room.answers[cur] = room.answers[cur]||{};
+  room.players.filter(p=>p.isAI && !room.answers[cur][p.uid]).forEach((ai,idx)=>{
+    const delay = 1500 + idx*1200 + rand(0,2000);
+    setTimeout(()=>{
+      const r = DB.room(room.id); if(!r) return;
+      r.answers[cur] = r.answers[cur]||{};
+      if(r.answers[cur][ai.uid]) return;
+      r.answers[cur][ai.uid] = { text: genAiText(r.questions[cur], ai), time:now() };
+      DB.saveRoom(r);
+      // 仅当当前在房间页时刷新（轮询本就会刷，这里即时一下）
+      if(App.currentRoomId===r.id && $("page-room").style.display!=="none") renderRoom();
+    }, delay);
+  });
+}
+function genAiText(q, ai){
+  const pool = [
+    "这是一个很有意思的问题。从我的角度来看，需要分几个层面来分析：首先，其次，最后。希望这个回答对你有帮助。",
+    "关于「"+ (q.slice(0,12)) +"」，我认为关键在于语境与意图的区分。不同立场会得出不同结论，但核心逻辑是一致的。",
+    "让我来回答：这个问题没有绝对答案，取决于具体场景。如果是 A 情况则……；如果是 B 情况则……。",
+    "好问题。我会从定义出发，逐步推导，避免过早下结论。总体而言，倾向于一个折中但有依据的判断。"
+  ];
+  return pool[rand(0,pool.length-1)];
+}
+
+/* ---------- 15. 揭晓（创新点4：身份揭晓动画 + 彩屑） ---------- */
+function revealAll(){
+  const room = DB.room(App.currentRoomId); if(!room) return;
+  const judgesTotal = room.judges.length + (room.aiJudges||[]).length;
+  const locked = room.judges.filter(j=>j.locked).length;
+  if(judgesTotal>0 && locked < judgesTotal) {
+    if(!confirm(`当前 ${locked}/${judgesTotal} 名裁判已锁定，仍要正式揭晓吗？`)) return;
+  }
+  room.revealed = true;
+  room.revealResult = room.players.map(p=>({uid:p.uid,name:p.name,isAI:p.isAI,prob:aiProbability(room,p)}));
+  DB.saveRoom(room);
+  // 清除本场聊天（按指南）
+  DB.setChat(room.id, []);
+  toast("身份已正式揭晓，本场聊天已清除","ok");
+  renderRoom();
+  showReveal(room);
+}
+function showReveal(room){
+  const grid = $("reveal-grid");
+  grid.innerHTML = (room.revealResult||[]).map(r=>`
+    <div class="reveal-card ${r.isAI?'ai':'human'}">
+      <div class="tag">CONTESTANT</div>
+      <div class="name">${escapeHtml(r.name)}</div>
+      <div class="verdict">${r.isAI?'🤖 AI':'👤 HUMAN'}</div>
+      <div class="dim" style="font-size:11px">系统嫌疑 ${r.prob}%</div>
+    </div>`).join("");
+  $("reveal-mask").classList.add("show");
+  spawnConfetti();
+}
+function closeReveal(){ $("reveal-mask").classList.remove("show"); }
+function spawnConfetti(){
+  const colors=["#22d3ee","#a78bfa","#e879f9","#34d399","#fbbf24"];
+  for(let i=0;i<80;i++){
+    const c=document.createElement("div");
+    c.className="confetti";
+    c.style.left=Math.random()*100+"%";
+    c.style.background=colors[rand(0,colors.length-1)];
+    c.style.animationDuration=(1.6+Math.random()*1.8)+"s";
+    c.style.animationDelay=Math.random()*0.5+"s";
+    c.style.transform=`rotate(${rand(0,360)}deg)`;
+    $("reveal-mask").appendChild(c);
+    setTimeout(()=>c.remove(),4000);
+  }
+}
+
+/* ---------- 16. 房间操作 ---------- */
+function reuseRoom(){
+  const room = DB.room(App.currentRoomId); if(!room) return;
+  if(!confirm("再次开赛将清空本场问题、回答、裁判判断与快照，保留房间与名单，确认？")) return;
+  room.questions={}; room.answers={}; room.pendingQ=[]; room.roundSources={}; room.judgeQuestions={}; room.finalJudgments={};
+  room.round=0; room.revealed=false; room.revealResult=null; room.startedAt=null; room.roundStart=null; room.status="ready";
+  room.questionImages={};
+  room.judges.forEach(j=>j.locked=false);
+  room._resetGame = true;
+  DB.saveRoom(room); DB.setChat(room.id, []);
+  toast("已清空记录，可再次开赛","ok"); renderRoom();
+}
+function downloadLog(){
+  const room = DB.room(App.currentRoomId); if(!room) return;
+  const log = { room, chat:DB.chat(room.id), exportedAt:now() };
+  const blob = new Blob([JSON.stringify(log,null,2)], {type:"application/json"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `turing_log_${room.id}_${Date.now()}.json`;
+  a.click();
+  toast("整场 Log 已下载","ok");
+}
+async function delRoom(){
+  if(!confirm("确认永久删除房间？所有比赛数据将被清除且不可恢复！")) return;
+  if(Api.online) await Api.post("/api/deleteRoom", {code:App.currentRoomId, uid:App.uid});
+  const all = DB.rooms(); delete all[App.currentRoomId]; DB.setRooms(all);
+  DB.rm("turing_chat_"+App.currentRoomId);
+  App.currentRoomId=null; toast("房间已删除","ok"); switchPage("hall");
+}
+
+/* ---------- 17. 真人裁判 / AI 裁判管理 ---------- */
+function renderJudgeList(){
+  const room = DB.room(App.currentRoomId); if(!room) return;
+  if(!room.judges.length){ $("judge-list").innerHTML='<div class="dim">暂无真人裁判</div>'; return; }
+  const isOwner = room.owner===App.uid;
+  $("judge-list").innerHTML = room.judges.map(j=>`
+    <div class="judge-row">
+      <div><b>${escapeHtml(j.name)}</b> <span class="dim">(${j.uid})</span> · 加入于 ${fmtTime(j.joinedAt)}</div>
+      <div class="row">
+        <span class="lock-badge ${j.locked?'locked':'open'}">${j.locked?'已锁定判断':'未锁定'}</span>
+        ${ (isOwner || j.uid===App.uid)? `<button class="btn sm" onclick="toggleJudgeLock('${j.uid}')">${j.locked?'解锁':'锁定'}</button>`:'' }
+      </div>
+    </div>`).join("");
+}
+function toggleJudgeLock(juid){
+  const room = DB.room(App.currentRoomId); if(!room) return;
+  const j = room.judges.find(x=>x.uid===juid); if(!j) return;
+  j.locked = !j.locked;
+  if(j.locked){
+    room.finalJudgments = room.finalJudgments||{};
+    // 模拟裁判投票：随机指认一名选手为 AI
+    const target = room.players[rand(0,room.players.length-1)];
+    room.finalJudgments[juid] = { verdict:{[target.uid]:"AI"}, ts:now() };
+  }
+  DB.saveRoom(room);
+  toast(j.locked? "裁判已锁定判断":"裁判已解锁","ok");
+  renderJudgeList(); renderRoom();
+}
+function renderAiJudgeList(){
+  const room = DB.room(App.currentRoomId); if(!room) return;
+  const list = room.aiJudges||[];
+  $("ai-judge-list").innerHTML = list.length? list.map((a,i)=>`
+    <div class="judge-row"><div><b>AI 裁判 #${i+1}</b> <span class="dim">${a.config}</span></div>
+      <span class="lock-badge ${a.locked?'locked':'open'}">${a.locked?'已锁定':'未锁定'}</span></div>`).join("")
+    : '<div class="dim">暂无 AI 裁判席位</div>';
+}
+function addAiJudge(){
+  const room = DB.room(App.currentRoomId); if(!room) return;
+  const cfg = $("ai-judge-config").value;
+  room.aiJudges = room.aiJudges||[];
+  room.aiJudges.push({config:cfg, locked:false, addedAt:now()});
+  DB.saveRoom(room); toast("已新增 AI 裁判席位","ok"); renderAiJudgeList();
+}
+function autoGenQ(){
+  const room = DB.room(App.currentRoomId); if(!room) return;
+  const samples = [
+    "请用一句话解释递归，但不能出现‘递归’二字。",
+    "你更喜欢猫还是狗？请给出一个带有个人色彩的理由。",
+    "描述一次你最近感到惊讶的经历，越具体越好。",
+    "如果让你给一个 8 岁孩子讲清楚什么是‘信任’，你会怎么说？"
+  ];
+  room.pendingQ = room.pendingQ||[];
+  room.pendingQ.push({from:"AI裁判", text:samples[rand(0,samples.length-1)], ts:now()});
+  DB.saveRoom(room); toast("AI 裁判已生成问题，已加入待开局队列","ok");
+}
+function autoJudgeFinal(){
+  const room = DB.room(App.currentRoomId); if(!room) return;
+  (room.aiJudges||[]).forEach((a,i)=>{
+    if(!a.locked){
+      a.locked=true;
+      room.finalJudgments = room.finalJudgments||{};
+      const target = room.players[rand(0,room.players.length-1)];
+      room.finalJudgments["ai_"+i] = { verdict:{[target.uid]:"AI"}, ts:now() };
+    }
+  });
+  DB.saveRoom(room); toast("AI 裁判已完成最终判断","ok"); renderRoom();
+}
+function saveAiJudgeQ(){
+  const room = DB.room(App.currentRoomId); if(!room) return;
+  const q = $("ai-judge-q").value.trim(); if(!q) return toast("请输入问题","err");
+  room.pendingQ = room.pendingQ||[];
+  room.pendingQ.push({from:"AI裁判(手动)", text:q, ts:now()});
+  DB.saveRoom(room); $("ai-judge-q").value=""; toast("AI 裁判问题已保存，已加入待开局队列","ok");
+}
+
+/* ---------- 18. 模拟观战助手（让单人也能看到实时刷新效果） ---------- */
+function addSimBot(role){
+  const room = DB.room(App.currentRoomId); if(!room) return;
+  if(role==="player"){
+    const names=["小冰","GPT-模拟人","Claude-4号","文心","豆包"];
+    const n = names[rand(0,names.length-1)]+"#"+rand(10,99);
+    room.players.push({uid:"AI_"+now()+rand(0,99), name:n, isAI:true});
+  } else {
+    room.judges.push({uid:"JUDGE_"+now(), name:"模拟裁判#"+rand(1,9), locked:false, joinedAt:now()});
+  }
+  DB.saveRoom(room); toast(role==="player"?"已加入模拟 AI 选手":"已加入模拟裁判","ok"); renderRoom();
+}
+function simJudgeQuestion(){
+  const room = DB.room(App.currentRoomId); if(!room) return;
+  if(!room.judges.length) return toast("先添加一名模拟裁判","warn");
+  const samples=["你上一次说谎是什么时候？为什么？","用三个词形容你现在的心情，并解释。","如果明天是世界末日，你今天会做什么？"];
+  room.pendingQ = room.pendingQ||[];
+  room.pendingQ.push({from:room.judges[0].name, text:samples[rand(0,samples.length-1)], ts:now()});
+  DB.saveRoom(room); toast("模拟裁判已提交问题，已加入待开局队列","ok");
+}
+function simJudgeLock(){
+  const room = DB.room(App.currentRoomId); if(!room) return;
+  room.judges.forEach(j=>{
+    if(!j.locked){
+      j.locked=true;
+      room.finalJudgments=room.finalJudgments||{};
+      const target = room.players[rand(0,room.players.length-1)];
+      room.finalJudgments[j.uid]={verdict:{[target.uid]:"AI"},ts:now()};
+    }
+  });
+  DB.saveRoom(room); toast("所有模拟裁判已锁定判断","ok"); renderRoom(); renderJudgeList();
+}
+
+/* ---------- 19. 个人中心 ---------- */
+async function saveProfile(){
+  const name = $("center-name").value.trim();
+  if(!name || name.length>40) return toast("用户名 1~40 字符","err");
+  if(Api.online){
+    const r = await Api.post("/api/profile", {uid:App.uid, name});
+    if(r.status!==200) return toast((r.data&&r.data.error)||"保存失败","err");
+  } else {
+    const users = DB.users();
+    if(users[App.uid]){ users[App.uid].name = name; DB.setUsers(users); }
+  }
+  App.username = name;
+  DB.setSession({uid:App.uid, name});
+  toast("资料保存成功","ok");
+}
+function copyUid(){ navigator.clipboard.writeText(App.uid).then(()=>toast("UID 已复制","ok")); }
+async function changePwd(){
+  const o=$("old-pwd").value, n=$("new-pwd").value, n2=$("new-pwd2").value;
+  if(n.length<8||n.length>200) return toast("新密码 8~200 位","err");
+  if(n!==n2) return toast("两次新密码不一致","err");
+  if(Api.online){
+    const r = await Api.post("/api/changePwd", {uid:App.uid, oldPwd:o, newPwd:n});
+    if(r.status!==200) return toast((r.data&&r.data.error)||"修改失败","err");
+  } else {
+    const users=DB.users();
+    if(!users[App.uid] || users[App.uid].pwd!==o) return toast("当前密码错误","err");
+    users[App.uid].pwd=n; DB.setUsers(users);
+  }
+  toast("密码修改成功，请重新登录","ok"); logout();
+}
+function saveApiConfig(){
+  const cfg = { name:$("api-name").value, base:$("api-base").value, model:$("api-model").value,
+    temp:$("api-temp").value, max:$("api-max").value, timeout:$("api-timeout").value,
+    hasKey: !!$("api-key").value, savedAt:now() };
+  const list = DB.apiCfg(); list.push(cfg); Store.set("turing_api_"+App.uid, list);
+  ["api-name","api-base","api-model","api-key"].forEach(id=>$(id).value="");
+  toast("API 配置已保存（密钥仅存元数据状态）","ok"); renderApiList();
+}
+function testApi(){ toast("测试 API 连通性（模拟：后端实现真实请求）→ 200 OK","ok"); }
+function renderApiList(){
+  const list = DB.apiCfg();
+  $("api-list").innerHTML = list.length? list.map((c,i)=>`
+    <div class="api-row">
+      <div><b>${escapeHtml(c.name||'未命名')}</b> <span class="dim">${escapeHtml(c.base||'')} · ${escapeHtml(c.model||'')}</span>
+        <div class="dim" style="font-size:11px">温度 ${c.temp} · 最大Token ${c.max} · 超时 ${c.timeout}s · 密钥 ${c.hasKey?'<span class="ok">已配置</span>':'<span class="warn">缺失</span>'}</div>
+      </div>
+      <button class="btn sm danger" onclick="delApi(${i})">删除</button>
+    </div>`).join("") : '<div class="dim">暂无配置</div>';
+}
+function delApi(i){ const list=DB.apiCfg(); list.splice(i,1); Store.set("turing_api_"+App.uid,list); renderApiList(); toast("已删除","ok"); }
+
+/* ---------- 20. 主题切换 ---------- */
+document.querySelectorAll(".theme-switch i").forEach(el=>{
+  el.addEventListener("click", ()=>{
+    document.body.setAttribute("data-theme", el.dataset.t);
+    document.querySelectorAll(".theme-switch i").forEach(x=>x.classList.remove("on"));
+    el.classList.add("on");
+    localStorage.setItem("turing_theme", el.dataset.t);
+  });
+});
+
+/* ---------- 21. 回车发送 / 背景粒子网络 ---------- */
+document.addEventListener("keydown", e=>{
+  if(e.key==="Enter" && !e.shiftKey){
+    if(document.activeElement && document.activeElement.id==="chat-input"){ e.preventDefault(); sendChat(); }
+  }
+});
+
+function initCanvas(){
+  const cv = $("bg-canvas"), ctx = cv.getContext("2d");
+  let w,h, nodes=[];
+  function resize(){ w=cv.width=innerWidth; h=cv.height=innerHeight; }
+  resize(); addEventListener("resize", resize);
+  for(let i=0;i<60;i++) nodes.push({x:Math.random()*w,y:Math.random()*h,vx:(Math.random()-.5)*.4,vy:(Math.random()-.5)*.4});
+  function tick(){
+    ctx.clearRect(0,0,w,h);
+    nodes.forEach(n=>{ n.x+=n.vx; n.y+=n.vy; if(n.x<0||n.x>w)n.vx*=-1; if(n.y<0||n.y>h)n.vy*=-1; });
+    for(let i=0;i<nodes.length;i++){
+      for(let j=i+1;j<nodes.length;j++){
+        const dx=nodes[i].x-nodes[j].x, dy=nodes[i].y-nodes[j].y, d=Math.hypot(dx,dy);
+        if(d<130){
+          ctx.strokeStyle=`rgba(34,211,238,${(1-d/130)*0.25})`;
+          ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(nodes[i].x,nodes[i].y); ctx.lineTo(nodes[j].x,nodes[j].y); ctx.stroke();
+        }
+      }
+      ctx.fillStyle="rgba(167,139,250,.6)"; ctx.beginPath(); ctx.arc(nodes[i].x,nodes[i].y,1.5,0,7); ctx.fill();
+    }
+    requestAnimationFrame(tick);
+  }
+  tick();
+}
+
+/* ---------- 21. 进阶判别引擎：真人裁判主导 · AI 后台化 ---------- */
+/* ====== AI 引擎接口层（可插拔本地 / HTTP API / 模型插件） ======
+   默认使用本地启发式引擎（Canvas 像素 / 词汇统计）。
+   生产环境可把 backend 替换成：
+     AIPlugin.backend = "http"
+     AIPlugin.httpEndpoint = "/api/analyze-image"
+     AIPlugin.httpHeaders  = { Authorization: "Bearer ..." }
+     AIPlugin.backend = "plugin"  // 也可以注入自定义分析函数
+*/
+const AIPlugin = {
+  backend: "local",       // "local" | "http" | "custom"
+  httpEndpoint: "/api/analyze",  // 后端接口：POST {type:"image"/"text", content:"..."} → {verdict, conf, features[], explain}
+  httpHeaders: {},
+  customAnalyze: null,    // 可注入 async (item) => ({verdict, conf, features, explain})
+
+  async analyze(item){
+    if(this.backend==="custom" && typeof this.customAnalyze==="function"){
+      try { return await this.customAnalyze(item); }
+      catch(e){ console.warn("[AIPlugin] custom backend failed, fallback to local", e); }
+    }
+    if(this.backend==="http" && this.httpEndpoint){
+      try {
+        const res = await fetch(this.httpEndpoint, {
+          method:"POST", headers:{ "Content-Type":"application/json", ...this.httpHeaders },
+          body: JSON.stringify({ type:item.type, content:item.content })
+        });
+        if(res.ok) return await res.json();
+      } catch(e){ console.warn("[AIPlugin] HTTP backend failed, fallback to local", e); }
+    }
+    // Fallback to local heuristic engine
+    return item.type==="image" ? await localAnalyzeImage(item.content) : localAnalyzeText(item.content);
+  }
+};
+
+let _itemKind = "image", _itemSource = "human";
+function setItemKind(k){ _itemKind = k; document.querySelectorAll(".mode-card[data-kind]").forEach(x=>x.classList.toggle("on", x.dataset.kind===k));
+  $("submit-image").style.display = k==="image"?"block":"none"; $("submit-text").style.display = k==="text"?"block":"none"; }
+function setItemSource(s){ _itemSource = s; document.querySelectorAll(".source-toggle button").forEach(x=>x.classList.toggle("on", x.dataset.toggle===s)); }
+document.addEventListener("DOMContentLoaded", ()=>{
+  document.querySelectorAll(".source-toggle button").forEach(b=>{
+    const txt = b.textContent; b.dataset.toggle = txt.includes("人类")?"human":"ai";
+  });
+});
+window.addEventListener("load", ()=>{
+  const jqf = $("judge-q-file");
+  if(jqf) jqf.addEventListener("change", e=>{
+    const f = e.target.files[0]; if(!f) return;
+    compressImage(f, data=>{
+      _jqImage = data;
+      const pv = $("judge-q-preview"); if(pv){ pv.src = data; pv.style.display = "block"; }
+      const st = $("jq-status"); if(st) st.innerText = "图片已就绪";
+    });
+  });
+  const dz = $("drop-zone"); if(!dz) return;
+  ["dragenter","dragover"].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.add("drag")}));
+  ["dragleave","drop"].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.remove("drag")}));
+  dz.addEventListener("drop", e=>{ const f = e.dataTransfer.files[0]; if(f) readAndSubmitImage(f); });
+  $("item-file").addEventListener("change", e=>{ const f=e.target.files[0]; if(f) readAndSubmitImage(f); });
+});
+function readAndSubmitImage(file){
+  compressImage(file, data=>{
+    pendingImage = { data, size: Math.round(data.length*0.75) };
+    toast("图片已就绪，点击「提交素材并封存答案」","ok");
+  });
+}
+let pendingImage = null;
+function submitItem(){
+  const room = DB.room(App.currentRoomId); if(!room) return;
+  if(room.owner!==App.uid && !room.judges.some(j=>j.uid===App.uid)) return toast("仅房主/裁判可提交素材","err");
+  if(_itemKind==="image"){
+    if(!pendingImage) return toast("请先选择图片","err");
+    const item = { id:"I"+now()+rand(100,999), type:"image", content:pendingImage.data, source:_itemSource,
+      submitter:App.username, ts:now(), size:pendingImage.size, sealed:true, revealed:false };
+    room.items = room.items||[]; room.items.push(item);
+    DB.saveRoom(room); pendingImage=null; $("item-file").value="";
+    toast("图片素材已提交，真答案已封存（等待裁判公布）","ok");
+  } else {
+    const txt = ($("item-text").value||"").trim();
+    if(!txt) return toast("请输入文字内容","err");
+    if(txt.length>2000) return toast("文字超 2000 字","err");
+    const item = { id:"I"+now()+rand(100,999), type:"text", content:txt, source:_itemSource,
+      submitter:App.username, ts:now(), size:txt.length, sealed:true, revealed:false };
+    room.items = room.items||[]; room.items.push(item);
+    DB.saveRoom(room); $("item-text").value="";
+    toast("文字素材已提交，真答案已封存（等待裁判公布）","ok");
+  }
+  // 触发 AI 后台静默分析（不阻塞 UI，不渲染前台）
+  backgroundAnalyze(room);
+  renderDiscern();
+}
+/* ====== 真人裁判出题（文字 / 图片） ====== */
+let _jqKind = "text", _jqImage = null;
+function setJqKind(k){
+  _jqKind = k;
+  document.querySelectorAll(".mode-card[data-jq]").forEach(x=>x.classList.toggle("on", x.dataset.jq===k));
+  $("jq-text-wrap").style.display = k==="text" ? "block" : "none";
+  $("jq-image-wrap").style.display = k==="image" ? "block" : "none";
+}
+function compressImage(file, cb, maxSide, quality){
+  if(file.size > 5*1024*1024) return toast("图片超过 5MB","err");
+  maxSide = maxSide || 1024; quality = quality || 0.82;
+  const fr = new FileReader();
+  fr.onload = e=>{
+    const img = new Image();
+    img.onload = ()=>{
+      let w = img.width, h = img.height;
+      const s = Math.min(1, maxSide/Math.max(w,h));
+      w = Math.max(1, Math.round(w*s)); h = Math.max(1, Math.round(h*s));
+      const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
+      cv.getContext("2d").drawImage(img, 0, 0, w, h);
+      try { cb(cv.toDataURL("image/jpeg", quality)); }
+      catch(err){ cb(e.target.result); }
+    };
+    img.onerror = ()=>cb(e.target.result);
+    img.src = e.target.result;
+  };
+  fr.readAsDataURL(file);
+}
+function submitJudgeQuestion(immediate){
+  const room = DB.room(App.currentRoomId); if(!room) return;
+  const isJudge = room.owner===App.uid || (room.judges||[]).some(j=>j.uid===App.uid);
+  if(!isJudge) return toast("仅裁判/房主可出题","err");
+  const txt = ($("judge-q-text").value||"").trim();
+  if(_jqKind==="text" && !txt) return toast("请输入题目内容","err");
+  if(_jqKind==="image" && !_jqImage) return toast("请先上传题目图片","err");
+  if(immediate){
+    if(!confirm("立即发布为本轮题目？将开启新一轮并覆盖当前题面。")) return;
+    const r = (room.round||0) + 1;
+    room.round = r;
+    room.questions = room.questions||{};
+    room.questions[r] = txt || "【图片题目】";
+    room.questionImages = room.questionImages||{};
+    room.questionImages[r] = _jqKind==="image" ? [{data:_jqImage, from:App.username}] : [];
+    room.answers = room.answers||{};
+    room.answers[r] = {};
+    room.roundStart = now();
+    room.startedAt = room.startedAt || now();
+    room.status = "playing";
+    DB.saveRoom(room);
+    toast("本轮题目已发布","ok");
+  } else {
+    room.pendingQ = room.pendingQ||[];
+    room.pendingQ.push({from:App.username, text: txt || "【图片题目】", image: _jqKind==="image"?_jqImage:"", ts:now()});
+    DB.saveRoom(room);
+    toast("已加入待开局队列，房主点击「开始统一作答」后公布","ok");
+  }
+  _jqImage = null;
+  const pv = $("judge-q-preview"); if(pv){ pv.style.display="none"; pv.removeAttribute("src"); }
+  $("judge-q-text").value = "";
+  const st = $("jq-status"); if(st) st.innerText = "";
+  renderRoom();
+}
+function backgroundAnalyze(room){
+  // 对所有还没被 AI 分析过的素材跑后台分析
+  (async ()=>{
+    const r = DB.room(room.id); if(!r) return;
+    r.aiVerdicts = r.aiVerdicts||{};
+    let pending = r.items.filter(it=> !r.aiVerdicts[it.id] );
+    if(!pending.length) return;
+    for(const it of pending){
+      try {
+        const v = await AIPlugin.analyze(it);
+        r.aiVerdicts[it.id] = { ...v, ts:now() };
+      } catch(e){
+        console.warn("[AIPlugin] analyze failed for", it.id, e);
+      }
+    }
+    DB.saveRoom(r);
+  })();
+}
+
+/* ====== 本地启发式引擎（作为 AIPlugin fallback） ====== */
+async function localAnalyzeImage(dataUrl){
+  const f = await new Promise(resolve=>{
+    const img = new Image(); img.crossOrigin="anonymous";
+    img.onload = ()=>{
+      const cv = document.createElement("canvas"); cv.width=128; cv.height=128; const c=cv.getContext("2d");
+      c.drawImage(img,0,0,128,128);
+      const d = c.getImageData(0,0,128,128).data, N = 128*128;
+      let sR=0,sG=0,sB=0;
+      for(let i=0;i<N;i++){ sR+=d[i*4]; sG+=d[i*4+1]; sB+=d[i*4+2]; }
+      const mR=sR/N,mG=sG/N,mB=sB/N;
+      let vR=0,vG=0,vB=0;
+      for(let i=0;i<N;i++){ vR+=(d[i*4]-mR)**2; vG+=(d[i*4+1]-mG)**2; vB+=(d[i*4+2]-mB)**2; }
+      const varR=Math.sqrt(vR/N), varG=Math.sqrt(vG/N), varB=Math.sqrt(vB/N);
+      const colorVar=(varR+varG+varB)/3/128;
+      let lap=0;
+      for(let y=1;y<127;y++) for(let x=1;x<127;x++){
+        const i=(y*128+x)*4; const g=(d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114);
+        const iL=(y*128+(x-1))*4,iR=((y-1)*128+x)*4,iU=(y*128+(x+1))*4,iD=((y+1)*128+x)*4;
+        const gL=(d[iL]*0.299+d[iL+1]*0.587+d[iL+2]*0.114);
+        const gR=(d[iR]*0.299+d[iR+1]*0.587+d[iR+2]*0.114);
+        const gU=(d[iU]*0.299+d[iU+1]*0.587+d[iU+2]*0.114);
+        const gD=(d[iD]*0.299+d[iD+1]*0.587+d[iD+2]*0.114);
+        lap+=Math.abs(-4*g+gL+gR+gU+gD);
+      }
+      const sharpness=lap/(126*126*4*255);
+      const hist=new Array(16).fill(0);
+      for(let i=0;i<N;i++){ const gray=(d[i*4]*0.299+d[i*4+1]*0.587+d[i*4+2]*0.114); hist[Math.min(15,Math.floor(gray/16))]++; }
+      let H=0; hist.forEach(h=>{ if(h>0){ const p=h/N; H-=p*Math.log2(p); }});
+      const entropy=H/Math.log2(16);
+      let noise=0; for(let i=0;i<N;i++) noise+=Math.abs((d[i*4]-128)+(d[i*4+1]-128)+(d[i*4+2]-128));
+      const noiseLevel=noise/(N*3*128);
+      let covRG=0,covRB=0;
+      for(let i=0;i<N;i++){ covRG+=(d[i*4]-mR)*(d[i*4+1]-mG); covRB+=(d[i*4]-mR)*(d[i*4+2]-mB); }
+      const corrRG=covRG/(Math.sqrt(vR)*Math.sqrt(vG)*N+1e-6); const corrRB=covRB/(Math.sqrt(vR)*Math.sqrt(vB)*N+1e-6);
+      const channelCorr=Math.abs((corrRG+corrRB)/2);
+      resolve({ colorVar, sharpness, entropy, noiseLevel, channelCorr });
+    };
+    img.onerror=()=>resolve({colorVar:.5,sharpness:.5,entropy:.5,noiseLevel:.5,channelCorr:.5});
+    img.src=dataUrl;
+  });
+  const aiScore=(1-f.colorVar)*.28+(1-f.sharpness)*.30+(1-f.channelCorr)*.22+(1-f.entropy)*.10+f.noiseLevel*.10;
+  const verdict=aiScore>.55?"ai":"human";
+  const confPct=Math.round(Math.max(52,Math.min(95,aiScore*100)));
+  const conf=verdict==="ai"?confPct:100-confPct;
+  const features=[
+    {n:"色彩方差",v:Math.round(f.colorVar*100),tip:"色彩越单一越像 AI 生成"},
+    {n:"锐度",v:Math.round(f.sharpness*100),tip:"边缘模糊/涂抹感 → AI"},
+    {n:"通道相关性",v:Math.round(f.channelCorr*100),tip:"RGB 通道解耦是 AI 常见特征"},
+    {n:"直方图熵",v:Math.round(f.entropy*100),tip:"色彩分布形态"},
+    {n:"噪声级别",v:Math.round(f.noiseLevel*100),tip:"像素颗粒感"}
+  ];
+  return { verdict, conf, features, explain: buildImageExplain(verdict, f) };
+}
+function localAnalyzeText(text){
+  const len=text.length, chars=text.replace(/\s/g,"").length;
+  const unique=new Set(text.replace(/\s/g,"")).size; const ttr=chars>0?unique/chars:0;
+  const sents=text.split(/[。！？\.!\?\n]+/).filter(s=>s.trim().length>0);
+  const slens=sents.map(s=>s.length); const avg=slens.reduce((a,b)=>a+b,0)/(slens.length||1);
+  const sVar=slens.length?Math.sqrt(slens.reduce((a,b)=>a+(b-avg)**2,0)/slens.length)/(avg+1):0;
+  const aiClichés=[/综上所述|总而言之|不难发现|值得注意的是|我们可以|我们应该|需要指出的是/i,/随着.*的发展|在当今.*时代|不仅.*而且|一方面.*另一方面|具体而言/i,/我想|我认为|我觉得|显而易见|事实上|实际上/i,/让我们|首先.*其次.*最后|第一.*第二.*第三|对于.*而言/i];
+  let hit=0; aiClichés.forEach(r=>r.test(text)&&hit++); const clicheScore=hit/aiClichés.length;
+  const puncts=(text.match(/[，。！？、；：""''（）]/g)||[]).length; const punctDensity=puncts/(len||1);
+  const connectives=[/但是|然而|不过|因此|所以|因为|由于|虽然|尽管|而且|并且|或者|如果|假如|除非|只要|当/gi];
+  let cHit=0; connectives.forEach(r=>{ const m=text.match(new RegExp(r.source,"g")); if(m) cHit+=m.length; });
+  const connDensity=cHit/(chars/100+1);
+  const f={ttr,sentVar:sVar,clicheScore,punctDensity,connDensity};
+  const aiScore=f.clicheScore*.35+(1-f.sentVar)*.25+(1-f.ttr)*.15+Math.min(1,f.connDensity/2)*.15+Math.min(1,Math.abs(f.punctDensity-.08)*10)*.10;
+  const verdict=aiScore>.55?"ai":"human";
+  const confPct=Math.round(Math.max(52,Math.min(96,aiScore*100)));
+  const conf=verdict==="ai"?confPct:100-confPct;
+  const features=[
+    {n:"词汇丰富度",v:Math.round(f.ttr*100),tip:"唯一字符占比"},
+    {n:"句长方差",v:Math.round(f.sentVar*100),tip:"长短错落 → 人类"},
+    {n:"AI 套话命中",v:Math.round(f.clicheScore*100),tip:"模板化比例"},
+    {n:"连接词密度",v:Math.round(Math.min(100,f.connDensity*20)),tip:"每 100 字连接词数"},
+    {n:"标点密度",v:Math.round(f.punctDensity*100),tip:"人类标点更自由"}
+  ];
+  return { verdict, conf, features, explain: buildTextExplain(verdict, f) };
+}
+function buildImageExplain(verdict,f){
+  const t1=verdict==="ai"?"色彩通道解耦明显、边缘锐度偏低，呈现出 AI 生成常见的「涂抹感」与细节过度平滑":"RGB 通道强相关、边缘锐度较高，色彩分布更接近真实世界观察";
+  const t2=verdict==="ai"?"深度学习生成器（Stable Diffusion/DALL·E/Midjourney）训练时学到的纹理先验常导致：高频细节被均匀化、纹理重复性高、局部出现非真实的对称结构":"真实场景天然存在光影随机性、镜头畸变、对焦模糊、噪点分布不均匀等「无规律痕迹」，AI 生成器难以完整复刻";
+  const t3=verdict==="ai"?"现代判别：像素域统计特征（方差/熵/锐度）+ 频域分析（噪声谱）+ 深度学习检测器（ForensicNet）；2024 后 Diffusion 图被发现常保留 LSB 签名或频域条纹痕迹":"相机照片携带 EXIF 元数据、JPEG 压缩痕迹（块效应规律）；油画/手绘有笔触纹理、颜料物理堆积特征，AI 难以精确伪造";
+  const hk=verdict==="ai"?"鉴别 AI 图片的三个小技巧：① 看手指/耳朵/玻璃这类高频出错的「AI 盲点」；② 放大看边缘是否有「塑料感」；③ 用 Forensically.ai 查 JPEG 压缩历史是否一致":"「真实」有三个层次：相机捕捉的物理真实、手绘/油画的艺术真实、CG 渲染的计算真实——三者纹理统计特征完全不同，AI 图常落在三者的「中间地带」";
+  const oq=verdict==="ai"?"反过来说：当生成器足够好，人和 AI 的差异会收敛到「不可区分」——我们是否会接受一个「看起来像人」的机器作品？":"但「看起来像人」的真实作品也可能被 AI 完美复刻（Deepfake/GenImage）。未来图像水印（SynthID）会成为区分 AI 内容的唯一可靠手段";
+  return `📐 【判别依据】\n色彩方差 ${Math.round(f.colorVar*100)} / 锐度 ${Math.round(f.sharpness*100)} / 通道相关 ${Math.round(f.channelCorr*100)} → ${verdict==="ai"?"更像 AI 生成":"更像真实作品"}\n\n🧪 【生成原理】\n${t1}\n\n🔬 【技术背景】\n${t2}\n\n📐 【现代判别方法】\n${t3}\n\n💡 【科普小知识】\n${hk}\n\n❓ 【开放思考】\n${oq}`;
+}
+function buildTextExplain(verdict,f){
+  const t1=verdict==="ai"?`词汇丰富度 ${Math.round(f.ttr*100)}% 处于「AI 典型区间」、套话命中率 ${Math.round(f.clicheScore*100)}% 偏高`:`词汇丰富度 ${Math.round(f.ttr*100)}%、句长变化显著（${Math.round(f.sentVar*100)}% 方差），符合人类写作节奏`;
+  const t2=verdict==="ai"?`LLM 本质是预测「下一个最可能出现的词」——训练数据高频表达被放大，导致连接词密度异常高（${Math.round(Math.min(100,f.connDensity*20))}分）、论述模板化、常在「正确但空泛」的安全区打转`:`人类写作受动机/情绪/知识盲点驱动：会突然换话题、用不规范口语、出现语气词、引用个人经历——这些是 LLM 很难「自然」生成的`;
+  const t3=verdict==="ai"?`文本判别主流：困惑度 Perplexity、句嵌入分布、水印法（DetectGPT/GLTR/Radford 水印/EXPEL）；2024 后「水印擦除」成为对抗主流`:`人类独有特征：指称混乱（代词模糊）、自我修正（「嗯不对应该是…」）、上下文记忆跳跃、文化典故随意引用、口语停顿词`;
+  const hk=verdict==="ai"?`鉴别 AI 文本：① 看它「太顺」——没有人类那种磕绊；② 随机抽一句追问细节，AI 常在追问下露馅；③ 用 GPTZero、Crossplag 测困惑度分布`:`有趣反转：有些「AI 风格」正在反向影响人类写作——学生用 AI 润色后自己的语言节奏也向 AI 收敛，检测 AI 也变成检测「被 AI 污染的人类」`;
+  const oq=verdict==="ai"?`如果一段文本让你分不清是人写的还是 AI 写的，你会更信任它吗？涉及「文本真实性」的本质：真实的是创作者，还是真实的是内容？`:`反过来，当 AI 故意模仿人类不完美（口误/错别字/语病），检测器会判它为人类——这正是 LLM 对齐研究的核心张力：让 AI 安全 vs 让 AI 像人`;
+  return `📐 【判别依据】\n词汇丰富度 ${Math.round(f.ttr*100)} / 句长方差 ${Math.round(f.sentVar*100)} / AI 套话命中 ${Math.round(f.clicheScore*100)} → ${verdict==="ai"?"更像 AI 生成":"更像人类写作"}\n\n🧪 【生成原理】\n${t1}\n\n🔬 【技术背景】\n${t2}\n\n📐 【现代判别方法】\n${t3}\n\n💡 【科普小知识】\n${hk}\n\n❓ 【开放思考】\n${oq}`;
+}
+
+/* ====== 裁判公布 & 计分 ====== */
+function revealAllDiscern(){
+  const room=DB.room(App.currentRoomId); if(!room) return;
+  if(!room.items.length) return toast("还没有素材无法揭晓","err");
+  if(room.owner!==App.uid && !room.judges.some(j=>j.uid===App.uid)) return toast("仅裁判/房主可公布答案","err");
+  if(!confirm("即将揭晓所有素材的裁判真答案、算分并生成 AI 复盘解说，确认？")) return;
+  room.items.forEach(it=> it.revealed=true);
+  room.revealed = true;
+  scoreRoom(room);
+  DB.saveRoom(room);
+  // 后台分析（如果还有没分析完的素材）
+  backgroundAnalyze(room);
+  toast(`✅ 已揭晓 · AI 引擎正在生成复盘解说…`,`ok`);
+  renderDiscern();
+  // 延迟一下让 AI 分析跑一会儿再刷新（同时后台会自动 save，下一次轮询会刷新）
+  setTimeout(renderDiscern, 1200);
+}
+function revealOnePending(){
+  const room=DB.room(App.currentRoomId); if(!room) return;
+  if(room.owner!==App.uid && !room.judges.some(j=>j.uid===App.uid)) return toast("仅裁判/房主可操作","err");
+  const pending = room.items.filter(it=>!it.revealed);
+  if(!pending.length) return toast("没有待公布的素材（可能已全部公布）","warn");
+  pending.forEach(it=> it.revealed=true);
+  const allRevealed = room.items.every(it=>it.revealed);
+  if(allRevealed){ room.revealed=true; scoreRoom(room); }
+  else toast(`已公布 ${pending.length} 份素材（还有 ${room.items.filter(it=>!it.revealed).length} 份未公布）`,"ok");
+  DB.saveRoom(room);
+  backgroundAnalyze(room);
+  renderDiscern();
+  if(allRevealed) setTimeout(renderDiscern, 1200);
+}
+function scoreRoom(room){
+  const scores = {};
+  const players = room.players.filter(p=>!p.isAI);
+  players.forEach(p=> scores[p.uid] = 0);
+  room.items.forEach(it=>{
+    players.forEach(p=>{
+      const v = (room.votes[it.id]||{})[p.uid];
+      if(v===it.source) scores[p.uid] = (scores[p.uid]||0)+3;
+      else scores[p.uid] = (scores[p.uid]||0)-2;
+    });
+  });
+  room.scores = scores;
+}
+function resetDiscern(){
+  const room=DB.room(App.currentRoomId); if(!room) return;
+  if(!confirm("清空全部素材、判别、AI 分析与分数，确认？")) return;
+  room.items=[]; room.votes={}; room.aiVerdicts={}; room.scores={};
+  room.revealed=false; room.revealResult=null;
+  room._clearItems = true;
+  DB.saveRoom(room); toast("已重置进阶判别赛场","ok"); renderDiscern();
+}
+async function runAllAiAnalysis(silent){
+  const room=DB.room(App.currentRoomId); if(!room) return;
+  if(room.owner!==App.uid && !room.judges.some(j=>j.uid===App.uid)) return toast("仅裁判/房主可触发","err");
+  if(!room.items.length){ if(!silent) toast("还没有素材","err"); return; }
+  room.aiVerdicts = room.aiVerdicts||{};
+  let count=0;
+  for(const it of room.items){
+    try {
+      const v = await AIPlugin.analyze(it);
+      room.aiVerdicts[it.id] = { ...v, ts:now() }; count++;
+    } catch(e){ console.warn(e); }
+  }
+  DB.saveRoom(room);
+  if(!silent) toast(`已强制后台分析 ${count} 份素材（裁判公布答案后解说会自动渲染）`,"ok");
+  if(room.revealed) renderDiscern(); // 已揭晓则刷新
+}
+
+/* ====== 渲染 ====== */
+function renderDiscern(){
+  const room=DB.room(App.currentRoomId); if(!room) return;
+  const isJudge = room.owner===App.uid || room.judges.some(j=>j.uid===App.uid);
+  $("discern-submit-panel").style.display = isJudge?"block":"none";
+  $("reveal-panel").style.display = (isJudge && room.items.length)?"block":"none";
+  // 素材墙
+  $("item-count").textContent = room.items.length;
+  const wall = $("item-wall");
+  if(!room.items.length){ wall.innerHTML='<div class="dim">暂无素材，裁判请先提交</div>'; }
+  else wall.innerHTML = room.items.map(it=>{
+    const showTruth = it.revealed; // 裁判封存即 reveal 为 true；未公布前玩家/AI 都看不到
+    return `<div class="item-card" data-item="${it.id}">
+      ${showTruth ? `<span class="truth-badge ${it.source==='human'?'tr-human':'tr-ai'}">裁判判准: ${it.source==='human'?'🧑 人类':'🤖 AI'}</span>` : `<span class="truth-badge" style="background:rgba(59,130,246,.12);color:var(--blue);border:1px dashed rgba(59,130,246,.3)">🔒 裁判答案已封存</span>`}
+      <div class="thumb">${it.type==='image' ? `<img src="${it.content}" />` : `<div class="txt-thumb">${escapeHtml(it.content)}</div>`}</div>
+      <div class="foot">
+        <span class="tag ${it.type==='image'?'tag-img':'tag-txt'}">${it.type==='image'?'🖼 IMAGE':'📝 TEXT'}</span>
+        <span class="dim" style="font-size:11px">提交 ${escapeHtml(it.submitter)} · ${fmtTime(it.ts)}</span>
+      </div>
+    </div>`;
+  }).join("");
+  // 选手判别面板
+  const panel = $("vote-panel");
+  if(!room.items.length){ panel.innerHTML='<div class="dim center" style="padding:20px">等待裁判提交素材</div>'; }
+  else {
+    panel.innerHTML = room.items.map(it=>{
+      const mv = (room.votes[it.id]||{})[App.uid];
+      return `<div class="vote-row" data-item="${it.id}">
+        <div class="nm">${it.type==='image'?'🖼':'📝'} ${escapeHtml(it.submitter)}</div>
+        <button class="vote-btn ${mv==='human'?'picked-human':''}" onclick="voteItem('${it.id}','human')">🧑 人类</button>
+        <button class="vote-btn ${mv==='ai'?'picked-ai':''}" onclick="voteItem('${it.id}','ai')">🤖 AI</button>
+        ${mv?`<span class="dim" style="font-size:11px">已选 ${mv==='human'?'人类':'AI'}</span>`:'<span class="dim" style="font-size:11px">未判别</span>'}
+      </div>`;
+    }).join("");
+  }
+  // 复盘解说区（仅已公布的素材 + 已被 AI 分析的才渲染）
+  renderExplain(room);
+  // 排行榜
+  if(room.revealed && room.scores){
+    const sorted = Object.entries(room.scores).sort((a,b)=>b[1]-a[1]);
+    const max = Math.max(1, sorted[0]?.[1]||1);
+    $("scoreboard").innerHTML = sorted.map(([uid,s])=>{
+      const u = room.players.find(p=>p.uid===uid) || room.judges.find(j=>j.uid===uid) || {name:uid};
+      return `<div class="score-row">
+        <b>${escapeHtml(u.name)}</b>
+        <div class="bar-wrap"><div class="bar-fill" style="width:${Math.max(5,s/max*100)}%"></div></div>
+        <span class="pts">${s}</span>
+      </div>`;
+    }).join("");
+  } else {
+    $("scoreboard").innerHTML = '<div class="dim">尚未揭晓</div>';
+  }
+}
+function renderExplain(room){
+  const box = $("explain-box");
+  const verdicts = room.aiVerdicts = room.aiVerdicts||{};
+  // 只渲染裁判已公布 (it.revealed===true) 且 AI 已分析过的素材
+  const ready = room.items.filter(it=> it.revealed && verdicts[it.id] );
+  const pending = room.items.filter(it=> it.revealed && !verdicts[it.id] );
+  if(!room.items.length){
+    box.innerHTML = '<div class="dim center" style="padding:30px">暂无素材</div>';
+    return;
+  }
+  if(!ready.length && !room.revealed){
+    box.innerHTML = '<div class="dim center" style="padding:30px">等待裁判公布答案…公布后，AI 视觉 / 文本引擎将自动为每份素材生成<br>📐 判别依据 + 🧪 技术原理 + 💡 科普小知识 + ❓ 开放思考</div>';
+    return;
+  }
+  if(!ready.length && room.revealed){
+    box.innerHTML = `<div class="dim center" style="padding:30px">AI 引擎正在后台分析 ${pending.length} 份素材…稍等片刻自动刷新</div>`;
+    return;
+  }
+  box.innerHTML = ready.map(it=>{
+    const v = verdicts[it.id];
+    const correct = v.verdict === it.source;
+    return `<div class="ai-result" style="margin-top:10px">
+      <div class="verdict-big ${v.verdict==='human'?'human':'ai'}">
+        ${v.verdict==='human'?'🧑 AI 判别：真实人类作品':'🤖 AI 判别：AI 生成作品'}
+        <span class="conf">置信度 ${v.conf}%</span>
+        <span class="dim" style="font-size:12px;margin-left:14px">· 裁判判准 ${it.source==='human'?'🧑':'🤖'} · ${correct?'<span class="ok">✅ AI 引擎命中</span>':'<span class="err">❌ AI 引擎误判</span>'}</span>
+      </div>
+      <div class="explain-box">
+        <div style="color:var(--dim);font-size:11px;margin-bottom:6px">素材来源：${escapeHtml(it.submitter)} · ${fmtTime(it.ts)} · ${it.type==='image'?'🖼 图片':'📝 文字'}</div>
+        ${v.explain}
+      </div>
+    </div>`;
+  }).join("") + (pending.length? `<div class="dim center" style="padding:15px">⏳ 还有 ${pending.length} 份素材 AI 正在后台分析…</div>`:"");
+}
+function voteItem(itemId, verdict){
+  const room=DB.room(App.currentRoomId); if(!room) return;
+  if(room.items.find(it=>it.id===itemId && it.revealed)) return toast("该素材裁判已封存，不能再投票","err");
+  room.votes=room.votes||{}; room.votes[itemId]=room.votes[itemId]||{};
+  room.votes[itemId][App.uid]=verdict;
+  DB.saveRoom(room); toast(`已提交判断：${verdict==='human'?'🧑 人类':'🤖 AI'}`,"ok");
+  renderDiscern();
+}
+
+/* ---------- 22. 启动 ---------- */
+(async function init(){
+  initCanvas();
+  const t = localStorage.getItem("turing_theme");
+  if(t){ document.body.setAttribute("data-theme", t);
+    document.querySelectorAll(".theme-switch i").forEach(x=>x.classList.toggle("on", x.dataset.t===t)); }
+  // 探测联机后端；失败则自动进入离线本地模式
+  await Api.ping();
+  const sess = DB.session();
+  if(sess && sess.uid){
+    if(Api.online){
+      App.uid = sess.uid;
+      App.username = sess.name || (DB.users()[sess.uid]||{}).name || sess.uid;
+      afterLogin();
+      return;
+    }
+    const u = DB.users()[sess.uid];
+    if(u){ App.uid=sess.uid; App.username=u.name; afterLogin(); return; }
+  }
+  switchPage("login");
+})();
+</script>
+</body>
+</html>
