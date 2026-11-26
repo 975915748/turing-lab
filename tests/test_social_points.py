@@ -296,7 +296,7 @@ def test_match_points_settle_once_and_survive_clear_restart_and_room_delete(env)
 
 
 def test_mixed_human_ai_judges_tie_is_loss_and_removed_player_is_not_settled(env):
-    _, _, admin, host, player, removed, judge = env
+    path, _, admin, host, player, removed, judge = env
     created = post(host, "/api/rooms", {"title": "混合裁判与退赛"})
     base = f"/api/rooms/{created['room_id']}"
     host_alias = post(host, "/api/join", {"code": created["code"]})["alias"]
@@ -310,9 +310,14 @@ def test_mixed_human_ai_judges_tie_is_loss_and_removed_player_is_not_settled(env
     post(host, base + "/start", match=1)
 
     removed_id = removed.get("/api/me").json()["user"]["id"]
+    with db_open(path) as db:
+        db.execute(
+            "INSERT INTO account_points(user_id,points,streak,updated_at) VALUES(?,?,?,?)",
+            (removed_id, "36", "3", "2026-11-26T00:00:00+00:00"),
+        )
     post(host, f"{base}/members/{removed_id}/remove", match=1)
     assert removed.get("/api/me").json()["user"]["name_change_locked"] is False
-    renamed = put(removed, "/api/me/profile", {"display_name": "退赛后可改名"})
+    renamed = request(removed, "PUT", "/api/me/profile", {"display_name": "退赛后可改名"})
     assert renamed["user"]["display_name"] == "退赛后可改名"
 
     post(host, base + "/answers", {"text": "房主回答"}, match=1)
@@ -334,7 +339,7 @@ def test_mixed_human_ai_judges_tie_is_loss_and_removed_player_is_not_settled(env
     assert host.get("/api/me/social").json()["points"]["total_points"] == "-10"
     assert player.get("/api/me/social").json()["points"]["total_points"] == "-10"
     assert removed.get("/api/me/social").json()["points"] == {
-        "total_points": "0", "current_streak": "0"
+        "total_points": "36", "current_streak": "3"
     }
     assert admin.get("/api/me/social").json()["points"] == {
         "total_points": "0", "current_streak": "0"
