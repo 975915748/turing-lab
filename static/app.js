@@ -1,13 +1,13 @@
 'use strict';
 const $ = (selector) => document.querySelector(selector);
 const app = $('#app');
-const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelSavePending:{},social:null,dmMessages:[],dmBeforeId:null,dmHasMore:false,dmSocket:null,personalModelEpoch:0,modelOperationRecords:[],modelOperationStats:{},modelOperationProfileOptions:[],modelOperationTotal:0,modelOperationOffset:0,modelOperationFilters:{profile_id:'',purpose:'',status:''},modelOperationsExpanded:false,modelOperationRequestVersion:0,modelOperationHistoryPanels:{},dmUid:null,dmOtherName:'',dmCanSend:false,dmPending:null,dmReconnect:null,dmLoadVersion:0,socialEpoch:0,pointsLedgerEntries:[],pointsLedgerBeforeId:null,pointsLedgerHasMore:false,pointsLedgerLoaded:false};
+const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelSavePending:{},social:null,dmMessages:[],dmBeforeId:null,dmHasMore:false,dmSocket:null,personalModelEpoch:0,modelOperationRecords:[],modelOperationStats:{},modelOperationProfileOptions:[],modelOperationTotal:0,modelOperationOffset:0,modelOperationFilters:{profile_id:'',purpose:'',status:''},modelOperationsExpanded:false,modelOperationRequestVersion:0,modelOperationHistoryPanels:{},dmUid:null,dmOtherName:'',dmCanSend:false,dmPending:null,dmDraft:'',dmReconnect:null,dmLoadVersion:0,socialEpoch:0,pointsLedgerEntries:[],pointsLedgerBeforeId:null,pointsLedgerHasMore:false,pointsLedgerLoaded:false};
 const esc = (v) => String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const shortDate = s => s ? new Date(s).toLocaleString('zh-CN',{hour12:false}) : '';
 const val = (id) => document.getElementById(id)?.value??'';
 const D = (txt='暂无记录') => `<p class="muted hint">${esc(txt)}</p>`;
 let toastTimer;
-function clearPersonalModelState(){stopDmWs();state.social=null;state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;state.dmOtherName='';state.dmCanSend=false;state.dmPending=null;state.dmLoadVersion++;state.socialEpoch++;state.pointsLedgerEntries=[];state.pointsLedgerBeforeId=null;state.pointsLedgerHasMore=false;state.pointsLedgerLoaded=false;state.personalModelEpoch=(state.personalModelEpoch||0)+1;state.modelOperationRequestVersion=(state.modelOperationRequestVersion||0)+1;state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};state.personalModelTestVersions={};state.personalModelTestPending={};state.personalModelSavePending={};state.modelOperationRecords=[];state.modelOperationStats={};state.modelOperationProfileOptions=[];state.modelOperationTotal=0;state.modelOperationOffset=0;state.modelOperationFilters={profile_id:'',purpose:'',status:''};state.modelOperationsExpanded=false;state.modelOperationHistoryPanels={};}
+function clearPersonalModelState(){stopDmWs();state.social=null;state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;state.dmOtherName='';state.dmCanSend=false;state.dmPending=null;state.dmDraft='';state.dmLoadVersion++;state.socialEpoch++;state.pointsLedgerEntries=[];state.pointsLedgerBeforeId=null;state.pointsLedgerHasMore=false;state.pointsLedgerLoaded=false;state.personalModelEpoch=(state.personalModelEpoch||0)+1;state.modelOperationRequestVersion=(state.modelOperationRequestVersion||0)+1;state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};state.personalModelTestVersions={};state.personalModelTestPending={};state.personalModelSavePending={};state.modelOperationRecords=[];state.modelOperationStats={};state.modelOperationProfileOptions=[];state.modelOperationTotal=0;state.modelOperationOffset=0;state.modelOperationFilters={profile_id:'',purpose:'',status:''};state.modelOperationsExpanded=false;state.modelOperationHistoryPanels={};}
 function toast(message){const el=$('#toast');el.textContent=message;el.classList.add('visible');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('visible'),4200)}
 function setConnection(txt,online){const el=$('#connection');el.textContent=(online?'● ':'○ ')+txt;el.className='connection'+(online?' online':'')}
 function applyPrefs(){let theme=localStorage.getItem('turing_theme')||'light';document.body.dataset.theme=theme;$('#themeBtn').textContent=theme==='light'?'☾ 深色':'☀ 日间';let f=Number(localStorage.getItem('turing_font')||15);if(f<12||f>22)f=15;document.documentElement.style.setProperty('--font',f+'px');$('#fontSize').value=f;$('#fontValue').textContent=f;}
@@ -200,7 +200,7 @@ function stopDmWs(){
 }
 function clearDmState(){
  stopDmWs();state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;
- state.dmOtherName='';state.dmCanSend=false;state.dmPending=null;state.dmLoadVersion++;
+ state.dmOtherName='';state.dmCanSend=false;state.dmPending=null;state.dmDraft='';state.dmLoadVersion++;
 }
 async function loadSocial(){
  const uid=state.me?.user?.uid,version=++state.socialEpoch;
@@ -209,8 +209,8 @@ async function loadSocial(){
  state.social=data;
  if(state.dmUid){
   const conv=state.social.conversations?.find(x=>x.uid===state.dmUid);
-  if(conv){state.dmCanSend=!!conv.can_send;if(conv.display_name)state.dmOtherName=conv.display_name;if(!conv.can_send)state.dmPending=null;}
-  else {state.dmCanSend=false;state.dmPending=null;}
+  if(conv){state.dmCanSend=!!conv.can_send;if(conv.display_name)state.dmOtherName=conv.display_name;if(!conv.can_send){state.dmPending=null;state.dmDraft='';}}
+  else {state.dmCanSend=false;state.dmPending=null;state.dmDraft='';}
  }
  return state.social;
 }
@@ -222,18 +222,25 @@ function mergeLedgerEntries(...groups){
  const map=new Map();for(const group of groups)for(const entry of group||[])map.set(Number(entry.id),entry);
  return [...map.values()].sort((a,b)=>Number(b.id)-Number(a.id));
 }
+function captureDmDraft(){
+ const form=$('#dmPanel form[data-form="dm-send"]');
+ if(form&&form.dataset.uid===state.dmUid){
+  const textarea=form.querySelector('textarea[name="text"]');
+  if(textarea)state.dmDraft=textarea.value;
+ }
+}
 function dmMessageHtml(m){
  return `<div class="feed-item dm-message ${m.mine?'mine':''}"><strong>${m.mine?'我':esc(m.sender_name)}</strong><div class="feed-text">${esc(m.text)}</div><div class="tiny muted">${esc(shortDate(m.created_at))}</div></div>`;
 }
 function renderDmPanel(){
  const box=$('#dmPanel');if(!box)return;
+ captureDmDraft();
  const uid=state.dmUid;if(!uid){box.innerHTML='';return;}
  const friend=state.social?.friends?.find(x=>x.uid===uid);
  const conv=state.social?.conversations?.find(x=>x.uid===uid);
  const title=friend?.note||conv?.note||state.dmOtherName||uid;
  const canSend=conv?!!conv.can_send:state.dmCanSend;
- const pending=state.dmPending?.uid===uid?state.dmPending:null;
- box.innerHTML=`<div class="divider"></div><div class="label-line"><h3>与 ${esc(title)}（${esc(uid)}）私信</h3><button class="small" data-action="dm-close">收起</button></div><div class="feed" id="dmFeed" aria-live="polite">${state.dmMessages.map(dmMessageHtml).join('')||D('暂无消息')}</div>${state.dmHasMore?`<button class="small" data-action="dm-older" data-uid="${esc(uid)}">加载更早消息</button>`:''}${canSend?`<form data-form="dm-send" data-uid="${esc(uid)}"><textarea name="text" maxlength="2000" required placeholder="输入私信">${esc(pending?.text||'')}</textarea><div class="form-actions"><span class="hint">纯文本 · 最多 2000 字</span><button class="primary" type="submit">发送</button></div></form>`:D('好友关系已解除，只能查看历史消息。')}`;
+ box.innerHTML=`<div class="divider"></div><div class="label-line"><h3>与 ${esc(title)}（${esc(uid)}）私信</h3><button class="small" data-action="dm-close">收起</button></div><div class="feed" id="dmFeed" aria-live="polite">${state.dmMessages.map(dmMessageHtml).join('')||D('暂无消息')}</div>${state.dmHasMore?`<button class="small" data-action="dm-older" data-uid="${esc(uid)}">加载更早消息</button>`:''}${canSend?`<form data-form="dm-send" data-uid="${esc(uid)}"><textarea name="text" maxlength="2000" required placeholder="输入私信">${esc(state.dmDraft||'')}</textarea><div class="form-actions"><span class="hint">纯文本 · 最多 2000 字</span><button class="primary" type="submit">发送</button></div></form>`:D('好友关系已解除，只能查看历史消息。')}`;
  const feed=$('#dmFeed');if(feed)feed.scrollTop=feed.scrollHeight;
 }
 async function markDmRead(uid,messageId,{refresh=true,accountUid=state.me?.user?.uid}={}){
@@ -244,6 +251,7 @@ async function markDmRead(uid,messageId,{refresh=true,accountUid=state.me?.user?
 }
 async function openDm(uid){
  const version=++state.dmLoadVersion,accountUid=state.me?.user?.uid;
+ if(state.dmUid!==uid)state.dmDraft='';
  state.dmUid=uid;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;
  renderDmPanel();
  const data=await api('/api/messages/'+encodeURIComponent(uid));
@@ -511,6 +519,7 @@ function renderSocialPanel(){
 }
 function renderPersonalCenter({skipModelDraftKey=null}={}){
  const u=state.me?.user;if(!u){clearPersonalModelState();renderAuth();return;}
+ captureDmDraft();
  capturePersonalModelDrafts(skipModelDraftKey);
  if(skipModelDraftKey)delete state.personalModelDrafts[skipModelDraftKey];
  stopWs();
@@ -746,6 +755,8 @@ app.addEventListener('toggle',e=>{
  if(e.target.matches('details[data-model-operation-history]'))state.modelOperationHistoryPanels[e.target.dataset.key]=e.target.open;
 },true);
 app.addEventListener('input',e=>{
+ const dmInput=e.target.closest('form[data-form="dm-send"] textarea[name="text"]');
+ if(dmInput){state.dmDraft=dmInput.value;return;}
  const modelForm=e.target.closest('form[data-form="personal-model-edit"]');
  if(modelForm)invalidatePersonalModelTest(Number(modelForm.dataset.id));
  if(e.target.dataset?.chatDraft!==undefined){state.chatDraft=e.target.value;return;}
@@ -766,7 +777,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
   if(action==='toggle-legacy-login'){state.legacyLogin=!state.legacyLogin;renderAuth()}
   if(action==='copy-uid'){if(!b.dataset.uid)throw new Error('UID 不可用');await navigator.clipboard.writeText(b.dataset.uid);toast('UID 已复制')}
   if(action==='dm-open')await openDm(b.dataset.uid);
-  if(action==='dm-close'){state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;state.dmPending=null;renderDmPanel();}
+  if(action==='dm-close'){state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;state.dmPending=null;state.dmDraft='';renderDmPanel();}
   if(action==='dm-older')await loadOlderDm(b.dataset.uid);
   if(action==='friend-accept'||action==='friend-reject'||action==='friend-withdraw'){
    const id=Number(b.dataset.id),suffix=action==='friend-accept'?'accept':action==='friend-reject'?'reject':'withdraw';
@@ -936,6 +947,11 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
    const pending=state.dmPending;
    const sent=await api('/api/messages/'+encodeURIComponent(uid),{method:'POST',body:{text:pending.text,client_message_id:pending.client_message_id}});
    if(state.dmPending===pending)state.dmPending=null;
+   if(state.dmDraft===pending.text){
+    state.dmDraft='';
+    const currentInput=$('#dmPanel form[data-form="dm-send"] textarea[name="text"]');
+    if(currentInput)currentInput.value='';
+   }
    await openDm(uid);
    if(state.dmUid===uid&&sent.message&&!state.dmMessages.some(message=>Number(message.id)===Number(sent.message.id))){
     state.dmMessages=mergeDmMessages(state.dmMessages,[sent.message]);renderDmPanel();

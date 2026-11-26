@@ -144,6 +144,7 @@ async function closePersonalCenter(page) {
     await pageA.locator(`[data-action="friend-note"][data-uid="${uidB}"]`).click();
     await visible(pageA.getByText('仅我可见的备注').first());
     await pageA.locator(`[data-action="friend-reset-note"][data-uid="${uidB}"]`).click();
+    await visible(pageA.locator('#toast').filter({ hasText: '已恢复为对方当前名字' }));
     await visible(pageA.getByText('好友测试乙').first());
 
     await pageA.locator(`[data-action="dm-open"][data-uid="${uidB}"]`).first().click();
@@ -151,6 +152,16 @@ async function closePersonalCenter(page) {
     await visible(dmFormA);
     const messageText = '<img src=x onerror=alert(1)>私信纯文本';
     await dmFormA.locator('textarea[name="text"]').fill(messageText);
+    const incomingDraftProbe = '来自乙的实时同步测试';
+    await api(pageB, 'POST', '/api/messages/' + encodeURIComponent(uidA), {
+      text: incomingDraftProbe,
+      client_message_id: 'social-points-browser-draft-probe',
+    });
+    await pageA.waitForFunction(({ uid, draft, incoming }) =>
+      state.dmUid === uid &&
+      state.dmMessages.some(message => message.text === incoming) &&
+      document.querySelector('form[data-form="dm-send"] textarea[name="text"]')?.value === draft,
+      { uid: uidB, draft: messageText, incoming: incomingDraftProbe });
     await pageA.evaluate(() => {
       window.__dmSubmitEvents = [];
       document.querySelector('#app')?.addEventListener('submit', event => {
@@ -180,6 +191,7 @@ async function closePersonalCenter(page) {
         formCount: document.querySelectorAll('form[data-form="dm-send"]').length,
         form: document.querySelector('form[data-form="dm-send"]')?.outerHTML || null,
         buttonDisabled: document.querySelector('form[data-form="dm-send"] button[type="submit"]')?.disabled ?? null,
+        textareaValue: document.querySelector('form[data-form="dm-send"] textarea[name="text"]')?.value ?? null,
         cryptoType: typeof crypto,
         randomUUIDType: typeof crypto?.randomUUID,
       }));
