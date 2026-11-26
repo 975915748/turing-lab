@@ -907,7 +907,7 @@ def name_change_status(db, user_id):
         WHERE r.status='open' AND r.match_started_at IS NOT NULL AND (
             r.owner_id=? OR
             EXISTS(SELECT 1 FROM room_judges j WHERE j.room_id=r.id AND j.user_id=?) OR
-            EXISTS(SELECT 1 FROM members m WHERE m.room_id=r.id AND m.user_id=?)
+            EXISTS(SELECT 1 FROM members m WHERE m.room_id=r.id AND m.user_id=? AND m.removed_at IS NULL)
         ) LIMIT 1''', (user_id, user_id, user_id)).fetchone()
     locked = bool(active)
     return {

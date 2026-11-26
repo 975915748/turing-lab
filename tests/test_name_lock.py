@@ -70,11 +70,12 @@ def test_legacy_start_locks_owner_players_and_removed_member_until_reveal(env):
         put(client, "/api/me/profile", {"display_name": "不应生效"}, status=409)
     assert admin.get("/api/me").json()["user"]["name_change_locked"] is False
 
-    # Removal changes the active roster, not the historical match role.
+    # Removal ends the participant role, so this account may rename immediately.
     third_id = third.get("/api/me").json()["user"]["id"]
     post(host, f"{base}/members/{third_id}/remove", match=1)
-    assert third.get("/api/me").json()["user"]["name_change_locked"] is True
-    put(third, "/api/me/profile", {"display_name": "移出后绕过"}, status=409)
+    assert third.get("/api/me").json()["user"]["name_change_locked"] is False
+    renamed = put(third, "/api/me/profile", {"display_name": "移出后可改名"})
+    assert renamed["user"]["display_name"] == "移出后可改名"
 
     post(host, base + "/answers", {"text": "房主回答"}, match=1)
     post(player, base + "/answers", {"text": "玩家回答"}, match=1)
@@ -127,9 +128,13 @@ def test_lock_is_account_wide_across_rooms_until_last_room_finishes_or_is_delete
     post(second_host, base2 + "/question", {"text": "第二间问题"}, match=1)
 
     assert player.get("/api/me").json()["user"]["name_change_locked"] is True
-    request(first_host, "DELETE", base1, {"match_number": 1, "confirm": True})
+    player_id = player.get("/api/me").json()["user"]["id"]
+    post(first_host, f"{base1}/members/{player_id}/remove", match=1)
+    # Removal unlocks the first room's participant role, but the second room still locks the account.
     assert player.get("/api/me").json()["user"]["name_change_locked"] is True
     put(player, "/api/me/profile", {"display_name": "仍被第二间锁定"}, status=409)
+    request(first_host, "DELETE", base1, {"match_number": 1, "confirm": True})
+    assert player.get("/api/me").json()["user"]["name_change_locked"] is True
 
     request(second_host, "DELETE", base2, {"match_number": 1, "confirm": True})
     assert player.get("/api/me").json()["user"]["name_change_locked"] is False
