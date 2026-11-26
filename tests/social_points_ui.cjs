@@ -53,6 +53,9 @@ async function openPersonalCenter(page) {
 async function closePersonalCenter(page) {
   await page.locator('[data-action="personal-back"]').click();
 }
+function friendDmButton(page, uid) {
+  return page.locator('#socialPanel .feed-item [data-action="dm-open"][data-uid="' + uid + '"]');
+}
 
 (async () => {
   const browserOptions = { headless: true };
@@ -152,7 +155,7 @@ async function closePersonalCenter(page) {
     await pageC.locator('#friendSearchResult [data-action="friend-add"]').click();
     await pageB.locator('[data-action="friend-accept"]').waitFor();
     await pageB.locator('[data-action="friend-accept"]').first().click();
-    await pageC.locator('[data-action="dm-open"]').waitFor();
+    await friendDmButton(pageC, uidB).waitFor();
 
     await closePersonalCenter(pageA);
     await closePersonalCenter(pageB);
@@ -168,7 +171,7 @@ async function closePersonalCenter(page) {
     }
 
     await openPersonalCenter(pageA);
-    await pageA.locator(`[data-action="dm-open"][data-uid="${uidB}"]`).first().click();
+    await friendDmButton(pageA, uidB).click();
     const dmFormA = pageA.locator('form[data-form="dm-send"]');
     await visible(dmFormA);
     await pageA.waitForFunction(() => state.dmMessages.length === 50 && state.dmHasMore);
@@ -181,10 +184,9 @@ async function closePersonalCenter(page) {
     await passwordFormA.locator('[name="current_password"]').fill('current-password-probe');
     await passwordFormA.locator('[name="new_password"]').fill('new-password-probe');
     await passwordFormA.locator('[name="confirm_password"]').fill('confirm-password-probe');
-    await passwordFormA.locator('[name="new_password"]').focus();
-
     const messageText = '<img src=x onerror=alert(1)>私信纯文本';
     await dmFormA.locator('textarea[name="text"]').fill(messageText);
+    await passwordFormA.locator('[name="new_password"]').focus();
     const incomingDraftProbe = '来自乙的实时同步测试';
     await api(pageB, 'POST', '/api/messages/' + encodeURIComponent(uidA), {
       text: incomingDraftProbe,
@@ -254,7 +256,7 @@ async function closePersonalCenter(page) {
     assert.equal(await pageA.locator('#dmPanel img').count(), 0);
 
     await openPersonalCenter(pageB);
-    await pageB.locator(`[data-action="dm-open"][data-uid="${uidA}"]`).first().click();
+    await friendDmButton(pageB, uidA).click();
     await pageB.locator('.dm-message:not(.mine)').filter({ hasText: '私信纯文本' }).waitFor();
     assert.equal(await pageB.locator('#dmPanel img').count(), 0);
 
@@ -329,7 +331,7 @@ async function closePersonalCenter(page) {
     await clickSubmit(pageA, 'login');
     await pageA.waitForFunction(uid => state.me?.user?.uid === uid, uidC);
     await openPersonalCenter(pageA);
-    await pageA.locator('[data-action="dm-open"][data-uid="' + uidB + '"]').first().click();
+    await friendDmButton(pageA, uidB).click();
     await pageA.waitForFunction(uid => state.dmUid === uid, uidB);
     assert.equal(await pageA.locator('.dm-message').filter({ hasText: delayedText }).count(), 0);
     releaseDelayedResponse();
