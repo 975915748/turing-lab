@@ -3092,6 +3092,7 @@ def create_app(db_path=None):
                 if finished:
                     log_event(db,room_id,rnd['number'],'round_revealed','系统','当前在场参赛者已全部提交，统一公开')
         await app.state.hub.notify(room_id,'round_revealed' if finished else 'member_removed')
+        await app.state.hub.notify_accounts([user_id], {'type':'name_lock_updated'})
         return {'ok':True,'revealed':finished}
 
     @app.post('/api/rooms/{room_id}/next')

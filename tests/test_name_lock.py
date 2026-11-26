@@ -50,7 +50,7 @@ def join_as_player(client, code):
     return post(client, "/api/join", {"code": code, "role": "player"})
 
 
-def test_legacy_start_locks_owner_players_and_removed_member_until_reveal(env):
+def test_legacy_start_locks_active_roles_and_unlocks_removed_member(env):
     _, _, admin, host, player, third, judge = env
     created, base = create_room(host, "手动裁判改名锁")
     host_alias = join_as_player(host, created["code"])["alias"]
@@ -70,12 +70,16 @@ def test_legacy_start_locks_owner_players_and_removed_member_until_reveal(env):
         put(client, "/api/me/profile", {"display_name": "不应生效"}, status=409)
     assert admin.get("/api/me").json()["user"]["name_change_locked"] is False
 
-    # Removal ends the participant role, so this account may rename immediately.
+    # Removal ends the participant role and pushes the updated lock state to an open personal-center session.
     third_id = third.get("/api/me").json()["user"]["id"]
-    post(host, f"{base}/members/{third_id}/remove", match=1)
-    assert third.get("/api/me").json()["user"]["name_change_locked"] is False
-    renamed = put(third, "/api/me/profile", {"display_name": "移出后可改名"})
-    assert renamed["user"]["display_name"] == "移出后可改名"
+    with third.websocket_connect("/ws/messages") as socket:
+        assert socket.receive_json()["type"] == "connected"
+        post(host, f"{base}/members/{third_id}/remove", match=1)
+        update = socket.receive_json()
+        assert update["type"] == "name_lock_updated"
+        assert third.get("/api/me").json()["user"]["name_change_locked"] is False
+        renamed = put(third, "/api/me/profile", {"display_name": "移出后可改名"})
+        assert renamed["user"]["display_name"] == "移出后可改名"
 
     post(host, base + "/answers", {"text": "房主回答"}, match=1)
     post(player, base + "/answers", {"text": "玩家回答"}, match=1)
