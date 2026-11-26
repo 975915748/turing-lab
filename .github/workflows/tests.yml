@@ -37,6 +37,7 @@ jobs:
           node --check tests/uid_ui.cjs
           node --check tests/host_ui.cjs
           node --check tests/room_delete_ui.cjs
+          node --check tests/model_config_ui.cjs
       - name: Run regression tests
         run: python -m pytest -q
       - name: Build production Docker image
@@ -48,6 +49,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: self-service-human-judge-browser-screenshots
+          name: model-config-and-human-judge-browser-screenshots
           path: artifacts/*.png
           if-no-files-found: ignore
