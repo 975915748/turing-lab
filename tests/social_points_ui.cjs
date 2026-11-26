@@ -66,6 +66,10 @@ async function closePersonalCenter(page) {
   const pageC = await contextC.newPage();
   for (const page of [pageA, pageB, pageC]) page.setDefaultTimeout(10000);
   const errors = [];
+  const dmRequests = [];
+  pageA.on('request', request => {
+    if (request.url().includes('/api/messages/')) dmRequests.push({ method: request.method(), url: request.url() });
+  });
   for (const page of [pageA, pageB, pageC]) page.on('pageerror', error => errors.push(String(error)));
   try {
     await pageA.goto(site);
@@ -147,10 +151,40 @@ async function closePersonalCenter(page) {
     await visible(dmFormA);
     const messageText = '<img src=x onerror=alert(1)>私信纯文本';
     await dmFormA.locator('textarea[name="text"]').fill(messageText);
+    await pageA.evaluate(() => {
+      window.__dmSubmitEvents = [];
+      document.querySelector('#app')?.addEventListener('submit', event => {
+        const form = event.target.closest('form[data-form]');
+        if (form?.dataset.form === 'dm-send') {
+          window.__dmSubmitEvents.push({
+            uid: form.dataset.uid,
+            textLength: form.querySelector('textarea[name="text"]')?.value.length,
+            defaultPrevented: event.defaultPrevented,
+          });
+        }
+      }, true);
+    });
     const sendResponsePromise = pageA.waitForResponse(response =>
       response.url().endsWith('/api/messages/' + encodeURIComponent(uidB)) && response.request().method() === 'POST');
     await dmFormA.locator('button[type="submit"]').click();
-    const sendResponse = await sendResponsePromise;
+    let sendResponse;
+    try {
+      sendResponse = await sendResponsePromise;
+    } catch (error) {
+      const debug = await pageA.evaluate(() => ({
+        dmUid: state.dmUid,
+        dmPending: state.dmPending,
+        dmMessages: state.dmMessages,
+        toast: document.querySelector('#toast')?.textContent || '',
+        submitEvents: window.__dmSubmitEvents || [],
+        formCount: document.querySelectorAll('form[data-form="dm-send"]').length,
+        form: document.querySelector('form[data-form="dm-send"]')?.outerHTML || null,
+        buttonDisabled: document.querySelector('form[data-form="dm-send"] button[type="submit"]')?.disabled ?? null,
+        cryptoType: typeof crypto,
+        randomUUIDType: typeof crypto?.randomUUID,
+      }));
+      throw new Error('DM send request missing: ' + JSON.stringify({ debug, dmRequests, pageErrors: errors, cause: error.message }));
+    }
     const sendResult = await sendResponse.json();
     assert.equal(sendResponse.status(), 200, JSON.stringify(sendResult));
     const persistedMessages = await api(pageA, 'GET', '/api/messages/' + encodeURIComponent(uidB));
