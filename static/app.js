@@ -15,6 +15,7 @@ $('#themeBtn').addEventListener('click',()=>{localStorage.setItem('turing_theme'
 $('#fontSize').addEventListener('input',e=>{localStorage.setItem('turing_font',e.target.value);applyPrefs()});
 $('#logoutBtn').addEventListener('click',async()=>{try{await api('/api/logout',{method:'POST'});}catch(e){toast(e.message)} state.me=null;state.room=null;state.roomId=null;state.personalModels=[];clearPersonalModelState();state.chat=[];state.chatDraft='';state.drafts={};state.personalReturn=null;state.tab='login';state.legacyLogin=false;stopWs();history.replaceState(null,'',location.pathname);await init()});
 async function api(path,{method='GET',body,raw=false}={}){
+ const requestUid=state.me?.user?.uid??null,requestCsrf=state.me?.user?.csrf??null,requestEpoch=state.personalModelEpoch||0;
  const opts={method,headers:{}};
  if(body!==undefined){opts.headers['Content-Type']='application/json';opts.body=JSON.stringify(body)}
  if(method!=='GET'&&state.me?.user?.csrf)opts.headers['X-CSRF-Token']=state.me.user.csrf;
@@ -22,7 +23,12 @@ async function api(path,{method='GET',body,raw=false}={}){
  const response=await fetch(path,opts);
  if(raw){if(!response.ok)throw new Error('下载失败');return response.blob()}
  const data=await response.json().catch(()=>({detail:'网络连接错误'}));
- if(!response.ok){if(response.status===401&&state.me){state.me=null;state.room=null;state.roomId=null;state.personalModels=[];clearPersonalModelState();state.chat=[];state.chatDraft='';state.drafts={};stopWs();renderAuth();}throw new Error(typeof data.detail==='string'?data.detail:'请求失败');}
+ if(!response.ok){
+  if(response.status===401&&state.me&&state.me.user?.uid===requestUid&&state.me.user?.csrf===requestCsrf&&(state.personalModelEpoch||0)===requestEpoch){
+   state.me=null;state.room=null;state.roomId=null;state.personalModels=[];clearPersonalModelState();state.chat=[];state.chatDraft='';state.drafts={};stopWs();renderAuth();
+  }
+  throw new Error(typeof data.detail==='string'?data.detail:'请求失败');
+ }
  return data;
 }
 function stopWs(){state.lastTyping=null;if(state.reconnect)clearTimeout(state.reconnect);state.reconnect=null; if(state.ws){const ws=state.ws;state.ws=null;ws.onclose=null;ws.close();}setConnection('未连接',false)}
@@ -245,31 +251,37 @@ function renderDmPanel(){
 }
 async function markDmRead(uid,messageId,{refresh=true,accountUid=state.me?.user?.uid}={}){
  if(!messageId)return;
+ const accountCsrf=state.me?.user?.csrf,accountEpoch=state.personalModelEpoch;
  await api('/api/messages/'+encodeURIComponent(uid)+'/read',{method:'POST',body:{last_read_message_id:Number(messageId)}});
- if(state.me?.user?.uid!==accountUid)return;
- if(refresh){await loadSocial();if(location.hash.startsWith('#profile')){renderPersonalCenter();renderDmPanel();}}
+ if(state.me?.user?.uid!==accountUid||state.me?.user?.csrf!==accountCsrf||state.personalModelEpoch!==accountEpoch)return;
+ if(refresh){
+  await loadSocial();
+  if(location.hash.startsWith('#profile')&&state.me?.user?.uid===accountUid&&state.me?.user?.csrf===accountCsrf&&state.personalModelEpoch===accountEpoch)refreshSocialPanel();
+ }
 }
 async function openDm(uid){
- const version=++state.dmLoadVersion,accountUid=state.me?.user?.uid;
+ const version=++state.dmLoadVersion,accountUid=state.me?.user?.uid,accountCsrf=state.me?.user?.csrf,accountEpoch=state.personalModelEpoch;
  if(state.dmUid!==uid)state.dmDraft='';
  state.dmUid=uid;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;
  renderDmPanel();
  const data=await api('/api/messages/'+encodeURIComponent(uid));
- if(version!==state.dmLoadVersion||state.dmUid!==uid||state.me?.user?.uid!==accountUid)return;
+ if(version!==state.dmLoadVersion||state.dmUid!==uid||state.me?.user?.uid!==accountUid||state.me?.user?.csrf!==accountCsrf||state.personalModelEpoch!==accountEpoch)return null;
  state.dmOtherName=data.other_name;state.dmCanSend=!!data.can_send;
  state.dmMessages=mergeDmMessages(data.messages,state.dmMessages);
  state.dmBeforeId=data.next_before_id;state.dmHasMore=!!data.has_more;
  renderDmPanel();
  if(data.last_received_message_id)await markDmRead(uid,data.last_received_message_id,{refresh:false,accountUid}).catch(()=>{});
  await loadSocial();
- if(location.hash.startsWith('#profile')&&state.me?.user?.uid===accountUid){renderPersonalCenter();renderDmPanel();}
+ if(location.hash.startsWith('#profile')&&state.me?.user?.uid===accountUid&&state.me?.user?.csrf===accountCsrf&&state.personalModelEpoch===accountEpoch&&state.dmLoadVersion===version&&state.dmUid===uid)refreshSocialPanel();
+ return state.dmLoadVersion===version&&state.dmUid===uid?version:null;
 }
 async function loadOlderDm(uid){
  if(uid!==state.dmUid||!state.dmBeforeId)return;
- const accountUid=state.me?.user?.uid,first=state.dmMessages[0]?.id;if(!first)return;
+ const accountUid=state.me?.user?.uid,accountCsrf=state.me?.user?.csrf,accountEpoch=state.personalModelEpoch,version=state.dmLoadVersion;
+ const first=state.dmMessages[0]?.id;if(!first)return;
  const feed=$('#dmFeed'),oldHeight=feed?.scrollHeight||0,oldTop=feed?.scrollTop||0;
  const page=await api('/api/messages/'+encodeURIComponent(uid)+'?before_id='+encodeURIComponent(state.dmBeforeId));
- if(uid!==state.dmUid||state.me?.user?.uid!==accountUid)return;
+ if(uid!==state.dmUid||state.me?.user?.uid!==accountUid||state.me?.user?.csrf!==accountCsrf||state.personalModelEpoch!==accountEpoch||state.dmLoadVersion!==version)return;
  state.dmMessages=mergeDmMessages(page.messages,state.dmMessages);
  state.dmBeforeId=page.next_before_id;state.dmHasMore=!!page.has_more;
  renderDmPanel();
@@ -293,9 +305,20 @@ function renderPointsLedger(){
  }).join('')||D('暂无积分流水');
  el.innerHTML=rows+(state.pointsLedgerHasMore?'<button class="small spaced" data-action="points-ledger-more">加载更多</button>':'');
 }
+function refreshSocialPanel(){
+ const panel=$('#socialPanel');if(!panel)return;
+ captureDmDraft();
+ const holder=document.createElement('div');
+ holder.innerHTML=renderSocialPanel();
+ const next=holder.firstElementChild;
+ if(next)panel.replaceWith(next);
+ renderDmPanel();renderPointsLedger();
+}
 async function refreshSocialUi(){
+ const accountUid=state.me?.user?.uid,accountCsrf=state.me?.user?.csrf,accountEpoch=state.personalModelEpoch;
  await loadSocial();
- if(location.hash.startsWith('#profile')){renderPersonalCenter();renderDmPanel();}
+ if(state.me?.user?.uid!==accountUid||state.me?.user?.csrf!==accountCsrf||state.personalModelEpoch!==accountEpoch)return;
+ if(location.hash.startsWith('#profile'))refreshSocialPanel();
 }
 function connectDmWs(){
  stopDmWs();const uid=state.me?.user?.uid;if(!uid||!location.hash.startsWith('#profile'))return;
@@ -303,7 +326,11 @@ function connectDmWs(){
  const ws=new WebSocket(`${proto}//${location.host}/ws/messages`);state.dmSocket=ws;
  ws.onopen=async()=>{
   if(state.dmSocket!==ws||state.me?.user?.uid!==uid)return;
-  try{await loadSocial();if(state.dmUid)await openDm(state.dmUid);else renderPersonalCenter();}catch{}
+  try{
+   await loadSocial();
+   if(state.dmSocket!==ws||state.me?.user?.uid!==uid)return;
+   if(state.dmUid)await openDm(state.dmUid);else refreshSocialPanel();
+  }catch{}
  };
  ws.onmessage=async event=>{
   if(state.dmSocket!==ws||state.me?.user?.uid!==uid)return;
@@ -514,8 +541,8 @@ function renderSocialPanel(){
  const incoming=x.incoming.map(f=>`<div class="feed-item">${esc(f.display_name)} · ${esc(f.uid)} <button class="small" data-action="friend-accept" data-id="${f.id}">接受</button> <button class="small" data-action="friend-reject" data-id="${f.id}">拒绝</button></div>`).join('')||D('没有收到的申请');
  const outgoing=x.outgoing.map(f=>`<div class="feed-item">${esc(f.display_name)} · ${esc(f.uid)} <button class="small" data-action="friend-withdraw" data-id="${f.id}">撤回</button></div>`).join('')||D('没有发出的申请');
  const conversations=x.conversations.map(c=>`<button class="room-view-link" data-action="dm-open" data-uid="${esc(c.uid)}"><strong>${esc(c.note||c.display_name)}</strong> · ${esc(c.uid)} ${c.unread_count?`<span class="pill">${c.unread_count} 未读</span>`:''}</button>`).join('')||D('暂无私信会话');
- return `<section class="card"><h2>账号积分</h2><div class="stat-row"><div class="stat">总积分 <strong>${esc(x.points.total_points)}</strong></div><div class="stat">当前连胜 <strong>${esc(x.points.current_streak)}</strong></div></div><div id="pointsLedger" class="feed spaced"></div><button class="small" data-action="points-ledger">${state.pointsLedgerLoaded?'刷新积分流水':'查看积分流水'}</button></section>
- <section class="card"><h2>好友与私信</h2><form data-form="friend-search"><label class="field">通过 UID 搜索</label><input name="uid" maxlength="40" required placeholder="TL00000001"><div class="form-actions"><button class="primary" type="submit">搜索</button></div></form><div id="friendSearchResult"></div><h3 class="spaced">好友</h3>${friendRows}<h3 class="spaced">收到的申请</h3>${incoming}<h3 class="spaced">发出的申请</h3>${outgoing}<h3 class="spaced">私信会话</h3>${conversations}<div id="dmPanel"></div></section>`;
+ return `<div id="socialPanel" class="stack"><section class="card"><h2>账号积分</h2><div class="stat-row"><div class="stat">总积分 <strong>${esc(x.points.total_points)}</strong></div><div class="stat">当前连胜 <strong>${esc(x.points.current_streak)}</strong></div></div><div id="pointsLedger" class="feed spaced"></div><button class="small" data-action="points-ledger">${state.pointsLedgerLoaded?'刷新积分流水':'查看积分流水'}</button></section>
+ <section class="card"><h2>好友与私信</h2><form data-form="friend-search"><label class="field">通过 UID 搜索</label><input name="uid" maxlength="40" required placeholder="TL00000001"><div class="form-actions"><button class="primary" type="submit">搜索</button></div></form><div id="friendSearchResult"></div><h3 class="spaced">好友</h3>${friendRows}<h3 class="spaced">收到的申请</h3>${incoming}<h3 class="spaced">发出的申请</h3>${outgoing}<h3 class="spaced">私信会话</h3>${conversations}<div id="dmPanel"></div></section></div>`;
 }
 function renderPersonalCenter({skipModelDraftKey=null}={}){
  const u=state.me?.user;if(!u){clearPersonalModelState();renderAuth();return;}
@@ -939,21 +966,32 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
    return;
   }
   if(type==='dm-send'){
-   const uid=form.dataset.uid,textValue=String(data.text||'');
+   const uid=form.dataset.uid,textValue=String(data.text||''),accountUid=state.me?.user?.uid;
+   const accountCsrf=state.me?.user?.csrf,accountEpoch=state.personalModelEpoch,dmVersion=state.dmLoadVersion;
+   const sameSession=()=>state.me?.user?.uid===accountUid&&state.me?.user?.csrf===accountCsrf&&state.personalModelEpoch===accountEpoch;
+   const sameConversation=()=>sameSession()&&state.dmUid===uid&&state.dmLoadVersion===dmVersion&&location.hash.startsWith('#profile');
    if(!state.dmPending||state.dmPending.uid!==uid||state.dmPending.text!==textValue){
     const client_message_id=crypto.randomUUID?crypto.randomUUID():Array.from(crypto.getRandomValues(new Uint8Array(16)),x=>x.toString(16).padStart(2,'0')).join('');
     state.dmPending={uid,text:textValue,client_message_id};
    }
    const pending=state.dmPending;
-   const sent=await api('/api/messages/'+encodeURIComponent(uid),{method:'POST',body:{text:pending.text,client_message_id:pending.client_message_id}});
+   let sent;
+   try{
+    sent=await api('/api/messages/'+encodeURIComponent(uid),{method:'POST',body:{text:pending.text,client_message_id:pending.client_message_id}});
+   }catch(error){
+    if(!sameConversation())return;
+    throw error;
+   }
+   if(!sameConversation())return;
    if(state.dmPending===pending)state.dmPending=null;
    if(state.dmDraft===pending.text){
     state.dmDraft='';
     const currentInput=$('#dmPanel form[data-form="dm-send"] textarea[name="text"]');
     if(currentInput)currentInput.value='';
    }
-   await openDm(uid);
-   if(state.dmUid===uid&&sent.message&&!state.dmMessages.some(message=>Number(message.id)===Number(sent.message.id))){
+   const openedVersion=await openDm(uid);
+   if(!sameSession()||state.dmUid!==uid||openedVersion===null||state.dmLoadVersion!==openedVersion)return;
+   if(sent.message&&!state.dmMessages.some(message=>Number(message.id)===Number(sent.message.id))){
     state.dmMessages=mergeDmMessages(state.dmMessages,[sent.message]);renderDmPanel();
    }
    return;

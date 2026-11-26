@@ -39,6 +39,9 @@ DURATION_DAYS = 7
 class ModelCallCancelled(Exception):
     """Queued model work became unauthorized or stale before the provider call began."""
 
+    def __init__(self, reason=''):
+        super().__init__(reason)
+
 
 class ModelRequestLimitReached(Exception):
     """A room has no remaining model-request attempts."""
@@ -907,7 +910,7 @@ def name_change_status(db, user_id):
         WHERE r.status='open' AND r.match_started_at IS NOT NULL AND (
             r.owner_id=? OR
             EXISTS(SELECT 1 FROM room_judges j WHERE j.room_id=r.id AND j.user_id=?) OR
-            EXISTS(SELECT 1 FROM members m WHERE m.room_id=r.id AND m.user_id=? AND m.removed_at IS NULL)
+            EXISTS(SELECT 1 FROM members m WHERE m.room_id=r.id AND m.user_id=?)
         ) LIMIT 1''', (user_id, user_id, user_id)).fetchone()
     locked = bool(active)
     return {
@@ -1525,26 +1528,34 @@ def create_app(db_path=None):
             app.state.model_semaphore_loop = loop
         async with app.state.model_semaphore:
             if operation_id is None:
-                if preflight is not None and not preflight():
-                    raise ModelCallCancelled()
+                if preflight is not None:
+                    preflight_result=preflight()
+                    if preflight_result is not True:
+                        reason=preflight_result if isinstance(preflight_result,str) else ''
+                        raise ModelCallCancelled(reason)
             else:
                 outcome=None
+                outcome_reason=''
                 room_id=None
                 with connection(immediate=True) as db:
                     task=db.execute('SELECT * FROM model_operation_tasks WHERE id=?',(operation_id,)).fetchone()
                     if not task or task['state']!='queued':
                         outcome='stale'
+                        outcome_reason='模型任务已不再处于排队状态。'
                     else:
                         room_id=task['room_id']
-                        if preflight is not None and not preflight():
-                            finish_model_operation_in_db(db,operation_id,'stale',
-                                error='排队期间权限、配置或比赛上下文发生变化；未向服务商发送请求。')
-                            outcome='stale'
-                        else:
+                        if preflight is not None:
+                            preflight_result=preflight()
+                            if preflight_result is not True:
+                                outcome_reason=preflight_result if isinstance(preflight_result,str) else ''
+                                finish_model_operation_in_db(db,operation_id,'stale',
+                                    error=outcome_reason or '排队期间权限、配置或比赛上下文发生变化；未向服务商发送请求。')
+                                outcome='stale'
+                        if outcome is None:
                             room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone() if room_id is not None else None
                             if room_id is not None and (not room or room['match_number']!=task['match_number']):
-                                finish_model_operation_in_db(db,operation_id,'stale',
-                                    error='房间或比赛场次已变化；未向服务商发送请求。')
+                                outcome_reason='房间或比赛场次已变化；未向服务商发送请求。'
+                                finish_model_operation_in_db(db,operation_id,'stale',error=outcome_reason)
                                 outcome='stale'
                             else:
                                 if room_id is not None:
@@ -1569,7 +1580,7 @@ def create_app(db_path=None):
                         await app.state.hub.notify(room_id,'model_operation_updated')
                     if outcome=='blocked':
                         raise ModelRequestLimitReached('本场模型请求次数已达上限；请提高上限或手动转录。')
-                    raise ModelCallCancelled()
+                    raise ModelCallCancelled(outcome_reason or '排队期间权限、配置或比赛上下文发生变化；未向服务商发送请求。')
                 await notify_model_operation(operation_id)
 
             started=time.perf_counter()
@@ -2521,10 +2532,10 @@ def create_app(db_path=None):
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
             if room['status']!='open' or room['verdict_locked_at']:
-                raise HTTPException(409,'比赛已结束或裁判判断已锁定。')
+                raise HTTPException(409,'比赛已结束或裁判判断已锁定，不能生成 AI 裁判问题。')
             rnd=current_round(db,room)
             if rnd['status']!='draft':
-                raise HTTPException(409,'只能在本轮开始作答前生成 AI 裁判问题。')
+                raise HTTPException(409,'当前轮次已经开始作答，不能再生成 AI 裁判问题。')
             roster=aliases(db,room_id)[2]
             if len(roster)<2:
                 raise HTTPException(409,f'至少需要两名在场参赛者才能生成 AI 裁判问题；当前仅有 {len(roster)} 位。请先让至少两位参赛者加入。')
@@ -2608,20 +2619,29 @@ def create_app(db_path=None):
                     with connection() as db:
                         current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
                         if not current or current['match_number']!=match_number or current['status']!='open':
-                            return False
-                        if not model_call_actor_valid(db,room_id,actor_id,session_hash) or not model_profile_snapshot_valid(db,profile):
-                            return False
+                            return '房间或比赛场次已变化；未向服务商发送请求。'
+                        if current['verdict_locked_at']:
+                            return '裁判判断已锁定；未向服务商发送请求。'
+                        if not model_call_actor_valid(db,room_id,actor_id,session_hash):
+                            return '登录会话或房间管理权限已失效；未向服务商发送请求。'
+                        if not model_profile_snapshot_valid(db,profile):
+                            return '模型配置、凭据或配置所属账号已变化；未向服务商发送请求。'
                         binding=db.execute('SELECT model_profile_id FROM ai_judges WHERE room_id=? AND id=?',
                                            (room_id,judge_id)).fetchone()
                         if not binding or binding['model_profile_id']!=profile['id']:
-                            return False
+                            return 'AI 裁判席位的模型绑定已变化；未向服务商发送请求。'
                         current_rnd=current_round(db,current)
                         if current_rnd['number']!=round_number or current_rnd['status']!='draft':
-                            return False
-                        if aliases(db,room_id)[2]!=roster:
-                            return False
-                        return not db.execute('SELECT 1 FROM ai_judge_questions WHERE room_id=? AND round_number=? AND ai_judge_id=?',
-                                              (room_id,round_number,judge_id)).fetchone()
+                            return '当前轮次已变化或开始作答；未向服务商发送请求。'
+                        current_roster=aliases(db,room_id)[2]
+                        if current_roster!=roster or len(current_roster)<2:
+                            return '参赛名单已变化；请刷新房间后重新生成问题。'
+                        if anonymous_match_packet(db,room_id,round_number-1)!=history:
+                            return '历史匿名资料已变化；请刷新房间后重新生成问题。'
+                        if db.execute('SELECT 1 FROM ai_judge_questions WHERE room_id=? AND round_number=? AND ai_judge_id=?',
+                                      (room_id,round_number,judge_id)).fetchone():
+                            return '该 AI 裁判已经提交本轮问题，无需重复生成。'
+                        return True
                 result=await model_call(profile,[
                     {'role':'system','content':('你是多人图灵测试的独立裁判。每轮只提出一个核心问题，不得把多个问题打包。'
                      '问题必须面向所有匿名参赛者，不能询问真实姓名、账号、模型名称或系统提示。'
@@ -2633,13 +2653,21 @@ def create_app(db_path=None):
                 with connection(immediate=True) as db:
                     current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
                     if not current or current['match_number']!=match_number or current['status']!='open':
-                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间比赛场次或状态发生变化，旧问题未保存。')
-                        return {'judge_id':judge_id,'label':profile['label'],'status':'skipped',
-                                'reason':'生成期间比赛场次或状态发生变化，旧问题未保存。'}
-                    if not model_call_actor_valid(db,room_id,actor_id,session_hash) or not model_profile_snapshot_valid(db,profile):
-                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间登录权限或模型配置发生变化，旧问题未保存。')
-                        return {'judge_id':judge_id,'label':profile['label'],'status':'skipped',
-                                'reason':'生成期间登录权限或模型配置发生变化，旧问题未保存。'}
+                        error='生成期间比赛场次或状态发生变化，旧问题未保存。'
+                        finish_model_operation_in_db(db,operation_id,'stale',error=error)
+                        return {'judge_id':judge_id,'label':profile['label'],'status':'skipped','reason':error}
+                    if current['verdict_locked_at']:
+                        error='生成期间裁判判断已锁定，旧问题未保存。'
+                        finish_model_operation_in_db(db,operation_id,'stale',error=error)
+                        return {'judge_id':judge_id,'label':profile['label'],'status':'skipped','reason':error}
+                    if not model_call_actor_valid(db,room_id,actor_id,session_hash):
+                        error='生成期间登录会话或房间管理权限已失效，旧问题未保存。'
+                        finish_model_operation_in_db(db,operation_id,'stale',error=error)
+                        return {'judge_id':judge_id,'label':profile['label'],'status':'skipped','reason':error}
+                    if not model_profile_snapshot_valid(db,profile):
+                        error='生成期间模型配置、凭据或配置所属账号已变化，旧问题未保存。'
+                        finish_model_operation_in_db(db,operation_id,'stale',error=error)
+                        return {'judge_id':judge_id,'label':profile['label'],'status':'skipped','reason':error}
                     binding=db.execute('SELECT model_profile_id FROM ai_judges WHERE room_id=? AND id=?',
                                        (room_id,judge_id)).fetchone()
                     if not binding or binding['model_profile_id']!=profile['id']:
@@ -2651,10 +2679,14 @@ def create_app(db_path=None):
                         finish_model_operation_in_db(db,operation_id,'stale',error='生成期间轮次已变化或已开始作答，旧问题未保存。')
                         return {'judge_id':judge_id,'label':profile['label'],'status':'skipped',
                                 'reason':'生成期间轮次已变化或已开始作答，旧问题未保存。'}
-                    if aliases(db,room_id)[2]!=roster:
-                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间参赛名单发生变化，旧问题未保存。')
-                        return {'judge_id':judge_id,'label':profile['label'],'status':'skipped',
-                                'reason':'生成期间参赛名单发生变化，旧问题未保存。'}
+                    if aliases(db,room_id)[2]!=roster or len(aliases(db,room_id)[2])<2:
+                        error='生成期间参赛名单发生变化，旧问题未保存。'
+                        finish_model_operation_in_db(db,operation_id,'stale',error=error)
+                        return {'judge_id':judge_id,'label':profile['label'],'status':'skipped','reason':error}
+                    if anonymous_match_packet(db,room_id,round_number-1)!=history:
+                        error='生成期间历史匿名资料已变化，旧问题未保存。'
+                        finish_model_operation_in_db(db,operation_id,'stale',error=error)
+                        return {'judge_id':judge_id,'label':profile['label'],'status':'skipped','reason':error}
                     if db.execute('SELECT 1 FROM ai_judge_questions WHERE room_id=? AND round_number=? AND ai_judge_id=?',
                                   (room_id,round_number,judge_id)).fetchone():
                         finish_model_operation_in_db(db,operation_id,'stale',error='该 AI 裁判已提交本轮问题，未重复保存。')
@@ -2672,9 +2704,10 @@ def create_app(db_path=None):
                 return {'judge_id':judge_id,'label':profile['label'],'status':'generated','usage':result['usage']}
             except ModelRequestLimitReached as exc:
                 return {'judge_id':judge_id,'label':profile['label'],'status':'blocked','error':str(exc)}
-            except ModelCallCancelled:
-                return {'judge_id':judge_id,'label':profile['label'],'status':'skipped',
-                        'reason':'任务排队期间权限、配置、绑定或比赛状态发生变化；未向服务商发送请求。'}
+            except ModelCallCancelled as exc:
+                reason=str(exc) or '任务排队期间权限、配置、绑定或比赛状态发生变化；未向服务商发送请求。'
+                await finish_and_notify_model_operation(operation_id,'stale',error=reason)
+                return {'judge_id':judge_id,'label':profile['label'],'status':'skipped','reason':reason}
             except ModelAPIError as exc:
                 await finish_and_notify_model_operation(operation_id,'failed',error=exc)
                 return {'judge_id':judge_id,'label':profile['label'],'status':'failed','error':str(exc)}

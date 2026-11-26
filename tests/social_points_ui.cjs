@@ -147,6 +147,13 @@ async function closePersonalCenter(page) {
     await visible(pageA.locator('#toast').filter({ hasText: '已恢复为对方当前名字' }));
     await visible(pageA.getByText('好友测试乙').first());
 
+    await pageC.locator('form[data-form="friend-search"] input[name="uid"]').fill(uidB);
+    await clickSubmit(pageC, 'friend-search');
+    await pageC.locator('#friendSearchResult [data-action="friend-add"]').click();
+    await pageB.locator('[data-action="friend-accept"]').waitFor();
+    await pageB.locator('[data-action="friend-accept"]').first().click();
+    await pageC.locator('[data-action="dm-open"]').waitFor();
+
     await closePersonalCenter(pageA);
     await closePersonalCenter(pageB);
     await pageA.waitForFunction(() => state.dmSocket === null);
@@ -170,6 +177,12 @@ async function closePersonalCenter(page) {
     assert.equal(await pageA.evaluate(() => state.dmMessages[0]?.text), '分页消息 01');
     assert.equal(await pageA.evaluate(() => state.dmMessages.at(-1)?.text), '分页消息 51');
 
+    const passwordFormA = pageA.locator('form[data-form="change-password"]');
+    await passwordFormA.locator('[name="current_password"]').fill('current-password-probe');
+    await passwordFormA.locator('[name="new_password"]').fill('new-password-probe');
+    await passwordFormA.locator('[name="confirm_password"]').fill('confirm-password-probe');
+    await passwordFormA.locator('[name="new_password"]').focus();
+
     const messageText = '<img src=x onerror=alert(1)>私信纯文本';
     await dmFormA.locator('textarea[name="text"]').fill(messageText);
     const incomingDraftProbe = '来自乙的实时同步测试';
@@ -182,6 +195,10 @@ async function closePersonalCenter(page) {
       state.dmMessages.some(message => message.text === incoming) &&
       document.querySelector('form[data-form="dm-send"] textarea[name="text"]')?.value === draft,
       { uid: uidB, draft: messageText, incoming: incomingDraftProbe });
+    assert.equal(await passwordFormA.locator('[name="current_password"]').inputValue(), 'current-password-probe');
+    assert.equal(await passwordFormA.locator('[name="new_password"]').inputValue(), 'new-password-probe');
+    assert.equal(await passwordFormA.locator('[name="confirm_password"]').inputValue(), 'confirm-password-probe');
+    assert.equal(await pageA.evaluate(() => document.activeElement?.getAttribute('name')), 'new_password');
     await pageA.evaluate(() => {
       window.__dmSubmitEvents = [];
       document.querySelector('#app')?.addEventListener('submit', event => {
@@ -287,6 +304,42 @@ async function closePersonalCenter(page) {
     await pageB.screenshot({ path: path.join(artifacts, 'social-points-result-desktop.png'), fullPage: true, animations: 'disabled' });
     await pageC.screenshot({ path: path.join(artifacts, 'social-points-independent-judge.png'), fullPage: true, animations: 'disabled' });
 
+    // Delay A's successful send response, switch this browser to C, and open C-B.
+    const delayedText = 'A 账号切换后的迟到私信';
+    let releaseDelayedResponse, signalDelayedResponseReady;
+    const delayedGate = new Promise(resolve => { releaseDelayedResponse = resolve; });
+    const delayedReady = new Promise(resolve => { signalDelayedResponseReady = resolve; });
+    const delayedResponsePromise = pageA.waitForResponse(response =>
+      response.url().endsWith('/api/messages/' + encodeURIComponent(uidB)) &&
+      response.request().method() === 'POST');
+    await pageA.route('**/api/messages/' + uidB, async route => {
+      if (route.request().method() !== 'POST') { await route.continue(); return; }
+      const response = await route.fetch();
+      signalDelayedResponseReady();
+      await delayedGate;
+      await route.fulfill({ response });
+    });
+    await pageA.locator('form[data-form="dm-send"] textarea[name="text"]').fill(delayedText);
+    await pageA.locator('form[data-form="dm-send"] button[type="submit"]').click();
+    await delayedReady;
+    await pageA.locator('#logoutBtn').click();
+    await pageA.locator('form[data-form="login"]').waitFor();
+    await pageA.locator('form[data-form="login"] [name="uid"]').fill(uidC);
+    await pageA.locator('form[data-form="login"] [name="password"]').fill('browser-password');
+    await clickSubmit(pageA, 'login');
+    await pageA.waitForFunction(uid => state.me?.user?.uid === uid, uidC);
+    await openPersonalCenter(pageA);
+    await pageA.locator('[data-action="dm-open"][data-uid="' + uidB + '"]').first().click();
+    await pageA.waitForFunction(uid => state.dmUid === uid, uidB);
+    assert.equal(await pageA.locator('.dm-message').filter({ hasText: delayedText }).count(), 0);
+    releaseDelayedResponse();
+    const delayedResponse = await delayedResponsePromise;
+    assert.equal(delayedResponse.status(), 200);
+    await pageA.waitForTimeout(250);
+    assert.equal(await pageA.evaluate(text => state.dmMessages.some(message => message.text === text), delayedText), false);
+    assert.equal(await pageA.locator('.dm-message').filter({ hasText: delayedText }).count(), 0);
+    assert.equal(await pageA.evaluate(() => state.me?.user?.uid), uidC);
+    await pageA.unroute('**/api/messages/' + uidB);
     assert.deepEqual(errors, []);
   } finally {
     await contextA.close();

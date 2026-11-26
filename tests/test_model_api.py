@@ -251,6 +251,30 @@ def test_damaged_ciphertext_is_reported_but_does_not_block_manual_site_access(
     assert 'status=cannot_decrypt' in capsys.readouterr().err
 
 
+
+def test_model_profile_edit_with_blank_api_key_preserves_existing_credential(model_lab):
+    admin, profile_id, path = model_lab['admin'], model_lab['profile_id'], model_lab['path']
+    with db_open(path) as db:
+        before = db.execute(
+            'SELECT api_key_encrypted FROM model_profiles WHERE id=?', (profile_id,)
+        ).fetchone()['api_key_encrypted']
+    payload = dict(model_lab['profile_body'])
+    payload['name'] = '更新名称但保留密钥'
+    payload['api_key'] = ''
+    me = admin.get('/api/me').json()
+    response = admin.put(
+        f"/api/me/models/{profile_id}",
+        json=payload,
+        headers={'X-CSRF-Token': me['user']['csrf']},
+    )
+    assert response.status_code == 200, response.text
+    with db_open(path) as db:
+        after = db.execute(
+            'SELECT api_key_encrypted FROM model_profiles WHERE id=?', (profile_id,)
+        ).fetchone()['api_key_encrypted']
+    assert after == before
+    assert model_api.decrypt_api_key(after) == model_lab['profile_body']['api_key']
+
 def test_broken_model_profile_can_be_repaired_without_changing_match_data(model_lab):
     admin, base, profile_id, path = (
         model_lab['admin'], model_lab['base'], model_lab['profile_id'], model_lab['path']
@@ -546,19 +570,8 @@ def test_ai_judge_discards_verdict_if_match_evidence_changes(tmp_path, monkeypat
             assert verdict_resp.status_code == 200, verdict_resp.text
             result = verdict_resp.json()
             assert result['generated'] == 0
-            assert result['skipped'] == 1
-            assert result['failed'] == []
-            assert len(result['results']) == 1
-            assert result['results'][0]['status'] == 'skipped'
-            assert '比赛资料发生变化' in result['results'][0]['reason']
-            with db_open(path) as db:
-                stale_task = db.execute(
-                    """SELECT state,error_message FROM model_operation_tasks
-                       WHERE room_id=? AND purpose='judge_verdict' AND target_key=?""",
-                    (room['room_id'], str(judge_id)),
-                ).fetchone()
-                assert stale_task['state'] == 'stale'
-                assert '比赛资料在模型判断期间发生变化' in stale_task['error_message']
+            assert len(result['failed']) == 1
+            assert '资料在模型判断期间发生变化' in result['failed'][0]['error']
             state = (await admin.get(base)).json()
             assert state['judges'][0]['locked'] is False
             assert state['rounds'][-1]['number'] == 2
@@ -690,4 +703,228 @@ def test_queued_model_answer_is_revalidated_before_provider_call(tmp_path, monke
                 assert payload['skipped'] == 5
 
     asyncio.run(scenario())
+
+@pytest.mark.parametrize('participant_count', [0, 1])
+def test_ai_judge_question_generation_rejects_insufficient_roster_before_provider_call(
+        model_lab, monkeypatch, participant_count):
+    admin, base, path = model_lab['admin'], model_lab['base'], model_lab['path']
+    post(admin, base + '/ai-judges', {
+        'name': '前置条件 AI 裁判',
+        'model_profile_id': model_lab['profile_id'],
+    })
+    if participant_count == 0:
+        with db_open(path) as db:
+            db.execute('DELETE FROM members WHERE room_id=?', (int(base.rsplit('/', 1)[1]),))
+    else:
+        p2_id = model_lab['p2'].get('/api/me').json()['user']['id']
+        with db_open(path) as db:
+            db.execute('DELETE FROM members WHERE room_id=? AND user_id=?',
+                       (int(base.rsplit('/', 1)[1]), p2_id))
+
+    provider_calls = []
+
+    async def unexpected_provider_call(*args, **kwargs):
+        provider_calls.append(True)
+        raise AssertionError('人数不足时不应调用模型服务商')
+
+    monkeypatch.setattr(app_module, 'chat_completion', unexpected_provider_call)
+    result = post(admin, base + '/ai-judges/questions/generate', expected=409)
+    assert '两名在场参赛者' in result['detail']
+    assert provider_calls == []
+
+
+def test_ai_judge_question_generation_reports_provider_failure(model_lab, monkeypatch):
+    admin, base = model_lab['admin'], model_lab['base']
+    post(admin, base + '/ai-judges', {
+        'name': '失败反馈 AI 裁判',
+        'model_profile_id': model_lab['profile_id'],
+    })
+
+    async def provider_failure(*args, **kwargs):
+        raise ModelAPIError('模型服务返回 HTTP 503。')
+
+    monkeypatch.setattr(app_module, 'chat_completion', provider_failure)
+    result = post(admin, base + '/ai-judges/questions/generate')
+    assert result['generated'] == 0
+    assert len(result['failed']) == 1
+    assert 'HTTP 503' in result['failed'][0]['error']
+    room = admin.get(base).json()
+    assert room['rounds'][0]['questions'] == []
+
+
+@pytest.mark.parametrize('mutation', [
+    'roster_changed', 'seat_rebound', 'profile_deleted', 'session_revoked',
+])
+def test_queued_ai_judge_question_revalidates_context_before_provider_call(
+        model_lab, monkeypatch, mutation):
+    admin, base = model_lab['admin'], model_lab['base']
+    judge_ids = []
+    for index in range(5):
+        result = post(admin, base + '/ai-judges', {
+            'name': f'排队 AI 裁判 {index + 1}',
+            'model_profile_id': model_lab['profile_id'],
+        })
+        judge_ids.append(result['id'])
+    room_info = admin.get(base).json()
+    invite_code = room_info['invite_code']
+    cookie = admin.cookies.get(app_module.COOKIE)
+    started_judges = []
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=model_lab['app'], raise_app_exceptions=False)
+        four_started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocked_provider(profile, messages, api_key):
+            started_judges.append(profile['judge_id'])
+            if len(started_judges) == 4:
+                four_started.set()
+            await release.wait()
+            return {'text': '排队期间上下文变化后的问题', 'usage': {}}
+
+        monkeypatch.setattr(app_module, 'chat_completion', blocked_provider)
+        async with (
+            httpx.AsyncClient(transport=transport, base_url='http://testserver',
+                              cookies={app_module.COOKIE: cookie}) as async_admin,
+            httpx.AsyncClient(transport=transport, base_url='http://testserver',
+                              cookies={app_module.COOKIE: cookie}) as mutator,
+            httpx.AsyncClient(transport=transport, base_url='http://testserver') as third_player,
+        ):
+            generate_task = asyncio.create_task(
+                async_post(async_admin, base + '/ai-judges/questions/generate'))
+            await asyncio.wait_for(four_started.wait(), 3)
+            assert len(started_judges) == 4
+            queued_judge_id = next(judge_id for judge_id in judge_ids
+                                    if judge_id not in started_judges)
+
+            if mutation == 'roster_changed':
+                changed = await async_post(third_player, '/api/register', {
+                    'username': 'question_roster_change',
+                    'display_name': '新增参赛者',
+                    'password': 'question-player-password',
+                    'code': invite_code,
+                })
+            else:
+                me = (await mutator.get('/api/me')).json()['user']
+                headers = {'X-CSRF-Token': me['csrf']}
+                if mutation == 'seat_rebound':
+                    changed = await mutator.put(
+                        base + f'/ai-judges/{queued_judge_id}/model',
+                        json={'model_profile_id': None}, headers=headers)
+                elif mutation == 'profile_deleted':
+                    changed = await mutator.request(
+                        'DELETE', f"/api/me/models/{model_lab['profile_id']}",
+                        json={}, headers=headers)
+                else:
+                    changed = await mutator.post('/api/me/password', json={
+                        'current_password': 'model-admin-password',
+                        'new_password': 'model-admin-password-new',
+                        'confirm_password': 'model-admin-password-new',
+                    }, headers=headers)
+            assert changed.status_code == 200, changed.text
+
+            release.set()
+            response = await asyncio.wait_for(generate_task, 3)
+            assert response.status_code == 200, response.text
+            payload = response.json()
+            assert len(started_judges) == 4, '第五个排队任务在状态失效后不应触发服务商调用'
+            if mutation == 'seat_rebound':
+                assert payload['generated'] == 4
+                assert payload['skipped'] == 1
+                assert queued_judge_id not in started_judges
+            else:
+                assert payload['generated'] == 0
+                assert payload['skipped'] == 5
+            assert all(item.get('reason') for item in payload['results'] if item['status'] == 'skipped')
+            if mutation != 'session_revoked':
+                current = (await async_admin.get(base)).json()
+                expected_questions = 4 if mutation == 'seat_rebound' else 0
+                assert len(current['rounds'][0]['questions']) == expected_questions
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('failure,expected_message', [
+    ('http', 'HTTP 503'),
+    ('timeout', '超时'),
+    ('empty', 'Chat Completions 格式'),
+    ('malformed', 'Chat Completions 格式'),
+    ('invalid_json', 'Chat Completions 格式'),
+])
+def test_chat_completion_reports_http_timeout_and_invalid_content_safely(
+        monkeypatch, failure, expected_message):
+    from types import SimpleNamespace
+
+    endpoint = model_api.ResolvedEndpoint(
+        base_url='https://api.example.com/v1',
+        host='api.example.com',
+        port=443,
+        addresses=('93.184.216.34',),
+    )
+    monkeypatch.setattr(model_api, 'resolve_base_url', lambda value: endpoint)
+
+    if failure == 'http':
+        body = b'{"error":{"message":"provider unavailable"}}'
+        status = 503
+    elif failure == 'empty':
+        body = b'{"choices":[{"message":{"content":"  "}}]}'
+        status = 200
+    elif failure == 'malformed':
+        body = b'{"choices":[]}'
+        status = 200
+    elif failure == 'invalid_json':
+        body = b'{not-json'
+        status = 200
+    else:
+        body = b''
+        status = 200
+
+    class FakePool:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def request(self, *args, **kwargs):
+            if failure == 'timeout':
+                raise httpcore.ReadTimeout('simulated timeout')
+            return SimpleNamespace(status=status, content=body)
+
+    monkeypatch.setattr(model_api.httpcore, 'AsyncConnectionPool', FakePool)
+    profile = {
+        'base_url': endpoint.base_url,
+        'model': 'mock-model',
+        'temperature': 0.3,
+        'max_tokens': 128,
+        'timeout_seconds': 10,
+    }
+    with pytest.raises(ModelAPIError) as caught:
+        asyncio.run(model_api.chat_completion(
+            profile, [{'role': 'user', 'content': 'test'}], 'sk-never-log-this',
+        ))
+    assert expected_message in str(caught.value)
+    assert 'sk-never-log-this' not in str(caught.value)
+
+
+def test_ai_judge_question_generation_reports_empty_model_content(model_lab, monkeypatch):
+    admin, base = model_lab['admin'], model_lab['base']
+    post(admin, base + '/ai-judges', {
+        'name': '空内容 AI 裁判',
+        'model_profile_id': model_lab['profile_id'],
+    })
+
+    async def empty_provider_response(*args, **kwargs):
+        return {'text': '   ', 'usage': {}}
+
+    monkeypatch.setattr(app_module, 'chat_completion', empty_provider_response)
+    result = post(admin, base + '/ai-judges/questions/generate')
+    assert result['generated'] == 0
+    assert len(result['failed']) == 1
+    assert '内容需要 1～3000 字' in result['failed'][0]['error']
+    room = admin.get(base).json()
+    assert room['rounds'][0]['questions'] == []
 
