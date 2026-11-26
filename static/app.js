@@ -500,12 +500,6 @@ function renderModelOperationRecords(){
   '<div class="label-line operation-pagination"><span class="tiny muted">第 '+page+' / '+pages+' 页</span><div class="buttonrow"><button class="small" data-action="model-operations-page" data-direction="prev" '+(state.modelOperationOffset<=0?'disabled':'')+'>上一页</button><button class="small" data-action="model-operations-page" data-direction="next" '+(state.modelOperationOffset+20>=state.modelOperationTotal?'disabled':'')+'>下一页</button></div></div>'+
   '</div></details></section>';
 }
-async function openDm(uid){
- const data=await api('/api/messages/'+encodeURIComponent(uid));state.dmMessages=data.messages;state.dmBeforeId=data.next_before_id;state.dmHasMore=data.has_more;
- const box=$('#dmPanel');if(!box)return;
- box.innerHTML=`<div class="divider"></div><h3>与 ${esc(data.other_name)}（${esc(uid)}）私信</h3><div class="feed" id="dmFeed">${state.dmMessages.map(m=>`<div class="feed-item"><strong>${m.mine?'我':esc(m.sender_name)}</strong><div class="feed-text">${esc(m.text)}</div><div class="tiny muted">${esc(shortDate(m.created_at))}</div></div>`).join('')||D('暂无消息')}</div>${data.has_more?'<button class="small" data-action="dm-older" data-uid="'+esc(uid)+'">加载更早消息</button>':''}${data.can_send?`<form data-form="dm-send" data-uid="${esc(uid)}"><textarea name="text" maxlength="2000" required placeholder="输入私信"></textarea><div class="form-actions"><button class="primary" type="submit">发送</button></div></form>`:D('好友关系已解除，只能查看历史消息。')}`;
- if(state.dmMessages.length){const last=state.dmMessages[state.dmMessages.length-1];await api('/api/messages/'+encodeURIComponent(uid)+'/read',{method:'POST',body:{last_read_message_id:last.id}});}
-}
 function renderSocialPanel(){
  const x=state.social||{friends:[],incoming:[],outgoing:[],conversations:[],points:{total_points:'0',current_streak:'0'}};
  const friendRows=x.friends.map(f=>`<div class="feed-item"><strong>${esc(f.note)}</strong> <span class="code">${esc(f.uid)}</span><div class="hint">${esc(f.display_name)} · 积分 ${esc(f.total_points)} · 连胜 ${esc(f.current_streak)}</div><div class="buttonrow"><button class="small" data-action="dm-open" data-uid="${esc(f.uid)}">私信</button><button class="small" data-action="friend-note" data-uid="${esc(f.uid)}">修改备注</button><button class="small" data-action="friend-reset-note" data-uid="${esc(f.uid)}">恢复默认</button><button class="small danger" data-action="friend-delete" data-uid="${esc(f.uid)}">删除好友</button></div></div>`).join('')||D('暂无好友');
