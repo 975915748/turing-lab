@@ -237,10 +237,9 @@ async function closePersonalCenter(page) {
 
     await closePersonalCenter(pageA);
     const judgeNotice = pageA.locator('#judgeNotice');
-    if (await judgeNotice.isVisible()) {
-      await pageA.locator('#judgeNoticeClose').click();
-      await judgeNotice.waitFor({ state: 'hidden' });
-    }
+    await judgeNotice.waitFor({ state: 'visible' });
+    await pageA.locator('#judgeNoticeClose').click();
+    await judgeNotice.waitFor({ state: 'hidden' });
     await pageA.locator('[data-action="friend-from-room"]').click();
     await pageA.getByText('已经是好友', { exact: false }).waitFor();
     await pageA.locator('.account-points-result').waitFor();
