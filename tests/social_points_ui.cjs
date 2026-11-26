@@ -147,9 +147,29 @@ async function closePersonalCenter(page) {
     await visible(pageA.locator('#toast').filter({ hasText: '已恢复为对方当前名字' }));
     await visible(pageA.getByText('好友测试乙').first());
 
+    await closePersonalCenter(pageA);
+    await closePersonalCenter(pageB);
+    await pageA.waitForFunction(() => state.dmSocket === null);
+    await pageB.waitForFunction(() => state.dmSocket === null);
+
+    for (let index = 1; index <= 51; index++) {
+      const sequence = String(index).padStart(2, '0');
+      await api(pageB, 'POST', '/api/messages/' + encodeURIComponent(uidA), {
+        text: '分页消息 ' + sequence,
+        client_message_id: 'social-points-pagination-' + sequence,
+      });
+    }
+
+    await openPersonalCenter(pageA);
     await pageA.locator(`[data-action="dm-open"][data-uid="${uidB}"]`).first().click();
     const dmFormA = pageA.locator('form[data-form="dm-send"]');
     await visible(dmFormA);
+    await pageA.waitForFunction(() => state.dmMessages.length === 50 && state.dmHasMore);
+    await pageA.locator('[data-action="dm-older"]').click();
+    await pageA.waitForFunction(() => state.dmMessages.length === 51 && !state.dmHasMore);
+    assert.equal(await pageA.evaluate(() => state.dmMessages[0]?.text), '分页消息 01');
+    assert.equal(await pageA.evaluate(() => state.dmMessages.at(-1)?.text), '分页消息 51');
+
     const messageText = '<img src=x onerror=alert(1)>私信纯文本';
     await dmFormA.locator('textarea[name="text"]').fill(messageText);
     const incomingDraftProbe = '来自乙的实时同步测试';
@@ -216,6 +236,7 @@ async function closePersonalCenter(page) {
     await pageA.locator('.dm-message.mine').filter({ hasText: '私信纯文本' }).waitFor();
     assert.equal(await pageA.locator('#dmPanel img').count(), 0);
 
+    await openPersonalCenter(pageB);
     await pageB.locator(`[data-action="dm-open"][data-uid="${uidA}"]`).first().click();
     await pageB.locator('.dm-message:not(.mine)').filter({ hasText: '私信纯文本' }).waitFor();
     assert.equal(await pageB.locator('#dmPanel img').count(), 0);
