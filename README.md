@@ -162,8 +162,9 @@ python -m pytest -q
 
 GitHub Actions 的 `.github/workflows/tests.yml` 已安装 Chromium，并设置 `PLAYWRIGHT_CHANNEL=default` 后执行完整的 `python -m pytest -q`；CI 不依赖 Microsoft Edge。
 
-## 8. 部署与历史文档
+## 8. 部署、网页对局与历史文档
 
+- 网页对局统一入口为 `/`，`/game` 会跳转到该入口。接口由主 FastAPI 服务在 `/game/api` 提供，无需单独启动 `server.py`；数据默认保存到主数据库同目录的 `web-game.json`，可通过 `GAME_DATA_FILE` 指定其他路径。
 - Railway 首次部署、现有生产环境升级、数据卷备份和回退：见 [RAILWAY_部署说明.md](RAILWAY_部署说明.md)。
 - 历史升级记录：[v1.3](UPGRADE_v1.3.md)、[v1.4](UPGRADE_v1.4.md)、[v1.5](UPGRADE_v1.5.md)、[v1.5.1](UPGRADE_v1.5.1.md)、[v1.6.0](UPGRADE_v1.6.0.md)。
 - 历史文档中的旧界面入口、旧测试命令和旧部署步骤仅用于理解对应版本，不应直接照搬到当前版本。

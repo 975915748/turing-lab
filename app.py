@@ -17,13 +17,14 @@ from typing import Literal, Optional
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from starlette.staticfiles import StaticFiles
 
 from model_api import (ModelAPIError, chat_completion, decrypt_api_key,
                        encrypt_api_key, has_valid_credential_key, parse_json_object,
                        validate_base_url)
+from game_api import create_game_router
 
 ROOT = Path(__file__).resolve().parent
 DATABASE = ROOT / 'data' / 'game.sqlite3'
@@ -1139,6 +1140,8 @@ def create_app(db_path=None):
     app = FastAPI(title='图灵测试多人主持台', docs_url=None, redoc_url=None)
     app.state.path = path
     app.state.hub = Hub(path)
+    game_data = Path(os.getenv('GAME_DATA_FILE', str(path.parent / 'web-game.json')))
+    app.include_router(create_game_router(game_data), prefix='/game/api')
     async def model_call(profile, messages, api_key, preflight=None):
         loop = asyncio.get_running_loop()
         if getattr(app.state, 'model_semaphore_loop', None) is not loop:
@@ -1160,7 +1163,7 @@ def create_app(db_path=None):
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['X-Frame-Options'] = 'DENY'
         response.headers['Referrer-Policy'] = 'same-origin'
-        if request.url.path.startswith('/api/') or request.url.path == '/':
+        if request.url.path.startswith(('/api/', '/game/api/')) or request.url.path in ('/', '/game'):
             response.headers['Cache-Control'] = 'no-store'
         return response
 
@@ -1202,7 +1205,11 @@ def create_app(db_path=None):
 
     @app.get('/')
     def home():
-        return FileResponse(ROOT/'static'/'index.html')
+        return FileResponse(ROOT/'static'/'game-index.html')
+
+    @app.get('/game')
+    def game_home():
+        return RedirectResponse('/', status_code=307)
 
     @app.get('/api/health')
     def health():

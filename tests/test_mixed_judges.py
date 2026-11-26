@@ -132,12 +132,12 @@ def test_ui_static_assets_versioned(tmp_path):
     c=TestClient(app)
     homepage=c.get('/')
     assert homepage.status_code == 200 and homepage.headers['Cache-Control'] == 'no-store'
-    script=re.search(r'src="(/static/app\.js\?v=[^"]+)"', homepage.text)
-    assert script is not None
-    response=c.get(script.group(1))
-    assert response.status_code == 200
-    js=response.text
-    for field in ('add-ai-judge','ai-judge-question','ai-judge-verdict','human-judges','ai-judges','personal-center','公共聊天'):
-        assert field in js
-    assert '真人 / AI 裁判管理' not in js
+    style=re.search(r"'style\.css\?v=([^']+)'", homepage.text)
+    script=re.search(r"'app\.js\?v=([^']+)'", homepage.text)
+    assert style is not None and script is not None
+    for asset in ('style.css?v='+style.group(1), 'app.js?v='+script.group(1)):
+        assert c.get('/static/' + asset).status_code == 200
+    for field in ('普通比赛','进阶比赛','排行榜','观测台','公共聊天','addAiJudge'):
+        assert field in homepage.text
+    assert '真人 / AI 裁判管理' not in homepage.text
 
