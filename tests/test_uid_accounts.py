@@ -178,6 +178,11 @@ def snapshot(db):
             for row in rows:
                 row.pop('model_request_limit', None)
                 row.pop('match_started_at', None)
+        # Exit migration adds nullable state; all original values must still match.
+        added_column={'rooms':'closed_at','members':'leave_reason','room_judges':'left_at'}.get(name)
+        if added_column:
+            for row in rows:
+                assert row.pop(added_column,None) is None
         result[name] = rows
     return result
 
@@ -278,3 +283,4 @@ def test_same_named_judges_assign_by_uid_and_remain_anonymous(accounts):
     assert '玩家公共聊天消息' not in json.dumps(judge_state,ensure_ascii=False)
     # The retired suggestions write path is explicitly disabled.
     post(two,base+'/suggestions',{'text':'旧版追问入口'},410)
+

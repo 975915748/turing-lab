@@ -73,6 +73,10 @@ async function shot(page, name) {
     await page.getByRole('button', {name:'深色',exact:false}).click();
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     await shot(page, 'packets-collapsed-mobile-dark.png');
+    // Returning to the lobby now closes an unfinished owner's room. Finish first
+    // so this scenario can continue to test clearing completed records.
+    await call(host, base + '/verdict', {predictions:{A:'Human',B:'AI'},evidence:'依据',confidence:50});
+    await call(host, base + '/reveal', {});
     await page.locator('[data-action="back"]').click();
     const eraseRoom = page.locator(`[data-action="delete-room"][data-id="${room.room_id}"]`);
     await eraseRoom.waitFor();
@@ -82,8 +86,6 @@ async function shot(page, name) {
     assert.equal((await host.request.get(site + base)).status(), 200);
     accept = true;
     await shot(page, 'room-delete-lobby-mobile-dark.png');
-    await call(host, base + '/verdict', {predictions:{A:'Human',B:'AI'},evidence:'依据',confidence:50});
-    await call(host, base + '/reveal', {});
     await page.reload();
     await page.locator(`[data-action="delete-records"][data-id="${room.room_id}"]`).click();
     await page.getByRole('heading', {name:'已完赛房间记录',exact:true}).waitFor({state:'detached'});
@@ -112,3 +114,4 @@ async function shot(page, name) {
     console.log('Room deletion, hidden cleared records and accessible packet folding passed');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
+

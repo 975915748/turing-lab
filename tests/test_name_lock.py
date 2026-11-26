@@ -50,7 +50,7 @@ def join_as_player(client, code):
     return post(client, "/api/join", {"code": code, "role": "player"})
 
 
-def test_legacy_start_keeps_removed_member_locked_until_reveal(env):
+def test_legacy_start_unlocks_removed_member_immediately(env):
     _, _, admin, host, player, third, judge = env
     created, base = create_room(host, "手动裁判改名锁")
     host_alias = join_as_player(host, created["code"])["alias"]
@@ -70,15 +70,15 @@ def test_legacy_start_keeps_removed_member_locked_until_reveal(env):
         put(client, "/api/me/profile", {"display_name": "不应生效"}, status=409)
     assert admin.get("/api/me").json()["user"]["name_change_locked"] is False
 
-    # Removal preserves this match's name lock and pushes the updated state to an open personal-center session.
+    # Removal releases this room's participant lock (user-confirmed departure rule).
     third_id = third.get("/api/me").json()["user"]["id"]
     with third.websocket_connect("/ws/messages") as socket:
         assert socket.receive_json()["type"] == "connected"
         post(host, f"{base}/members/{third_id}/remove", match=1)
         update = socket.receive_json()
         assert update["type"] == "name_lock_updated"
-        assert third.get("/api/me").json()["user"]["name_change_locked"] is True
-        put(third, "/api/me/profile", {"display_name": "移出后仍锁名"}, status=409)
+        assert third.get("/api/me").json()["user"]["name_change_locked"] is False
+        put(third, "/api/me/profile", {"display_name": "移出后可改名"})
 
     post(host, base + "/answers", {"text": "房主回答"}, match=1)
     post(player, base + "/answers", {"text": "玩家回答"}, match=1)
@@ -134,7 +134,7 @@ def test_lock_is_account_wide_across_rooms_until_last_room_finishes_or_is_delete
     assert player.get("/api/me").json()["user"]["name_change_locked"] is True
     player_id = player.get("/api/me").json()["user"]["id"]
     post(first_host, f"{base1}/members/{player_id}/remove", match=1)
-    # Removal keeps the first room's current-match lock; the second unfinished room also locks the account.
+    # Removal releases the first room; the second unfinished room still locks the account.
     assert player.get("/api/me").json()["user"]["name_change_locked"] is True
     put(player, "/api/me/profile", {"display_name": "仍被第二间锁定"}, status=409)
     request(first_host, "DELETE", base1, {"match_number": 1, "confirm": True})
@@ -214,3 +214,4 @@ def test_profile_update_and_match_start_are_serialized(env):
         assert current["display_name"] == "并发改名"
     else:
         assert current["display_name"] == "玩家0"
+

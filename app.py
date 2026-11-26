@@ -715,7 +715,7 @@ def require_origin(headers):
 
 
 def is_judge(db, room_id, user):
-    return db.execute('SELECT label FROM room_judges WHERE room_id=? AND user_id=?',
+    return db.execute('SELECT label FROM room_judges WHERE room_id=? AND user_id=? AND left_at IS NULL',
                       (room_id, user['id'])).fetchone()
 
 
@@ -752,7 +752,7 @@ def can_view_room(db, room_id, user):
     if room['owner_id'] == user['id']:
         return True
     return bool(db.execute('''SELECT 1 FROM members WHERE room_id=? AND user_id=? AND removed_at IS NULL
-        UNION ALL SELECT 1 FROM room_judges WHERE room_id=? AND user_id=? LIMIT 1''',
+        UNION ALL SELECT 1 FROM room_judges WHERE room_id=? AND user_id=? AND left_at IS NULL LIMIT 1''',
         (room_id,user['id'],room_id,user['id'])).fetchone())
 
 
@@ -769,7 +769,7 @@ def judge_records(db, room_id):
     people = db.execute("""SELECT j.user_id,j.label,u.username,j.created_at,
         EXISTS(SELECT 1 FROM judge_verdicts v WHERE v.room_id=j.room_id AND v.judge_user_id=j.user_id) AS locked
         FROM room_judges j JOIN users u ON u.id=j.user_id
-        WHERE j.room_id=? AND (u.deleted_at IS NULL OR EXISTS(
+        WHERE j.room_id=? AND j.left_at IS NULL AND (u.deleted_at IS NULL OR EXISTS(
             SELECT 1 FROM judge_verdicts v WHERE v.room_id=j.room_id AND v.judge_user_id=j.user_id))""", (room_id,)).fetchall()
     ai = db.execute("""SELECT j.id,j.label,j.created_at,j.model_profile_id,
         EXISTS(SELECT 1 FROM ai_judge_verdicts v WHERE v.room_id=j.room_id AND v.ai_judge_id=j.id) AS locked
@@ -783,7 +783,7 @@ def check_no_other_active_judge_room(db, user_id, room_id, viewer=None):
     conflict = db.execute('''SELECT r.id,r.title FROM room_judges j
         JOIN rooms r ON r.id=j.room_id
         JOIN users u ON u.id=j.user_id
-        WHERE j.user_id=? AND j.room_id<>? AND r.status<>'finished'
+        WHERE j.user_id=? AND j.room_id<>? AND j.left_at IS NULL AND r.status='open'
           AND u.deleted_at IS NULL
         ORDER BY r.id LIMIT 1''', (user_id, room_id)).fetchone()
     if conflict:
@@ -800,7 +800,8 @@ def check_restart_judge_conflicts(db, room_id, viewer=None):
         JOIN users u ON u.id=target_judge.user_id AND u.deleted_at IS NULL
         JOIN room_judges other ON other.user_id=target_judge.user_id AND other.room_id<>target_judge.room_id
         JOIN rooms r ON r.id=other.room_id
-        WHERE target_judge.room_id=? AND r.status<>'finished'
+        WHERE target_judge.room_id=? AND target_judge.left_at IS NULL
+          AND other.left_at IS NULL AND r.status='open'
         ORDER BY u.id,r.id''', (room_id,)).fetchall()
     if conflicts:
         details = []
@@ -909,8 +910,8 @@ def name_change_status(db, user_id):
     active = db.execute('''SELECT r.id FROM rooms r
         WHERE r.status='open' AND r.match_started_at IS NOT NULL AND (
             r.owner_id=? OR
-            EXISTS(SELECT 1 FROM room_judges j WHERE j.room_id=r.id AND j.user_id=?) OR
-            EXISTS(SELECT 1 FROM members m WHERE m.room_id=r.id AND m.user_id=?)
+            EXISTS(SELECT 1 FROM room_judges j WHERE j.room_id=r.id AND j.user_id=? AND j.left_at IS NULL) OR
+            EXISTS(SELECT 1 FROM members m WHERE m.room_id=r.id AND m.user_id=? AND m.removed_at IS NULL)
         ) LIMIT 1''', (user_id, user_id, user_id)).fetchone()
     locked = bool(active)
     return {
@@ -1123,7 +1124,7 @@ def public_room(db, room, user, mine):
             verdicts.append({'judge':room['judge'],'legacy':True,**verdict})
         for row in db.execute('''SELECT j.label,v.verdict_json FROM judge_verdicts v
             JOIN room_judges j ON j.room_id=v.room_id AND j.user_id=v.judge_user_id
-            WHERE v.room_id=? ORDER BY j.created_at,j.user_id''',(room['id'],)):
+            WHERE v.room_id=? AND j.left_at IS NULL ORDER BY j.created_at,j.user_id''',(room['id'],)):
             verdicts.append({'judge':row['label'],'kind':'human','legacy':False,
                              **json.loads(row['verdict_json'])})
         for row in db.execute('''SELECT j.label,v.verdict_json FROM ai_judge_verdicts v
@@ -1190,13 +1191,14 @@ def public_room(db, room, user, mine):
             my_points_result=dict(points_row)
     result={'id':room['id'],'title':room['title'],'judge':room['judge'],
             'match_number':room['match_number'],'records_deleted':bool(room['records_deleted']),
-            'my_points_result':my_points_result,
+            'my_points_result':my_points_result,'match_started':bool(room['match_started_at']),
             'can_manage':manager,'is_owner':room['owner_id']==user['id'],
             'roster_recovery':manager and needs_roster_recovery(db,room),
             'status':room['status'],'current_round':room['current_round'],
             'verdict_locked':bool(room['verdict_locked_at']) or (bool(judges) and all(j['locked'] for j in judges)),
             'revealed_at':room['revealed_at'],'verdict':verdict,'verdicts':verdicts,
             'mine':mine,'is_admin':is_admin,'is_judge':False,
+            'self_withdrawn':bool(db.execute('SELECT 1 FROM members WHERE room_id=? AND user_id=? AND removed_at IS NOT NULL',(room['id'],user['id'])).fetchone()),
             'invite_code':room['code'] if manager else None,
             'humans':[{'alias':r['alias'],'user_id':r['user_id'],'uid':user_uid(r['user_id']),
                        'name':r['display_name'], 'username':r['username']} for r in humans],
@@ -1728,6 +1730,10 @@ def create_app(db_path=None):
                 room = db.execute('SELECT * FROM rooms WHERE id=?', (int(match[1]),)).fetchone()
                 if room:
                     check_match_number(room, request.headers['x-match-number'])
+            if match:
+                room=db.execute('SELECT status FROM rooms WHERE id=?',(int(match[1]),)).fetchone()
+                if room and room['status']=='closed' and request.method!='DELETE' and not request.url.path.endswith(('/leave','/restart')):
+                    raise HTTPException(409,'房间已关闭，只能查看记录或重新开赛。')
         return u
 
     def set_session(response, db, user_id):
@@ -1754,10 +1760,10 @@ def create_app(db_path=None):
             rooms = db.execute('''SELECT DISTINCT r.id,r.title,r.status,r.current_round,r.created_at,r.match_number,
                 CASE WHEN ?=1 THEN 'admin'
                      WHEN r.owner_id=? THEN 'owner'
-                     WHEN EXISTS(SELECT 1 FROM room_judges j WHERE j.room_id=r.id AND j.user_id=?) THEN 'judge'
+                     WHEN EXISTS(SELECT 1 FROM room_judges j WHERE j.room_id=r.id AND j.user_id=? AND j.left_at IS NULL) THEN 'judge'
                      ELSE 'player' END AS role
                 FROM rooms r LEFT JOIN members m ON r.id=m.room_id
-                LEFT JOIN room_judges j ON j.room_id=r.id
+                LEFT JOIN room_judges j ON j.room_id=r.id AND j.left_at IS NULL
                 WHERE (m.user_id=? AND m.removed_at IS NULL) OR j.user_id=? OR r.owner_id=? OR ?=1 ORDER BY r.id DESC''',
                 (u['is_admin'],u['id'],u['id'],u['id'],u['id'],u['id'],u['is_admin'])).fetchall()
             finished = db.execute('''SELECT id,title,match_number,records_deleted FROM rooms
@@ -2175,6 +2181,60 @@ def create_app(db_path=None):
             await app.state.hub.notify(room_id,'account_deleted')
         return {'ok':True,'signed_out':target['id']==u['id']}
 
+    async def depart_room(room_id, body, request, *, withdraw_only=False):
+        if not body.confirm:
+            raise HTTPException(422,'请确认退出操作。')
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
+            if not room:
+                raise HTTPException(404,'房间不存在。')
+            check_match_number(room,body.match_number)
+            member=db.execute('SELECT * FROM members WHERE room_id=? AND user_id=?',(room_id,u['id'])).fetchone()
+            judge=db.execute('SELECT * FROM room_judges WHERE room_id=? AND user_id=?',(room_id,u['id'])).fetchone()
+            manager=can_manage_room(room,u)
+            if not (member or judge or manager):
+                raise HTTPException(403,'你不属于这个房间。')
+            if withdraw_only and not manager:
+                raise HTTPException(403,'仅房主或管理员可使用管理台退赛。')
+            closed=room['status']=='closed'
+            affected=[u['id']]
+            # Departing a terminal room never rewrites its roster, ballots or settlement.
+            if room['status']=='open':
+                now=utcnow()
+                if room['owner_id']==u['id'] and not withdraw_only:
+                    closed=True
+                    affected=room_lock_user_ids(db,room_id)
+                    db.execute("UPDATE rooms SET status='closed',closed_at=? WHERE id=?",(now,room_id))
+                    db.execute("""UPDATE model_operation_tasks SET state='stale',error_message=?,
+                        finished_at=?,updated_at=? WHERE room_id=? AND match_number=?
+                        AND state IN ('queued','requesting')""",
+                        ('房主已关闭房间，旧任务不再应用。',now,now,room_id,room['match_number']))
+                    log_event(db,room_id,room['current_round'],'room_closed','房主','关闭房间；保留记录，不结算积分')
+                else:
+                    if member and member['removed_at'] is None:
+                        db.execute("UPDATE members SET removed_at=?,leave_reason='voluntary' WHERE room_id=? AND user_id=?",
+                                   (now,room_id,u['id']))
+                        log_event(db,room_id,room['current_round'],'member_left',member['alias'],'主动退赛；历史回答保留')
+                    if judge and judge['left_at'] is None and not withdraw_only:
+                        db.execute('UPDATE room_judges SET left_at=? WHERE room_id=? AND user_id=?',(now,room_id,u['id']))
+                        log_event(db,room_id,room['current_round'],'judge_left','裁判','真人裁判退出本场比赛')
+                    rnd=current_round(db,room)
+                    if rnd['status']=='collecting' and is_complete(db,rnd,room_id):
+                        log_event(db,room_id,rnd['number'],'round_revealed','系统','在场参赛者已全部提交，统一公开')
+        app.state.hub.typing.pop(room_id,None)
+        await app.state.hub.notify(room_id,'room_closed' if closed else 'member_left')
+        await app.state.hub.notify_accounts(affected,{'type':'name_lock_updated'})
+        return {'ok':True,'closed':closed,'match_number':room['match_number']}
+
+    @app.post('/api/rooms/{room_id}/leave')
+    async def leave_room(room_id:int,body:MatchActionData,request:Request):
+        return await depart_room(room_id,body,request)
+
+    @app.post('/api/rooms/{room_id}/withdraw')
+    async def withdraw_from_match(room_id:int,body:MatchActionData,request:Request):
+        return await depart_room(room_id,body,request,withdraw_only=True)
+
     @app.post('/api/join')
     async def join(body:CodeData,request:Request):
         with connection(immediate=True) as db:
@@ -2183,6 +2243,12 @@ def create_app(db_path=None):
             if not room:
                 raise HTTPException(404,'邀请码无效。')
             room_id=room['id']
+            if room['status']=='closed':
+                raise HTTPException(409,'房间已关闭，不能加入。')
+            left_judge=db.execute('SELECT left_at FROM room_judges WHERE room_id=? AND user_id=?',
+                                  (room_id,u['id'])).fetchone()
+            if left_judge and left_judge['left_at'] is not None and room['match_started_at']:
+                raise HTTPException(403,'你已退出本场比赛，下一场可以重新加入。')
             if body.role == 'judge':
                 if u['is_admin']:
                     raise HTTPException(403,'管理员账号不能作为独立真人裁判加入。')
@@ -2191,7 +2257,8 @@ def create_app(db_path=None):
                     return {'room_id':room_id,'role':'judge','label':existing_judge['label']}
                 check_judge_registration(db,room,u['id'],viewer=u)
                 label=norm_text(u['display_name'],40)
-                db.execute('INSERT INTO room_judges(room_id,user_id,label,created_at) VALUES(?,?,?,?)',
+                db.execute('''INSERT INTO room_judges(room_id,user_id,label,created_at) VALUES(?,?,?,?)
+                    ON CONFLICT(room_id,user_id) DO UPDATE SET left_at=NULL,label=excluded.label''',
                            (room_id,u['id'],label,utcnow()))
                 log_event(db,room_id,room['current_round'],'judge_joined','裁判','真人裁判通过邀请码加入')
                 role='judge'
@@ -2202,13 +2269,21 @@ def create_app(db_path=None):
                                (room_id,u['id'])).fetchone()
                 if old:
                     return {'room_id':room_id,'alias':old['alias']}
-                if db.execute('SELECT 1 FROM members WHERE room_id=? AND user_id=? AND removed_at IS NOT NULL',
-                              (room_id,u['id'])).fetchone():
-                    raise HTTPException(403,'你已被主持人移出这个房间，不能重新加入。')
+                prior=db.execute('SELECT alias,leave_reason FROM members WHERE room_id=? AND user_id=? AND removed_at IS NOT NULL',
+                                 (room_id,u['id'])).fetchone()
+                if prior and (prior['leave_reason']!='voluntary' or room['match_started_at']):
+                    raise HTTPException(403,'你已离开本场比赛，下一场可以重新加入；被移除者不能重入本场。')
                 ensure_roster_unlocked(db,room)
-                alias=new_alias(db,room_id)
-                db.execute('INSERT INTO members(room_id,user_id,alias,joined_at) VALUES(?,?,?,?)',
-                           (room_id,u['id'],alias,utcnow()))
+                if prior:
+                    if active_participant_count(db,room_id)>=MAX_PLAYERS:
+                        raise HTTPException(409,f'最多支持 {MAX_PLAYERS} 位参赛者。')
+                    alias=prior['alias']
+                    db.execute('UPDATE members SET removed_at=NULL,leave_reason=NULL,joined_at=? WHERE room_id=? AND user_id=?',
+                               (utcnow(),room_id,u['id']))
+                else:
+                    alias=new_alias(db,room_id)
+                    db.execute('INSERT INTO members(room_id,user_id,alias,joined_at) VALUES(?,?,?,?)',
+                               (room_id,u['id'],alias,utcnow()))
                 log_event(db,room_id,1,'joined',alias,'加入比赛')
                 role='player'
         await app.state.hub.notify(room_id,'judge_added' if role=='judge' else 'joined')
@@ -2427,18 +2502,18 @@ def create_app(db_path=None):
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
             check_match_number(room,body.match_number)
-            if room['status']!='finished':
-                raise HTTPException(409,'必须先完成当前比赛才能再次开赛。')
+            if room['status'] not in ('finished','closed'):
+                raise HTTPException(409,'必须先完成或关闭当前比赛才能再次开赛。')
             # Must run before clearing the previous match: a retained judge cannot be
             # reactivated while they are still judging another unfinished room.
             check_restart_judge_conflicts(db,room_id,u)
             clear_match_records(db,room_id)
             db.execute('''DELETE FROM members WHERE room_id=? AND (removed_at IS NOT NULL OR
                 user_id IN (SELECT id FROM users WHERE deleted_at IS NOT NULL))''',(room_id,))
-            db.execute('''DELETE FROM room_judges WHERE room_id=? AND user_id IN
-                (SELECT id FROM users WHERE deleted_at IS NOT NULL)''',(room_id,))
+            db.execute('''DELETE FROM room_judges WHERE room_id=? AND (left_at IS NOT NULL OR user_id IN
+                (SELECT id FROM users WHERE deleted_at IS NOT NULL))''',(room_id,))
             db.execute('''UPDATE rooms SET status='open',current_round=1,records_deleted=0,
-                match_started_at=NULL,match_number=match_number+1 WHERE id=?''',(room_id,))
+                match_started_at=NULL,closed_at=NULL,match_number=match_number+1 WHERE id=?''',(room_id,))
             db.execute('INSERT INTO rounds(room_id,number,created_at) VALUES(?,?,?)',(room_id,1,utcnow()))
             new_match_number=room['match_number']+1
             log_event(db,room_id,1,'match_restarted','主持人','重新开赛，上一场比赛记录已清空')
@@ -3169,13 +3244,13 @@ def create_app(db_path=None):
         with connection() as db:
             u=caller(request,db)
             room,mine=permission(db,room_id,u)
-            if room['status']!='finished':
-                raise HTTPException(409,'比赛尚未结束，不能下载整场日志。')
+            if room['status'] not in ('finished','closed'):
+                raise HTTPException(409,'比赛尚未结束或关闭，不能下载整场日志。')
             if room['records_deleted']:
                 raise HTTPException(409,'这场比赛的记录已被清除。')
             data=public_room(db,room,u,mine)
             lines=[f'# {room["title"]} · 整场比赛 Log', '',
-                   f'轮次：{room["current_round"]} · 结束时间：{room["revealed_at"]}',
+                   f'轮次：{room["current_round"]} · {"关闭时间" if room["status"]=="closed" else "结束时间"}：{room["closed_at"] or room["revealed_at"]}',
                    '']
             for num in range(1,room['current_round']+1):
                 lines.append(round_markdown(db,room,num,u,mine))
@@ -3661,4 +3736,5 @@ def create_app(db_path=None):
 
 
 app=create_app()
+
 

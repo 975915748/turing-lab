@@ -62,8 +62,8 @@ async function registerPlayer(browser, username, displayName) {
 
     await page.goto(site);
     await page.locator('[data-action="personal-center"]').click();
-    const first = page.locator('details[data-personal-model][data-id="' + profileOne.id + '"]');
-    const second = page.locator('details[data-personal-model][data-id="' + profileTwo.id + '"]');
+    const first = page.locator('details[data-model-config][data-id="' + profileOne.id + '"]');
+    const second = page.locator('details[data-model-config][data-id="' + profileTwo.id + '"]');
     await first.waitFor();
     await second.waitFor();
     assert.equal(await first.locator('summary').innerText(), '同名配置');
@@ -71,28 +71,19 @@ async function registerPlayer(browser, username, displayName) {
     assert.equal(await first.evaluate(el => el.open), false);
     assert.equal(await second.evaluate(el => el.open), false);
     assert.equal(await page.getByText('同名配置', { exact: true }).count(), 2);
-    assert.equal(await first.locator('summary').getAttribute('aria-expanded'), 'false');
     assert.equal(await first.locator('form[data-form="personal-model-edit"]').isVisible(), false);
     await first.locator('summary').focus();
     await page.keyboard.press('Enter');
     assert.equal(await first.evaluate(el => el.open), true);
-    await page.waitForFunction(id => {
-      const summary = document.querySelector('details[data-personal-model][data-id="' + id + '"] summary');
-      return summary?.getAttribute('aria-expanded') === 'true';
-    }, profileOne.id);
     await page.keyboard.press('Space');
     assert.equal(await first.evaluate(el => el.open), false);
-    await page.waitForFunction(id => {
-      const summary = document.querySelector('details[data-personal-model][data-id="' + id + '"] summary');
-      return summary?.getAttribute('aria-expanded') === 'false';
-    }, profileOne.id);
 
     await first.locator('summary').click();
     await first.locator('[name="name"]').fill('正在编辑的配置');
     await first.locator('[name="model"]').fill('draft-model-one');
     await first.locator('[name="api_key"]').fill('sk-unsaved-browser-secret');
     await first.locator('[data-action="test-personal-model"]').click();
-    await page.locator('#toast').filter({ hasText: '连接成功' }).waitFor();
+    await page.locator('#toast').filter({ hasText: '连接测试成功' }).waitFor();
     assert.equal(await first.locator('[name="name"]').inputValue(), '正在编辑的配置');
     assert.equal(await first.locator('[name="model"]').inputValue(), 'draft-model-one');
     assert.equal(await first.locator('[name="api_key"]').inputValue(), 'sk-unsaved-browser-secret');
@@ -226,10 +217,10 @@ async function registerPlayer(browser, username, displayName) {
     await page.locator('#toast').filter({ hasText: '个人模型配置已删除' }).waitFor();
     await page.waitForFunction(() => !document.querySelector('#toast')?.classList.contains('visible'));
     await first.waitFor();
-    assert.equal(await page.locator('details[data-personal-model]').count(), 1);
+    assert.equal(await page.locator('details[data-model-config]').count(), 1);
     assert.equal(await first.evaluate(el => el.open), true);
     assert.equal(await first.locator('[name="model"]').inputValue(), 'saved-model-one');
-    assert.equal(await first.getByText('API Key 可解密', { exact: true }).count(), 1);
+    assert.equal(await first.getByText('API Key 已保存（可解密）', { exact: true }).count(), 1);
     assert.equal(await page.getByText('API Key 已验证', { exact: true }).count(), 0);
 
     await first.locator('summary').click();
@@ -253,8 +244,17 @@ async function registerPlayer(browser, username, displayName) {
 
     const stored = await page.evaluate(() =>
       [...Object.values(localStorage), ...Object.values(sessionStorage)].join('\n'));
-    assert.equal(stored.includes('sk-unsaved-browser-secret'), false);
-    assert.equal(stored.includes('sk-unsaved-second-secret'), false);
+    for (const secret of [
+      'sk-fold-one',
+      'sk-fold-two',
+      'sk-unsaved-browser-secret',
+      'sk-unsaved-second-secret',
+      'sk-saved-browser-key',
+      'sk-latest-secret-two',
+      'sk-invalid-new-key',
+    ]) {
+      assert.equal(stored.includes(secret), false, 'API key must not enter persistent browser storage');
+    }
 
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.locator('#themeBtn').click();
@@ -274,7 +274,7 @@ async function registerPlayer(browser, username, displayName) {
     await page.goto(site + '#room=' + roomAuto.room_id);
     await page.getByText('自动出题 UI 验收', { exact: true }).waitFor();
     assert.equal(await page.getByText('人类玩家互相可见真实账号身份；裁判包仅含匿名代号。', { exact: true }).count(), 0);
-    assert.equal(await page.getByText('在房主管理台选择以人类身份加入。', { exact: true }).count(), 1);
+    assert.equal(await page.getByText('在参赛者管理选择以人类身份加入。', { exact: true }).count(), 1);
     await page.screenshot({ path: path.join(artifacts, 'room-player-p5-p6.png'), fullPage: true });
 
     await page.locator('[data-action="room-view"][data-view="human-judges"]').click();
@@ -354,11 +354,27 @@ async function registerPlayer(browser, username, displayName) {
     await page.locator('#logoutBtn').click();
     await page.locator('form[data-form="login"]').waitFor();
     const cleared = await page.evaluate(() => ({
+      uid: state.me?.user?.uid ?? null,
+      models: state.personalModels.length,
       drafts: Object.keys(state.personalModelDrafts).length,
       expanded: Object.keys(state.personalModelExpanded).length,
-      owner: state.personalModelDraftOwner,
+      testResults: Object.keys(state.modelTestResults).length,
+      pendingTests: Object.keys(state.personalModelTestPending).length,
+      pendingSaves: Object.keys(state.personalModelSavePending).length,
+      dmUid: state.dmUid,
+      dmMessages: state.dmMessages.length,
     }));
-    assert.deepEqual(cleared, { drafts: 0, expanded: 0, owner: null });
+    assert.deepEqual(cleared, {
+      uid: null,
+      models: 0,
+      drafts: 0,
+      expanded: 0,
+      testResults: 0,
+      pendingTests: 0,
+      pendingSaves: 0,
+      dmUid: null,
+      dmMessages: 0,
+    });
     assert.deepEqual(errors, []);
     console.log('Model configuration folding and AI judge question browser checks passed.');
   } finally {

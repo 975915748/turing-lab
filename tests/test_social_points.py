@@ -316,8 +316,8 @@ def test_mixed_human_ai_judges_tie_is_loss_and_removed_player_is_not_settled(env
             (removed_id, "36", "3", "2026-11-26T00:00:00+00:00"),
         )
     post(host, f"{base}/members/{removed_id}/remove", match=1)
-    assert removed.get("/api/me").json()["user"]["name_change_locked"] is True
-    request(removed, "PUT", "/api/me/profile", {"display_name": "移出后仍锁名"}, expected=409)
+    assert removed.get("/api/me").json()["user"]["name_change_locked"] is False
+    request(removed, "PUT", "/api/me/profile", {"display_name": "移出后可改名"})
 
     post(host, base + "/answers", {"text": "房主回答"}, match=1)
     post(player, base + "/answers", {"text": "玩家回答"}, match=1)
@@ -382,3 +382,4 @@ def test_invalid_final_judgment_rolls_back_match_finish_chat_and_points(env):
     with db_open(path) as db:
         assert db.execute("SELECT COUNT(*) FROM match_settlements").fetchone()[0] == 0
         assert db.execute("SELECT COUNT(*) FROM points_ledger").fetchone()[0] == 0
+
