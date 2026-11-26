@@ -120,10 +120,11 @@ def test_independent_judge_start_locks_judge_and_room_roles(env):
 
 
 def test_lock_is_account_wide_across_rooms_until_last_room_finishes_or_is_deleted(env):
-    _, _, admin, first_host, player, second_host, _ = env
+    _, _, admin, first_host, player, second_host, third = env
     room1, base1 = create_room(first_host, "第一间")
     join_as_player(first_host, room1["code"])
     join_as_player(player, room1["code"])
+    join_as_player(third, room1["code"])
     post(first_host, base1 + "/question", {"text": "第一间问题"}, match=1)
 
     room2, base2 = create_room(second_host, "第二间")
