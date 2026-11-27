@@ -3726,29 +3726,32 @@ def create_app(db_path=None):
         await app.state.hub.notify(room_id,'round_workflow_updated')
         return {'ok':True,'workflow':workflow_view(updated)}
 
-    @app.post('/api/rooms/{room_id}/start')
+    @app.post('/api/rooms/{room_id}/start',status_code=202)
     async def start_round(room_id:int,request:Request):
         with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
-            active=db.execute("""SELECT 1 FROM round_workflows
-                WHERE room_id=? AND match_number=? AND round_number=?
-                  AND state IN ('queued','generating_questions','starting_round','generating_answers',
-                                'waiting_input','blocked','failed') LIMIT 1""",
-                (room_id,room['match_number'],room['current_round'])).fetchone()
-            if active:
-                raise HTTPException(409,'本轮已有服务端工作流；请在参赛者管理中查看其状态。')
-            validation=inspect_round_start(db,room)
-            if validation['reason']:
-                raise HTTPException(409,validation['reason'])
-            rnd=validation['round']
-            question=validation['question']
-            start_round_record(db,room,rnd,question)
-            name_lock_user_ids=room_lock_user_ids(db,room_id)
-            log_event(db,room_id,rnd['number'],'judge_question','独立裁判组','主持人已开启统一作答')
-        await app.state.hub.notify(room_id,'judge_question')
-        await app.state.hub.notify_accounts(name_lock_user_ids, {'type':'name_lock_updated'})
-        return {'ok':True}
+            key=request.headers.get('Idempotency-Key','').strip()
+            if not key:
+                key=f"compat-start:{room['match_number']}:{room['current_round']}"
+            if len(key)>128:
+                raise HTTPException(422,'Idempotency-Key 不能超过 128 字符。')
+            existing=db.execute('SELECT * FROM round_workflows WHERE room_id=? AND idempotency_key=?',
+                                (room_id,key)).fetchone()
+            if existing:
+                view=workflow_view(existing)
+                workflow_id=existing['id']
+            else:
+                rnd=current_round(db,room)
+                if rnd['status']!='draft':
+                    raise HTTPException(409,'当前轮次已经开始或结束。')
+                workflow_id,_,_=create_round_workflow(
+                    db,room,u,rnd,mode='start',include_ai_questions=True,idempotency_key=key)
+                row=db.execute('SELECT * FROM round_workflows WHERE id=?',(workflow_id,)).fetchone()
+                view=workflow_view(row)
+        app.state.workflow_worker.wake()
+        await app.state.hub.notify(room_id,'round_workflow_updated')
+        return {'ok':True,'workflow_id':workflow_id,'workflow':view}
 
     @app.post('/api/rooms/{room_id}/ai')
     async def add_ai(room_id:int,body:AIData,request:Request):
