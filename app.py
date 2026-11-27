@@ -2518,22 +2518,23 @@ def create_app(db_path=None):
             if workflow['mode']=='prepare_only':
                 result=await generate_ai_judge_questions_shared(
                     room_id,actor_id=workflow['requester_user_id'],workflow=workflow)
-                if result.get('interrupted') or any(x.get('status') in ('interrupted','requesting')
-                                                    for x in result.get('results',[])):
+                with connection() as db:
+                    has_questions=bool(round_question_rows(db,room_id,workflow['round_number']))
+                if has_questions:
+                    # A valid manual/other-judge question is sufficient to finish
+                    # preparation; never force a retry of an unknown provider call.
+                    update_workflow_state(workflow,'completed')
+                elif result.get('interrupted') or any(x.get('status') in ('interrupted','requesting')
+                                                      for x in result.get('results',[])):
                     update_workflow_state(workflow,'waiting_input',
                         waiting_reason='模型请求结果未知；请核对比赛内容后，由房主明确确认是否重试。')
+                elif result.get('blocked'):
+                    update_workflow_state(workflow,'blocked',error='AI 裁判问题生成被本场请求额度阻止。')
+                elif result.get('failed'):
+                    update_workflow_state(workflow,'failed',error='AI 裁判问题生成失败；请检查席位状态后恢复。')
                 else:
-                    with connection() as db:
-                        has_questions=bool(round_question_rows(db,room_id,workflow['round_number']))
-                    if has_questions:
-                        update_workflow_state(workflow,'completed')
-                    elif result.get('blocked'):
-                        update_workflow_state(workflow,'blocked',error='AI 裁判问题生成被本场请求额度阻止。')
-                    elif result.get('failed'):
-                        update_workflow_state(workflow,'failed',error='AI 裁判问题生成失败；请检查席位状态后恢复。')
-                    else:
-                        update_workflow_state(workflow,'waiting_input',
-                            waiting_reason='等待人工裁判问题提交后继续。')
+                    update_workflow_state(workflow,'waiting_input',
+                        waiting_reason='等待人工裁判问题提交后继续。')
                 await app.state.hub.notify(room_id,'round_workflow_updated')
                 return
 
