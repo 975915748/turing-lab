@@ -35,6 +35,7 @@ MAX_PLAYERS = 8
 MAX_ROUNDS = 100
 MAX_JUDGES = 12
 DURATION_DAYS = 7
+WORKFLOW_RETRY_DELAYS = (2, 10)
 
 
 class ModelCallCancelled(Exception):
@@ -2059,7 +2060,7 @@ def create_app(db_path=None):
             except ModelAPIError as exc:
                 await finish_and_notify_model_operation(operation_id,'failed',error=exc)
                 if workflow and retryable_model_error(exc) and attempt+1<max_attempts:
-                    await asyncio.sleep((2,10)[min(attempt,1)])
+                    await asyncio.sleep(WORKFLOW_RETRY_DELAYS[min(attempt,1)])
                     parent_id=operation_id
                     attempt_no+=1
                     continue
