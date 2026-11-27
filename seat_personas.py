@@ -101,7 +101,7 @@ def freeze_match_personas(db,room,*,source="workflow",participant_roster_revisio
       "max_tokens":int(p["max_tokens"]),"timeout_seconds":int(p["timeout_seconds"])}
     else: model={"profile_id":int(profile_id),"owner_user_id":None,"profile_name":None,"model_name":None,
       "base_url":None,"model":None,"temperature":None,"max_tokens":None,"timeout_seconds":None}
-   if model:
+   if model and model.get("max_tokens") is not None:
     model["effective_output_max_tokens"]=output_token_limit(config,model["max_tokens"])
     if seat_type=="judge":
      # Final verdict JSON must retain the full frozen model budget.
