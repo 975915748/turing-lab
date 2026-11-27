@@ -1226,6 +1226,7 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
     requestCsrf=state.me?.user?.csrf,requestEpoch=state.personalModelEpoch;
    const seatType=form.dataset.seatType,seatKey=form.dataset.seatKey;
    const draftKey=personaDraftKey(seatType,seatKey,requestRoomId,requestMatch);
+   const submittedDraft={...data};
    const payload={preset_id:data.preset_id,custom_system_prompt:data.custom_system_prompt||'',output_length:data.output_length,history_rounds:Number(data.history_rounds)};
    if(!Number.isSafeInteger(payload.history_rounds)||payload.history_rounds<0||payload.history_rounds>100)throw new Error('历史上下文轮数必须为 0～100 的整数');
    if(seatType==='participant')await api('/api/rooms/'+requestRoomId+'/ai/'+encodeURIComponent(seatKey)+'/persona',{method:'PUT',body:payload});
@@ -1233,7 +1234,8 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
    if(state.roomId!==requestRoomId||state.room?.match_number!==requestMatch||
       state.me?.user?.uid!==requestUid||state.me?.user?.csrf!==requestCsrf||
       state.personalModelEpoch!==requestEpoch)return;
-   delete state.personaDrafts[draftKey];
+   const latestDraft=state.personaDrafts[draftKey];
+   if(!latestDraft||Object.keys(submittedDraft).every(k=>String(latestDraft[k]??'')===String(submittedDraft[k]??'')))delete state.personaDrafts[draftKey];
    await refreshRoom();
    if(state.roomId!==requestRoomId||state.room?.match_number!==requestMatch||
       state.me?.user?.uid!==requestUid||state.personalModelEpoch!==requestEpoch)return;
