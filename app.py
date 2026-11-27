@@ -2340,7 +2340,10 @@ def create_app(db_path=None):
                 snapshot=match_seat_persona_snapshot(db,room_id,match_number,'judge',profile['judge_id'])
                 persona=json.loads(snapshot['config_json']) if snapshot else persona_config_from_row(profile,'judge')
                 if snapshot:
-                    profile=load_frozen_model_profile(db,snapshot) or dict(raw)
+                    frozen_profile=load_frozen_model_profile(db,snapshot)
+                    if frozen_profile:
+                        frozen_profile.update({key:profile[key] for key in ('judge_id','label','alias','ai_name') if key in profile})
+                        profile=frozen_profile
                 profile['_persona']=persona
                 if profile['question_id'] is not None:
                     continue
@@ -2459,7 +2462,10 @@ def create_app(db_path=None):
                 snapshot=match_seat_persona_snapshot(db,room_id,match_number,'participant',profile['alias'])
                 persona=json.loads(snapshot['config_json']) if snapshot else persona_config_from_row(profile,'participant')
                 if snapshot:
-                    profile=load_frozen_model_profile(db,snapshot) or dict(raw)
+                    frozen_profile=load_frozen_model_profile(db,snapshot)
+                    if frozen_profile:
+                        frozen_profile.update({key:profile[key] for key in ('judge_id','label','alias','ai_name') if key in profile})
+                        profile=frozen_profile
                 profile['_persona']=persona
                 profiles.append(profile)
             history_by_alias={profile['alias']:anonymous_player_history(db,room_id,profile['alias'],round_number-1,
@@ -4462,7 +4468,10 @@ def create_app(db_path=None):
                 snapshot=match_seat_persona_snapshot(db,room_id,match_number,'judge',profile['judge_id'])
                 persona=json.loads(snapshot['config_json']) if snapshot else persona_config_from_row(profile,'judge')
                 if snapshot:
-                    profile=load_frozen_model_profile(db,snapshot) or dict(raw)
+                    frozen_profile=load_frozen_model_profile(db,snapshot)
+                    if frozen_profile:
+                        frozen_profile.update({key:profile[key] for key in ('judge_id','label','alias','ai_name') if key in profile})
+                        profile=frozen_profile
                 profile['_persona']=persona
                 profiles.append(profile)
             retry_of=getattr(request.state,'model_operation_retry_of',None)
