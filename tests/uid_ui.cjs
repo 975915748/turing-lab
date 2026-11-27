@@ -938,13 +938,17 @@ async function logout(page) {
       );
       assert.equal(externalPersonaResponse.status(), 200, await externalPersonaResponse.text());
 
-      for (const playerContext of playerContexts) {
-        const playerInfo = await (await playerContext.request.get(site + '/api/me')).json();
-        const joinedExternal = await playerContext.request.post(site + '/api/join', {
-          headers: { 'X-CSRF-Token': playerInfo.user.csrf },
-          data: { code: externalRoom.code, role: 'player' },
+      const externalPlayerContexts = [];
+      for (const username of ['external_persona_human_a', 'external_persona_human_b']) {
+        const externalPlayerContext = await browser.newContext();
+        externalPlayerContexts.push(externalPlayerContext);
+        const registeredExternal = await externalPlayerContext.request.post(site + '/api/register', {
+          data: {
+            username, display_name: username,
+            password: 'persona-ui-password', code: externalRoom.code,
+          },
         });
-        assert.equal(joinedExternal.status(), 200, await joinedExternal.text());
+        assert.equal(registeredExternal.status(), 200, await registeredExternal.text());
       }
 
       const externalQuestion = await context.request.post(site + externalBase + '/question', {
@@ -955,9 +959,9 @@ async function logout(page) {
       assert.equal(externalStart.status(), 200, await externalStart.text());
       const externalLive = await (await context.request.get(site + externalBase)).json();
       assert.equal(externalLive.personas_frozen, true);
-      for (let i = 0; i < playerContexts.length; i++) {
-        const playerInfo = await (await playerContexts[i].request.get(site + '/api/me')).json();
-        const submitted = await playerContexts[i].request.post(site + externalBase + '/answers', {
+      for (let i = 0; i < externalPlayerContexts.length; i++) {
+        const playerInfo = await (await externalPlayerContexts[i].request.get(site + '/api/me')).json();
+        const submitted = await externalPlayerContexts[i].request.post(site + externalBase + '/answers', {
           headers: { 'X-CSRF-Token': playerInfo.user.csrf },
           data: { text: '外部裁判模式下的人类回答 ' + (i + 1) },
         });
@@ -999,6 +1003,7 @@ async function logout(page) {
         name: '本场 AI 席位人设', exact: true,
       }).count(), 1, '外部裁判手动转录模式应展示一次冻结人设详情');
 
+      for (const externalPlayerContext of externalPlayerContexts) await externalPlayerContext.close();
       for (const playerContext of playerContexts) await playerContext.close();
     } else {
       throw new Error('Unknown scenario: ' + scenario);
