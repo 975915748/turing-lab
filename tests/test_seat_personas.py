@@ -314,8 +314,9 @@ def test_persona_api_freezes_and_allows_preparation_reset(tmp_path):
     late_player = TestClient(app)
     request(late_player, "POST", "/api/register", {
         "username": "persona_player_late", "display_name": "迟到参赛者",
-        "password": "persona-player-password", "code": room["code"],
+        "password": "persona-player-password",
     })
+    request(late_player, "POST", "/api/join", {"code": room["code"], "role": "player"})
     request(admin, "POST", base + "/start", expected=409)
 
     reset = request(admin, "POST", base + "/personas/reset-preparation", {"confirm": True})
@@ -466,6 +467,24 @@ def test_poststart_roster_recovery_invalidates_current_round_ai_questions(tmp_pa
 
     deleted_uid = player_b.get("/api/me").json()["user"]["uid"]
     request(admin, "DELETE", "/api/admin/users/" + deleted_uid, {"confirm": True})
+
+    # Once the match has started, neither a new registration with the invite
+    # code nor an existing account joining as a player may expand the roster.
+    late_registration = TestClient(app)
+    request(late_registration, "POST", "/api/register", {
+        "username": "persona_poststart_late_registration",
+        "display_name": "开赛后新注册", "password": "persona-player-password",
+        "code": room["code"],
+    }, expected=409)
+    late_joiner = TestClient(app)
+    request(late_joiner, "POST", "/api/register", {
+        "username": "persona_poststart_late_joiner",
+        "display_name": "开赛后加入", "password": "persona-player-password",
+    })
+    request(late_joiner, "POST", "/api/join", {
+        "code": room["code"], "role": "player",
+    }, expected=409)
+
     before_recovery = admin.get(base).json()
     assert before_recovery["match_started"] is True
     assert before_recovery["roster_recovery"] is True

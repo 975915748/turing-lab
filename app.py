@@ -1097,10 +1097,12 @@ def require_persona_editable(db, room):
         raise HTTPException(409,'本场准备已冻结；请先执行“取消准备并编辑”，再修改席位配置。')
 
 
-def ensure_roster_unlocked(db, room, *, allow_frozen=False):
+def ensure_roster_unlocked(db, room, *, allow_frozen=False, allow_poststart_recovery=False):
     if room['status'] != 'open':
         raise HTTPException(409, '比赛已结束。')
     recovery=needs_roster_recovery(db,room)
+    if room['match_started_at'] and not (allow_poststart_recovery and recovery):
+        raise HTTPException(409,'比赛已经开始，不能再加入新的参赛者。')
     if is_match_persona_frozen(db,room['id'],room['match_number']) and not recovery and not allow_frozen:
         raise HTTPException(409,'本场 AI 席位配置已冻结；如首轮尚未开始，请先取消准备并重置配置。')
     if recovery:
@@ -3463,7 +3465,7 @@ def create_app(db_path=None):
                                  (room_id,u['id'])).fetchone()
                 if prior and (prior['leave_reason']!='voluntary' or room['match_started_at']):
                     raise HTTPException(403,'你已离开本场比赛，下一场可以重新加入；被移除者不能重入本场。')
-                ensure_roster_unlocked(db,room)
+                ensure_roster_unlocked(db,room,allow_frozen=True)
                 if prior:
                     if active_participant_count(db,room_id)>=MAX_PLAYERS:
                         raise HTTPException(409,f'最多支持 {MAX_PLAYERS} 位参赛者。')
@@ -4126,7 +4128,8 @@ def create_app(db_path=None):
                 raise HTTPException(409,'首轮准备已冻结；如需补位或修改 AI 席位，请先取消准备并重置配置。')
             if post_start_recovery and body.model_profile_id is not None:
                 raise HTTPException(409,'比赛开始后因账号删除补位时，只能添加使用默认人设的手动 AI 席位。')
-            ensure_roster_unlocked(db,room,allow_frozen=True)
+            ensure_roster_unlocked(db,room,allow_frozen=True,
+                                   allow_poststart_recovery=post_start_recovery)
             invalidated_ai_questions=0
             if recovery:
                 now=utcnow()
