@@ -3028,9 +3028,7 @@ def create_app(db_path=None):
                 raise HTTPException(409,validation['reason'])
             rnd=validation['round']
             question=validation['question']
-            db.execute('UPDATE rounds SET question=?,status=? WHERE id=?',(question,'collecting',rnd['id']))
-            db.execute('UPDATE rooms SET match_started_at=COALESCE(match_started_at,?) WHERE id=?',
-                       (utcnow(),room_id))
+            start_round_record(db,room,rnd,question)
             name_lock_user_ids=room_lock_user_ids(db,room_id)
             log_event(db,room_id,rnd['number'],'judge_question','独立裁判组','主持人已开启统一作答')
         await app.state.hub.notify(room_id,'judge_question')
@@ -3089,9 +3087,7 @@ def create_app(db_path=None):
             if len(roster)<2:
                 raise HTTPException(409,'至少要有两名参赛者才能开始。')
             question=norm_text(body.text,6000)
-            db.execute('UPDATE rounds SET question=?,status=? WHERE id=?',(question,'collecting',rnd['id']))
-            db.execute('UPDATE rooms SET match_started_at=COALESCE(match_started_at,?) WHERE id=?',
-                       (utcnow(),room_id))
+            start_round_record(db,room,rnd,question)
             name_lock_user_ids=room_lock_user_ids(db,room_id)
             log_event(db,room_id,rnd['number'],'judge_question',room['judge'],question)
         await app.state.hub.notify(room_id,'judge_question')
@@ -3117,6 +3113,8 @@ def create_app(db_path=None):
             rnd=current_round(db,room)
             if rnd['status']!='collecting':
                 raise HTTPException(409,'本轮目前不能提交回答。')
+            if round_deadline_expired(rnd):
+                raise HTTPException(409,'本轮答题时间已到，等待房主结束本轮。')
             if db.execute('SELECT 1 FROM answers WHERE round_id=? AND alias=?',(rnd['id'],mine)).fetchone():
                 raise HTTPException(409,'本轮已经提交，不能修改回答。')
             ans=norm_text(body.text,12000)
@@ -3142,6 +3140,8 @@ def create_app(db_path=None):
             rnd=current_round(db,room)
             if rnd['status']!='collecting':
                 raise HTTPException(409,'本轮不能录入回答。')
+            if round_deadline_expired(rnd):
+                raise HTTPException(409,'本轮答题时间已到，等待房主结束本轮。')
             if db.execute('SELECT 1 FROM answers WHERE round_id=? AND alias=?',(rnd['id'],alias)).fetchone():
                 raise HTTPException(409,'此 AI 已录入本轮回答。')
             ans=norm_text(body.text,12000)
@@ -3165,6 +3165,8 @@ def create_app(db_path=None):
             rnd=current_round(db,room)
             if rnd['status']!='collecting':
                 raise HTTPException(409,'只有本轮正在收集回答时才能生成 AI 回复。')
+            if round_deadline_expired(rnd):
+                raise HTTPException(409,'本轮答题时间已到，不能再生成 AI 回复。')
             rows=db.execute('''SELECT ai.alias,ai.name AS ai_name,mp.*,
                     mp.name AS profile_name,mp.model AS model_name FROM ai_players ai
                 JOIN model_profiles mp ON mp.id=ai.model_profile_id AND mp.ownership_issue IS NULL
@@ -3227,7 +3229,7 @@ def create_app(db_path=None):
                         if not binding or binding['model_profile_id']!=profile['id']:
                             return False
                         current_rnd=current_round(db,current)
-                        if current_rnd['number']!=round_number or current_rnd['status']!='collecting' or current_rnd['question']!=question:
+                        if current_rnd['number']!=round_number or current_rnd['status']!='collecting' or current_rnd['question']!=question or round_deadline_expired(current_rnd):
                             return False
                         return not db.execute('SELECT 1 FROM answers WHERE round_id=? AND alias=?',
                                               (current_rnd['id'],alias)).fetchone()
@@ -3251,8 +3253,8 @@ def create_app(db_path=None):
                         finish_model_operation_in_db(db,operation_id,'stale',error='生成期间 AI 参赛席绑定发生变化，旧回答未保存。')
                         return {'alias':alias,'status':'skipped'}
                     current_rnd=current_round(db,current)
-                    if current_rnd['number']!=round_number or current_rnd['status']!='collecting' or current_rnd['question']!=question:
-                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间轮次或问题发生变化，旧回答未保存。')
+                    if current_rnd['number']!=round_number or current_rnd['status']!='collecting' or current_rnd['question']!=question or round_deadline_expired(current_rnd):
+                        finish_model_operation_in_db(db,operation_id,'stale',error='生成期间轮次、问题或答题期限发生变化，旧回答未保存。')
                         return {'alias':alias,'status':'skipped'}
                     if db.execute('SELECT 1 FROM answers WHERE round_id=? AND alias=?',
                                   (current_rnd['id'],alias)).fetchone():
@@ -3846,7 +3848,7 @@ def create_app(db_path=None):
                         user=auth(db,websocket.cookies.get(COOKIE))
                         room,mine=permission(db,room_id,user)
                         rnd=current_round(db,room)
-                        valid=bool(mine) and room['status']=='open' and rnd['status']=='collecting' and (
+                        valid=bool(mine) and room['status']=='open' and rnd['status']=='collecting' and not round_deadline_expired(rnd) and (
                             msg.get('round')==rnd['number']) and (
                             'match_number' not in msg or msg['match_number']==room['match_number']) and not db.execute(
                             'SELECT 1 FROM answers WHERE round_id=? AND alias=?',(rnd['id'],mine)).fetchone()
