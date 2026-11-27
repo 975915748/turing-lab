@@ -26,6 +26,7 @@ from model_api import (ModelAPIError, chat_completion, decrypt_api_key,
                        validate_base_url)
 from points import points_state, settle_match_points
 from social import register_social_routes, ensure_app_schema, cleanup_deleted_account
+from match_orchestration import PersistentWorkflowWorker
 
 ROOT = Path(__file__).resolve().parent
 DATABASE = ROOT / 'data' / 'game.sqlite3'
@@ -608,6 +609,21 @@ class ModelRequestLimitData(BaseModel, extra='forbid'):
     limit: Optional[int] = Field(default=None, ge=1, le=1000000)
 
 
+class RoundTimerData(BaseModel, extra='forbid'):
+    seconds: Optional[int] = Field(default=None, ge=30, le=3600)
+
+
+class RoundWorkflowData(BaseModel, extra='forbid'):
+    match_number: int = Field(ge=1)
+    round_number: int = Field(ge=1)
+    include_ai_questions: bool = True
+    mode: Literal['start', 'prepare_only'] = 'start'
+
+
+class WorkflowResumeData(BaseModel, extra='forbid'):
+    confirm_unknown_attempts: bool = False
+
+
 class ChatMessageData(BaseModel, extra='forbid'):
     match_number: int = Field(ge=1)
     text: str = Field(min_length=1, max_length=2000)
@@ -969,7 +985,8 @@ def current_round(db, room, number=None):
 def clear_match_records(db, room_id):
     # 只清除比赛内容，房间、成员、AI 参赛位及裁判配置保留。
     for table in ('model_operation_tasks', 'rounds', 'suggestions', 'events', 'judge_questions', 'judge_verdicts',
-                  'ai_judge_questions', 'ai_judge_verdicts', 'ai_answer_revisions', 'packets', 'chat_messages'):
+                  'ai_judge_questions', 'ai_judge_verdicts', 'ai_answer_revisions', 'packets',
+                  'round_workflows', 'chat_messages'):
         db.execute(f'DELETE FROM {table} WHERE room_id=?', (room_id,))
     db.execute('''UPDATE rooms SET verdict_json=NULL,verdict_locked_at=NULL,
         revealed_at=NULL,records_deleted=1 WHERE id=?''', (room_id,))
@@ -1738,7 +1755,7 @@ def create_app(db_path=None):
     def create_model_operation_task(db, *, purpose, target_type, target_key, target_label,
                                     profile, trigger_user_id, room_id=None, match_number=None,
                                     round_number=None, context_revision=None, retry_of=None,
-                                    idempotency_key=None):
+                                    idempotency_key=None, workflow_id=None, workflow_generation=None):
         if room_id is None:
             active=db.execute("""SELECT id,state FROM model_operation_tasks
                 WHERE purpose='connection_test' AND profile_owner_user_id=? AND profile_id=?
@@ -1758,12 +1775,13 @@ def create_app(db_path=None):
         cur=db.execute('''INSERT INTO model_operation_tasks(
             room_id,match_number,round_number,purpose,target_type,target_key,target_label,
             profile_id,profile_owner_user_id,trigger_user_id,profile_name,model_name,
-            profile_snapshot_hash,context_revision,state,retry_of,idempotency_key,queued_at,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'queued',?,?,?,?)''',
+            profile_snapshot_hash,context_revision,state,retry_of,workflow_id,workflow_generation,
+            idempotency_key,queued_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'queued',?,?,?,?,?)''',
             (room_id,match_number,round_number,purpose,target_type,str(target_key),target_label,
              profile['id'],profile['owner_user_id'],trigger_user_id,profile_name,model_name,
-             model_profile_snapshot_hash(profile),context_revision,retry_of,
-             (idempotency_key or secrets.token_urlsafe(18))[:128],now,now))
+             model_profile_snapshot_hash(profile),context_revision,retry_of,workflow_id,
+             workflow_generation,(idempotency_key or secrets.token_urlsafe(18))[:128],now,now))
         return int(cur.lastrowid),True,'queued'
 
     def finish_model_operation_in_db(db, operation_id, state, *, error=None, result_applied=False):
