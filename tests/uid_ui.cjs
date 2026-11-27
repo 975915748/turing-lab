@@ -781,6 +781,18 @@ async function logout(page) {
       });
       assert.equal(await participantDetails.evaluate(element => element.open), true,
         '取消准备和房间刷新后应保留已展开的人设编辑器');
+      const visibilityDebug = await participantPersona.locator('[name="preset_id"]').evaluate(field => {
+        const chain = [];
+        for (let node = field; node; node = node.parentElement) {
+          const style = getComputedStyle(node), rect = node.getBoundingClientRect();
+          chain.push({ tag: node.tagName, className: typeof node.className === 'string' ? node.className : '',
+            display: style.display, visibility: style.visibility, hidden: node.hidden,
+            open: node instanceof HTMLDetailsElement ? node.open : undefined,
+            rect: [rect.x, rect.y, rect.width, rect.height] });
+        }
+        return chain;
+      });
+      console.log('PERSONA_RESET_VISIBILITY', JSON.stringify(visibilityDebug));
       await participantPersona.locator('[name="preset_id"]').waitFor({ state: 'visible' });
       assert.equal(await participantPersona.locator('[name="preset_id"]').isDisabled(), false);
 
