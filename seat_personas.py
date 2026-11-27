@@ -62,7 +62,8 @@ def persona_config_from_row(row,seat_type):
   custom_system_prompt=row["persona_custom_prompt"] if "persona_custom_prompt" in row.keys() else "",
   output_length=row["persona_output_length"] if "persona_output_length" in row.keys() else "default",
   history_rounds=int(row["persona_history_rounds"] if "persona_history_rounds" in row.keys() else 5),
-  preset_version=int(row["persona_preset_version"] if "persona_preset_version" in row.keys() else PERSONA_TEMPLATE_VERSION))
+  preset_version=int((row["persona_preset_version"] or PERSONA_TEMPLATE_VERSION)
+                       if "persona_preset_version" in row.keys() else PERSONA_TEMPLATE_VERSION))
 def compose_system_prompt(platform_prompt,persona,*,task,final_verdict=False):
  style=(persona or {}).get("style_prompt","").strip()
  info=OUTPUT_LENGTHS.get((persona or {}).get("output_length","default"),OUTPUT_LENGTHS["default"])
