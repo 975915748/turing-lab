@@ -707,15 +707,52 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
     if(state.roomView!==view){state.roomView=view;if(view!=='match')state.selectedRound=state.room.current_round;renderRoom();window.scrollTo({top:0,behavior:'instant'});}
    }
    if(action==='sync')await refreshRoom();
-  if(action==='generate-ai-questions'){b.disabled=true;b.textContent='模型正在出题…';const result=await api(`/api/rooms/${state.roomId}/ai-judges/questions/generate`,{method:'POST'});await refreshRoom();toast(aiQuestionFeedback(result))}
-  if(action==='generate-ai-answers'){b.disabled=true;b.textContent='模型正在回答…';const result=await api(`/api/rooms/${state.roomId}/ai/answers/generate`,{method:'POST'});await refreshRoom();const detail=result.failed?.length?'；失败：'+result.failed.map(x=>x.alias+' '+x.error).join('；'):'';toast(`模型 AI 已提交 ${result.generated||0} 个回答${detail}`)}
-  if(action==='generate-ai-verdicts'){b.disabled=true;b.textContent='模型正在判断…';const result=await api(`/api/rooms/${state.roomId}/ai-judges/verdicts/generate`,{method:'POST'});await refreshRoom();const detail=result.failed?.length?'；失败：'+result.failed.map(x=>x.error).join('；'):'';toast(`AI 裁判已锁定 ${result.generated||0} 份最终判断${detail}`)}
+  if(action==='generate-ai-questions'){
+   const context=captureRoomOperationContext();if(!isCurrentRoomContext(context))return;
+   b.disabled=true;b.textContent='模型正在出题…';
+   const base=`/api/rooms/${context.roomId}`;
+   const result=await idempotentApi(`room:${context.roomId}:match:${context.matchNumber}:round:${context.roundNumber}:judge_question`,
+    base+'/ai-judges/questions/generate',{method:'POST',matchNumber:context.matchNumber});
+   if(!isCurrentRoomContext(context))return;
+   await refreshRoom(context);if(!isCurrentRoomContext(context))return;toast(aiQuestionFeedback(result));
+  }
+  if(action==='generate-ai-answers'){
+   const context=captureRoomOperationContext();if(!isCurrentRoomContext(context))return;
+   b.disabled=true;b.textContent='模型正在回答…';
+   const base=`/api/rooms/${context.roomId}`;
+   const result=await idempotentApi(`room:${context.roomId}:match:${context.matchNumber}:round:${context.roundNumber}:ai_answer`,
+    base+'/ai/answers/generate',{method:'POST',matchNumber:context.matchNumber});
+   if(!isCurrentRoomContext(context))return;
+   await refreshRoom(context);if(!isCurrentRoomContext(context))return;
+   const detail=result.failed?.length?'；失败：'+result.failed.map(x=>x.alias+' '+x.error).join('；'):'';
+   toast(`模型 AI 已提交 ${result.generated||0} 个回答${detail}`);
+  }
+  if(action==='generate-ai-verdicts'){
+   const context=captureRoomOperationContext();if(!isCurrentRoomContext(context,false))return;
+   b.disabled=true;b.textContent='模型正在判断…';
+   const base=`/api/rooms/${context.roomId}`;
+   const result=await idempotentApi(`room:${context.roomId}:match:${context.matchNumber}:judge_verdict`,
+    base+'/ai-judges/verdicts/generate',{method:'POST',matchNumber:context.matchNumber});
+   if(!isCurrentRoomContext(context,false))return;
+   await refreshRoom(context);if(!isCurrentRoomContext(context,false))return;
+   const detail=result.failed?.length?'；失败：'+result.failed.map(x=>x.error).join('；'):'';
+   toast(`AI 裁判已锁定 ${result.generated||0} 份最终判断${detail}`);
+  }
   if(action==='focus-manual-question'){
    let form=app.querySelector('#manual-question-form');
    if(!form){state.roomView='admin';renderRoom();form=app.querySelector('#manual-question-form');}
    if(form){form.scrollIntoView({behavior:'smooth',block:'center'});form.querySelector('textarea')?.focus();}
   }
   if(action==='retry-model-operation'){
+   const context=captureRoomOperationContext();if(!isCurrentRoomContext(context,false))return;
+   const taskId=Number(b.dataset.id),base=`/api/rooms/${context.roomId}`;b.disabled=true;b.textContent='正在重试…';
+   const result=await idempotentApi(`room:${context.roomId}:match:${context.matchNumber}:retry:${taskId}`,
+    base+'/model-operations/'+taskId+'/retry',{method:'POST',matchNumber:context.matchNumber});
+   if(!isCurrentRoomContext(context,false))return;
+   await refreshRoom(context);if(!isCurrentRoomContext(context,false))return;
+   const summary=(result.results||[]).map(x=>(x.label||x.alias||('席位 '+(x.judge_id||'')))+'：'+(x.status==='generated'?'已完成':x.error||x.reason||x.status)).join('；');
+   toast('已重试指定席位'+(summary?'；'+summary:''));
+  }
    const taskId=Number(b.dataset.id);b.disabled=true;b.textContent='正在重试…';
    const result=await api('/api/rooms/'+state.roomId+'/model-operations/'+taskId+'/retry',{method:'POST'});
    await refreshRoom();
@@ -733,7 +770,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
    if(!request)throw new Error('模型配置已不存在，请刷新后重试。');
    b.disabled=true;b.textContent='测试中…';
    try{
-    const result=await api('/api/me/models/'+id+'/test',{method:'POST'});
+    const result=await idempotentApi('profile:'+id+':connection_test','/api/me/models/'+id+'/test',{method:'POST'});
     if(!isCurrentPersonalModelTest(id,request))return;
     updateModelTestResult(id,{ok:true,model:result.model,latency_ms:result.latency_ms},request);
     toast('连接测试成功 · '+result.model+' · '+result.latency_ms+' ms');
