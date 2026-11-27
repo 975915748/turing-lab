@@ -316,5 +316,50 @@ def test_round_timer_deadline_and_host_timeout_finish(workflow_app, monkeypatch)
             question = db.execute('''SELECT text FROM ai_judge_questions
                 WHERE room_id=? AND round_number=2''',(room['room_id'],)).fetchone()
         assert question['text'] == '第二轮裁判问题'
+
+        # The compatibility /start path must initialize the same timer snapshot.
+        mutate(admin, base + '/start', {})
+        second_round = admin.get(base).json()['rounds'][1]
+        assert second_round['status'] == 'collecting'
+        assert second_round['duration_seconds'] == 60
+        assert second_round['started_at'] and second_round['deadline_at']
+        mutate(players[0], base + '/answers', {'text': '第二轮回答 A'})
+        mutate(players[1], base + '/answers', {'text': '第二轮回答 B'})
+        assert admin.get(base).json()['rounds'][1]['status'] == 'revealed'
+        normal_finish = mutate(admin, base + '/rounds/2/finish-timeout',
+                               {'match_number': 1, 'confirm': True})
+        assert normal_finish['already_finished'] is True
+        assert normal_finish['timeout'] is False
+        with db_open(path) as db:
+            timeout_events = db.execute("SELECT COUNT(*) FROM events WHERE room_id=? AND kind='round_timeout'",
+                                         (room['room_id'],)).fetchone()[0]
+        assert timeout_events == 1
     for player in players:
         player.close()
+
+
+def test_worker_lifecycle_start_stop_is_idempotent():
+    from match_orchestration import PersistentWorkflowWorker
+
+    async def exercise():
+        async def process(workflow):
+            raise AssertionError('no workflow should be claimed')
+
+        async def on_error(workflow, error):
+            raise error
+
+        worker = PersistentWorkflowWorker(lambda: None, process, on_error, poll_interval=0.05)
+        await worker.start()
+        await worker.start()
+        assert worker.running is True
+        await worker.stop()
+        assert worker.running is True
+        await worker.stop()
+        assert worker.running is False
+        await worker.stop()
+        await worker.start()
+        assert worker.running is True
+        await worker.stop()
+        assert worker.running is False
+
+    asyncio.run(exercise())
