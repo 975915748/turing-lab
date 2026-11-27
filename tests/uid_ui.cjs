@@ -742,7 +742,11 @@ async function logout(page) {
       const participantPersona = participantDetails.locator('form[data-form="seat-persona"]');
       await participantPersona.waitFor();
       assert.equal(await participantPersona.getByText('回答历史轮数（0～100）', { exact: true }).count(), 1);
+      await participantPersona.locator('[name="preset_id"]').selectOption('custom');
+      await participantPersona.locator('[name="custom_system_prompt"]').fill('临时自定义风格');
       await participantPersona.locator('[name="preset_id"]').selectOption('analytical');
+      assert.equal(await participantPersona.locator('[name="custom_system_prompt"]').inputValue(), '',
+        '切换到预设人设时应清空不适用的自定义提示词');
       await participantPersona.locator('[name="output_length"]').selectOption('medium');
       await participantPersona.locator('[name="history_rounds"]').fill('12');
       const participantSaved = page.waitForResponse(response =>

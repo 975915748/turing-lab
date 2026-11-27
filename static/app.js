@@ -916,6 +916,11 @@ app.addEventListener('input',e=>{
  }
 });
 app.addEventListener('change',e=>{
+ const personaPreset=e.target.closest('form[data-form="seat-persona"] select[name="preset_id"]');
+ if(personaPreset&&personaPreset.value!=='custom'){
+  const customPrompt=personaPreset.form.elements.namedItem('custom_system_prompt');
+  if(customPrompt)customPrompt.value='';
+ }
  if(rememberSeatPersonaDraft(e.target))return;
  if(e.target.matches('[data-ai-edit-select]')){
   const area=app.querySelector('[data-ai-edit-text]');if(area)area.value=state.room?.ai_edits?.[e.target.value]||'';
