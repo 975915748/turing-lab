@@ -1,29 +1,50 @@
 'use strict';
 const $ = (selector) => document.querySelector(selector);
 const app = $('#app');
-const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelSavePending:{},personalModelEpoch:0,modelOperationRecords:[],modelOperationStats:{},modelOperationProfileOptions:[],modelOperationTotal:0,modelOperationOffset:0,modelOperationFilters:{profile_id:'',purpose:'',status:''},modelOperationsExpanded:false,modelOperationRequestVersion:0,modelOperationHistoryPanels:{}};
+const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelSavePending:{},personalModelEpoch:0,modelOperationRecords:[],modelOperationStats:{},modelOperationProfileOptions:[],modelOperationTotal:0,modelOperationOffset:0,modelOperationFilters:{profile_id:'',purpose:'',status:''},modelOperationsExpanded:false,modelOperationRequestVersion:0,modelOperationHistoryPanels:{},roomContextEpoch:0,roomRefreshVersion:0,personalModelListRequestVersion:0,pendingIdempotencyKeys:{}};
 const esc = (v) => String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const shortDate = s => s ? new Date(s).toLocaleString('zh-CN',{hour12:false}) : '';
 const val = (id) => document.getElementById(id)?.value??'';
 const D = (txt='暂无记录') => `<p class="muted hint">${esc(txt)}</p>`;
 let toastTimer;
-function clearPersonalModelState(){state.personalModelEpoch=(state.personalModelEpoch||0)+1;state.modelOperationRequestVersion=(state.modelOperationRequestVersion||0)+1;state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};state.personalModelTestVersions={};state.personalModelTestPending={};state.personalModelSavePending={};state.modelOperationRecords=[];state.modelOperationStats={};state.modelOperationProfileOptions=[];state.modelOperationTotal=0;state.modelOperationOffset=0;state.modelOperationFilters={profile_id:'',purpose:'',status:''};state.modelOperationsExpanded=false;state.modelOperationHistoryPanels={};}
+function clearPersonalModelState(){state.personalModelEpoch=(state.personalModelEpoch||0)+1;state.personalModelListRequestVersion=(state.personalModelListRequestVersion||0)+1;state.modelOperationRequestVersion=(state.modelOperationRequestVersion||0)+1;state.roomContextEpoch=(state.roomContextEpoch||0)+1;state.roomRefreshVersion=(state.roomRefreshVersion||0)+1;state.pendingIdempotencyKeys={};state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};state.personalModelTestVersions={};state.personalModelTestPending={};state.personalModelSavePending={};state.modelOperationRecords=[];state.modelOperationStats={};state.modelOperationProfileOptions=[];state.modelOperationTotal=0;state.modelOperationOffset=0;state.modelOperationFilters={profile_id:'',purpose:'',status:''};state.modelOperationsExpanded=false;state.modelOperationHistoryPanels={};}
 function toast(message){const el=$('#toast');el.textContent=message;el.classList.add('visible');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('visible'),4200)}
 function setConnection(txt,online){const el=$('#connection');el.textContent=(online?'● ':'○ ')+txt;el.className='connection'+(online?' online':'')}
 function applyPrefs(){let theme=localStorage.getItem('turing_theme')||'light';document.body.dataset.theme=theme;$('#themeBtn').textContent=theme==='light'?'☾ 深色':'☀ 日间';let f=Number(localStorage.getItem('turing_font')||15);if(f<12||f>22)f=15;document.documentElement.style.setProperty('--font',f+'px');$('#fontSize').value=f;$('#fontValue').textContent=f;}
 $('#themeBtn').addEventListener('click',()=>{localStorage.setItem('turing_theme',document.body.dataset.theme==='light'?'dark':'light');applyPrefs()});
 $('#fontSize').addEventListener('input',e=>{localStorage.setItem('turing_font',e.target.value);applyPrefs()});
 $('#logoutBtn').addEventListener('click',async()=>{try{await api('/api/logout',{method:'POST'});}catch(e){toast(e.message)} state.me=null;state.room=null;state.roomId=null;state.personalModels=[];clearPersonalModelState();state.chat=[];state.chatDraft='';state.drafts={};state.personalReturn=null;state.tab='login';state.legacyLogin=false;stopWs();history.replaceState(null,'',location.pathname);await init()});
-async function api(path,{method='GET',body,raw=false}={}){
+async function api(path,{method='GET',body,raw=false,matchNumber,idempotencyKey}={}){
  const opts={method,headers:{}};
  if(body!==undefined){opts.headers['Content-Type']='application/json';opts.body=JSON.stringify(body)}
  if(method!=='GET'&&state.me?.user?.csrf)opts.headers['X-CSRF-Token']=state.me.user.csrf;
- if(method!=='GET'&&state.room&&path.startsWith(`/api/rooms/${state.room.id}/`))opts.headers['X-Match-Number']=String(state.room.match_number);
- const response=await fetch(path,opts);
- if(raw){if(!response.ok)throw new Error('下载失败');return response.blob()}
+ if(method!=='GET'&&matchNumber!==undefined)opts.headers['X-Match-Number']=String(matchNumber);
+ else if(method!=='GET'&&state.room&&path.startsWith(`/api/rooms/${state.room.id}/`))opts.headers['X-Match-Number']=String(state.room.match_number);
+ if(method!=='GET'&&idempotencyKey)opts.headers['Idempotency-Key']=idempotencyKey;
+ let response;
+ try{response=await fetch(path,opts)}catch(error){error.networkFailure=true;throw error}
+ if(raw){if(!response.ok){const error=new Error('下载失败');error.status=response.status;throw error;}return response.blob()}
  const data=await response.json().catch(()=>({detail:'网络连接错误'}));
- if(!response.ok){if(response.status===401&&state.me){state.me=null;state.room=null;state.roomId=null;state.personalModels=[];clearPersonalModelState();state.chat=[];state.chatDraft='';state.drafts={};stopWs();renderAuth();}throw new Error(typeof data.detail==='string'?data.detail:'请求失败');}
+ if(!response.ok){if(response.status===401&&state.me){state.me=null;state.room=null;state.roomId=null;state.personalModels=[];clearPersonalModelState();state.chat=[];state.chatDraft='';state.drafts={};stopWs();renderAuth();}const error=new Error(typeof data.detail==='string'?data.detail:'请求失败');error.status=response.status;throw error;}
  return data;
+}
+function newIdempotencyKey(){return globalThis.crypto?.randomUUID?.()||('op-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2));}
+async function idempotentApi(scope,path,options={}){
+ const key=state.pendingIdempotencyKeys[scope]||newIdempotencyKey();
+ state.pendingIdempotencyKeys[scope]=key;
+ try{const result=await api(path,{...options,idempotencyKey:key});delete state.pendingIdempotencyKeys[scope];return result;}
+ catch(error){if(!error.networkFailure)delete state.pendingIdempotencyKeys[scope];throw error;}
+}
+function captureRoomOperationContext(){
+ const room=state.room;
+ return {roomId:state.roomId,matchNumber:room?.match_number,roundNumber:room?.current_round,
+  uid:state.me?.user?.uid,csrf:state.me?.user?.csrf,epoch:state.roomContextEpoch};
+}
+function isCurrentRoomContext(context,checkRound=true){
+ return !!context&&state.roomId===context.roomId&&state.room?.id===context.roomId&&
+  state.roomContextEpoch===context.epoch&&state.me?.user?.uid===context.uid&&
+  state.me?.user?.csrf===context.csrf&&state.room?.match_number===context.matchNumber&&
+  (!checkRound||state.room?.current_round===context.roundNumber);
 }
 function stopWs(){state.lastTyping=null;if(state.reconnect)clearTimeout(state.reconnect);state.reconnect=null; if(state.ws){const ws=state.ws;state.ws=null;ws.onclose=null;ws.close();}setConnection('未连接',false)}
 function connectWs(roomId){stopWs();if(state.roomId!==roomId)return;
@@ -38,12 +59,30 @@ function connectWs(roomId){stopWs();if(state.roomId!==roomId)return;
  ws.onclose=e=>{if(state.roomId!==roomId||state.ws!==ws)return;if(e.code===1008){state.roomId=null;state.room=null;state.typing={};history.replaceState(null,'',location.pathname);loadLobby().then(()=>toast(e.reason==='房间已删除'?'房间已删除':'房间访问权限已失效或你已被移出')).catch(err=>toast(err.message));return;}setConnection('重连中',false);state.reconnect=setTimeout(()=>connectWs(roomId),3000)};
  ws.onerror=()=>setConnection('连接异常',false);
 }
-async function refreshRoom(){if(!state.roomId||location.hash.startsWith('#profile'))return;try{const r=await api(`/api/rooms/${state.roomId}`);if(!state.room||r.current_round!==state.room.current_round||r.match_number!==state.room.match_number){state.selectedRound=r.current_round;state.lastTyping=null;state.typing={};}
- if(state.room&&(r.match_number!==state.room.match_number||(!state.room.records_deleted&&r.records_deleted))){for(const key of Object.keys(state.drafts))if(key.startsWith(`${r.id}:`))delete state.drafts[key];const dialog=$('#judgeNotice');if(dialog?.open)dialog.close();state.roomView='match';state.chat=[];state.chatDraft='';}
- state.room=r;
- if(r.is_judge||r.status==='finished'){state.chat=[];state.chatDraft='';}else await loadRoomChat().catch(()=>{});
- if(r.can_manage)await loadPersonalModels().catch(()=>{});
- renderRoom();maybeNotifyJudge();}catch(e){if(/不属于这个房间|公共聊天/.test(e.message)){state.roomId=null;state.room=null;state.chat=[];await loadLobby();toast('你已不在该房间');}else toast(e.message)}}
+async function refreshRoom(expectedContext=null){
+ const roomId=expectedContext?.roomId??state.roomId;
+ if(!roomId||location.hash.startsWith('#profile'))return false;
+ const context=expectedContext||captureRoomOperationContext(),requestVersion=++state.roomRefreshVersion;
+ const current=()=>state.roomId===roomId&&state.room?.id===roomId&&state.roomContextEpoch===context.epoch&&
+  state.me?.user?.uid===context.uid&&state.me?.user?.csrf===context.csrf&&state.roomRefreshVersion===requestVersion;
+ try{
+  const r=await api(`/api/rooms/${roomId}`);
+  if(!current())return false;
+  if(!state.room||r.current_round!==state.room.current_round||r.match_number!==state.room.match_number){state.selectedRound=r.current_round;state.lastTyping=null;state.typing={};}
+  if(state.room&&(r.match_number!==state.room.match_number||(!state.room.records_deleted&&r.records_deleted))){for(const key of Object.keys(state.drafts))if(key.startsWith(`${r.id}:`))delete state.drafts[key];const dialog=$('#judgeNotice');if(dialog?.open)dialog.close();state.roomView='match';state.chat=[];state.chatDraft='';}
+  state.room=r;
+  if(r.is_judge||r.status==='finished'){state.chat=[];state.chatDraft='';}else await loadRoomChat().catch(()=>{});
+  if(!current())return false;
+  if(r.can_manage)await loadPersonalModels().catch(()=>{});
+  if(!current())return false;
+  renderRoom();maybeNotifyJudge();return true;
+ }catch(e){
+  if(!current())return false;
+  if(/不属于这个房间|公共聊天/.test(e.message)){state.roomId=null;state.room=null;state.chat=[];await loadLobby();toast('你已不在该房间');}
+  else toast(e.message);
+  return false;
+ }
+}
 async function init(){applyPrefs();try{const previousUid=state.me?.user?.uid;state.me=await api('/api/me');if(previousUid&&previousUid!==state.me?.user?.uid)clearPersonalModelState();$('#logoutBtn').classList.remove('hide');const q=/^#room=(\d+)$/.exec(location.hash);if(location.hash.startsWith('#profile')){state.personalReturn=profileReturnFromHash();await openPersonalCenter({fromHash:true});}else if(q){await openRoom(Number(q[1]));}else renderLobby()}catch(e){state.me=null;state.roomId=null;state.personalModels=[];state.chat=[];$('#logoutBtn').classList.add('hide');renderAuth();}}
 function renderAuth(){
  stopWs();$('#logoutBtn').classList.add('hide');setConnection('未登录',false);
@@ -60,6 +99,7 @@ function renderAuth(){
  </section></div>`;
 }
 function renderLobby(){
+ state.roomContextEpoch=(state.roomContextEpoch||0)+1;state.roomRefreshVersion=(state.roomRefreshVersion||0)+1;
  stopWs();state.roomId=null;state.room=null;state.roomView='match';state.typing={};$('#logoutBtn').classList.remove('hide');setConnection('大厅',false);
  const isAdmin=!!state.me?.user?.is_admin;
  const completed=state.me.finished_rooms||[];
@@ -71,7 +111,10 @@ function renderLobby(){
  ${completed.length?`<section class="spaced"><h2>已完赛房间记录</h2><p class="hint">任何已登录用户都可以清空这些房间的比赛记录。清空对所有人立即生效，房间本身保留。</p><div class="roomcards">${completed.map(r=>`<div class="card flat room-card"><div class="overline">ROOM ${r.id} · 第 ${r.match_number} 场</div><h3>${esc(r.title)}</h3><button class="danger small" data-action="delete-records" data-id="${r.id}" data-match="${r.match_number}">删除所有人的比赛记录</button></div>`).join('')}</div></section>`:''}`;
 }
 async function loadAccounts(){
- const data=await api('/api/admin/users');state.accounts=data.users;stopWs();state.roomId=null;state.room=null;state.chat=[];state.chatDraft='';state.personalReturn=null;history.replaceState(null,'',location.pathname);setConnection('用户管理',false);renderAccounts();
+ const epoch=++state.roomContextEpoch,uid=state.me?.user?.uid,csrf=state.me?.user?.csrf;
+ const data=await api('/api/admin/users');
+ if(epoch!==state.roomContextEpoch||state.me?.user?.uid!==uid||state.me?.user?.csrf!==csrf)return;
+ state.roomRefreshVersion=(state.roomRefreshVersion||0)+1;state.accounts=data.users;stopWs();state.roomId=null;state.room=null;state.chat=[];state.chatDraft='';state.personalReturn=null;history.replaceState(null,'',location.pathname);setConnection('用户管理',false);renderAccounts();
 }
 function renderAccounts(){
  app.innerHTML=`<div class="pagehead"><div><div class="overline">ADMIN / ACCOUNTS</div><h1>用户管理</h1><p class="muted">按唯一 UID 管理账号；修改密码后，该账号的所有登录会话立即失效。</p></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button data-action="back">← 返回大厅</button></div></div>
@@ -85,11 +128,29 @@ function finishedActions(r){
 function renderReadyRoom(r){
  app.innerHTML=`<div class="pagehead"><div><div class="overline">ROOM ${r.id} · 第 ${r.match_number} 场</div><h1>${esc(r.title)}</h1></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button data-action="back">← 返回大厅</button></div></div><section class="card"><h2>${r.can_manage?'开始下一场比赛':'等待再次开赛'}</h2>${finishedActions(r)}</section>`;
 }
-async function openRoom(id,options={}){state.roomId=id;state.selectedRound=options.round||null;state.roomView=options.view||'match';state.chat=[];state.chatDraft='';try{const r=await api(`/api/rooms/${id}`);state.room=r;state.typing={};state.selectedRound=options.round&&r.rounds.some(x=>x.number===options.round)?options.round:r.current_round;history.replaceState(null,'',`#room=${id}`);await loadPersonalModels().catch(()=>{});if(!r.is_judge&&r.status==='open')await loadRoomChat().catch(()=>{});renderRoom();connectWs(id);maybeNotifyJudge();}catch(e){state.roomId=null;state.room=null;state.chat=[];history.replaceState(null,'',location.pathname);toast(e.message);await loadLobby()}}
+async function openRoom(id,options={}){
+ const epoch=++state.roomContextEpoch,uid=state.me?.user?.uid,csrf=state.me?.user?.csrf;
+ state.roomRefreshVersion=(state.roomRefreshVersion||0)+1;state.roomId=id;state.selectedRound=options.round||null;state.roomView=options.view||'match';state.room=null;state.chat=[];state.chatDraft='';
+ const current=()=>state.roomContextEpoch===epoch&&state.roomId===id&&state.me?.user?.uid===uid&&state.me?.user?.csrf===csrf;
+ try{
+  const r=await api(`/api/rooms/${id}`);
+  if(!current())return;
+  state.room=r;state.typing={};state.selectedRound=options.round&&r.rounds.some(x=>x.number===options.round)?options.round:r.current_round;history.replaceState(null,'',`#room=${id}`);
+  await loadPersonalModels().catch(()=>{});if(!current())return;
+  if(!r.is_judge&&r.status==='open')await loadRoomChat().catch(()=>{});if(!current())return;
+  renderRoom();connectWs(id);maybeNotifyJudge();
+ }catch(e){if(!current())return;state.roomId=null;state.room=null;state.chat=[];history.replaceState(null,'',location.pathname);toast(e.message);await loadLobby()}
+}
 async function loadLobby(){state.me=await api('/api/me');state.chat=[];state.chatDraft='';state.personalReturn=null;renderLobby()}
 
 async function loadPersonalModels(){
- const data=await api('/api/me/models'),next=data.models||[];
+ const uid=state.me?.user?.uid,epoch=state.personalModelEpoch;
+ if(!uid)return state.personalModels;
+ const version=++state.personalModelListRequestVersion;
+ const data=await api('/api/me/models');
+ if(state.personalModelEpoch!==epoch||state.me?.user?.uid!==uid||
+    state.personalModelListRequestVersion!==version)return state.personalModels;
+ const next=data.models||[];
  for(const previous of state.personalModels||[]){
   const current=next.find(p=>Number(p.id)===Number(previous.id));
   if(!current||personalModelTestFingerprint(previous)!==personalModelTestFingerprint(current))invalidatePersonalModelTest(previous.id);
@@ -189,10 +250,14 @@ function makeRoster(r){const submitted=new Set(r.rounds.find(x=>x.number===state
 
 function profileReturnFromHash(){const m=/^#profile\?room=(\d+)&view=([^&]+)&round=(\d+)$/.exec(location.hash);return m?{roomId:Number(m[1]),view:decodeURIComponent(m[2]),round:Number(m[3])}:null;}
 async function openPersonalCenter(options={}){
+ const epoch=++state.roomContextEpoch,uid=state.me?.user?.uid,csrf=state.me?.user?.csrf;
+ state.roomRefreshVersion=(state.roomRefreshVersion||0)+1;
  if(!options.fromHash){state.personalReturn=state.roomId&&state.room?{roomId:state.roomId,view:state.roomView,round:state.selectedRound}:null;}
  else if(!state.personalReturn)state.personalReturn=profileReturnFromHash();
  stopWs();const back=state.personalReturn;const hash=back?.roomId?`#profile?room=${back.roomId}&view=${encodeURIComponent(back.view)}&round=${back.round||1}`:'#profile';history.replaceState(null,'',hash);
- await loadPersonalModels();await loadModelOperationRecords();renderPersonalCenter();
+ await loadPersonalModels();if(epoch!==state.roomContextEpoch||state.me?.user?.uid!==uid||state.me?.user?.csrf!==csrf)return;
+ await loadModelOperationRecords();if(epoch!==state.roomContextEpoch||state.me?.user?.uid!==uid||state.me?.user?.csrf!==csrf)return;
+ renderPersonalCenter();
 }
 async function returnFromPersonalCenter(){
  const back=state.personalReturn;state.personalReturn=null;
@@ -698,8 +763,58 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
    }
   }
   if(action==='admin-join'){await api('/api/join',{method:'POST',body:{code:state.room.invite_code}});await refreshRoom();toast('已作为玩家加入')}
-  if(action==='next-round'){if(confirm('确定开启下一轮？')){await api(`/api/rooms/${state.roomId}/next`,{method:'POST'});await refreshRoom();const q=await api(`/api/rooms/${state.roomId}/ai-judges/questions/generate`,{method:'POST'});await refreshRoom();toast('下一轮已开启；'+aiQuestionFeedback(q))}}
+  if(action==='next-round'){
+   const context=captureRoomOperationContext();
+   if(!isCurrentRoomContext(context))throw new Error('房间状态已变化，请刷新后重试。');
+   if(confirm('确定开启下一轮？')){
+    const base=`/api/rooms/${context.roomId}`;
+    await api(base+'/next',{method:'POST',matchNumber:context.matchNumber});
+    if(!isCurrentRoomContext(context,false))return;
+    const refreshed=await refreshRoom(context);
+    if(!refreshed||!isCurrentRoomContext(context,false)||state.room.current_round!==context.roundNumber+1)return;
+    const q=await idempotentApi(`room:${context.roomId}:match:${context.matchNumber}:round:${context.roundNumber+1}:judge_question`,
+     base+'/ai-judges/questions/generate',{method:'POST',matchNumber:context.matchNumber});
+    if(!isCurrentRoomContext(context,false)||state.room.current_round!==context.roundNumber+1)return;
+    await refreshRoom(context);
+    if(!isCurrentRoomContext(context,false)||state.room.current_round!==context.roundNumber+1)return;
+    const detail=q.failed?.length?'；AI 裁判出题失败：'+q.failed.map(x=>x.error).join('；'):'';
+    toast('下一轮已开启'+(q.generated?`，AI 裁判已生成 ${q.generated} 个问题`:'')+detail);
+   }
+  }
   if(action==='start-round'){
+   const context=captureRoomOperationContext(),roomId=context.roomId,matchNumber=context.matchNumber,roundNumber=context.roundNumber;
+   if(!isCurrentRoomContext(context))throw new Error('房间状态已变化，请刷新后重试。');
+   const round=state.room?.rounds?.find(x=>x.number===roundNumber);
+   const pendingAuto=(state.room?.judges||[]).filter(j=>j.kind==='ai'&&j.model_profile?.credential_status==='ok'&&!round?.questions?.some(q=>q.kind==='ai'&&q.judge_id===j.id));
+   const blocker=startRoundBlocker(state.room,round,pendingAuto);if(blocker)throw new Error(blocker);
+   if(confirm('确认向所有参赛者开放作答？模型 AI 裁判会先自动出题，开局后模型 AI 参赛者会自动回答。')){
+    const base=`/api/rooms/${roomId}`,originalText=b.textContent;b.disabled=true;b.textContent='正在准备模型…';
+    try{
+     const q=await idempotentApi(`room:${roomId}:match:${matchNumber}:round:${roundNumber}:judge_question`,
+      base+'/ai-judges/questions/generate',{method:'POST',matchNumber});
+     if(!isCurrentRoomContext(context))return;
+     const refreshed=await refreshRoom(context);
+     if(!refreshed||!isCurrentRoomContext(context))return;
+     const questionFailures=q.failed?.map(x=>(x.label||x.judge_id||'AI裁判')+'：'+x.error).filter(Boolean)||[];
+     const questionSkips=q.results?.filter(x=>x.status==='skipped'&&x.reason).map(x=>(x.label||x.judge_id||'AI裁判')+'：'+x.reason)||[];
+     if(questionFailures.length){const failureDetails=[questionFailures.length?'失败：'+questionFailures.join('；'):'',questionSkips.length?'跳过：'+questionSkips.join('；'):''].filter(Boolean).join('；');throw new Error('AI 裁判出题未完成：'+failureDetails)}
+     const refreshedRound=state.room?.rounds?.find(x=>x.number===roundNumber);
+     if(!(refreshedRound?.questions?.length)){throw new Error(questionSkips.length?'AI 裁判未能出题：'+questionSkips.join('；'):(q.message||'当前没有可用于开局的裁判问题，请先录入问题或绑定可用模型配置。'))}
+     await api(base+'/start',{method:'POST',matchNumber});
+     if(!isCurrentRoomContext(context))return;
+     const started=await refreshRoom(context);
+     if(!started||!isCurrentRoomContext(context))return;
+     const a=await idempotentApi(`room:${roomId}:match:${matchNumber}:round:${roundNumber}:ai_answer`,
+      base+'/ai/answers/generate',{method:'POST',matchNumber});
+     if(!isCurrentRoomContext(context))return;
+     await refreshRoom(context);
+     if(!isCurrentRoomContext(context))return;
+     const answerProblems=[...(a.failed||[]).map(x=>(x.alias||'AI参赛者')+'：'+x.error),...(a.results||[]).filter(x=>x.status==='skipped'&&x.reason).map(x=>(x.alias||'AI参赛者')+'：'+x.reason)];
+     const details=[questionSkips.length?'裁判出题跳过：'+questionSkips.join('；'):'',answerProblems.length?'AI回答问题：'+answerProblems.join('；'):''].filter(Boolean).join('；');
+     toast(`本轮已开始，模型自动提交 ${a.generated||0} 个回答${details?'；'+details:''}`);
+    }finally{if(b.isConnected){b.disabled=false;b.textContent=originalText}}
+   }
+  }
    const shouldGenerate=b.dataset.generateQuestions==='true';
    const prompt=shouldGenerate?'确认先生成可用 AI 裁判问题，再按当前已提交问题重新检查并开启作答？':'确认按当前已提交的合规问题开启作答？未交题席位不会阻止本轮开始。';
    if(confirm(prompt)){
