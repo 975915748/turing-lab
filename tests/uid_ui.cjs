@@ -744,6 +744,7 @@ async function logout(page) {
       await page.unroute(questionPattern);
 
       // A failed response from room A must not show its stale error on room B.
+      await page.locator('[data-action="back"]').click();
       await page.locator('[data-action="open"][data-id="' + roomA.room_id + '"]').click();
       await page.getByRole('heading', { name: '异步开局目标 A', exact: true }).waitFor();
       await page.locator('[data-action="room-view"][data-view="admin"]').click();
