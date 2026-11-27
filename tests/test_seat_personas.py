@@ -3,7 +3,7 @@ import sqlite3
 import pytest
 from fastapi.testclient import TestClient
 
-from app import create_app, seed_admin
+from app import create_app, participant_roster_revision, seed_admin
 from seat_personas import (
     compose_system_prompt,
     freeze_match_personas,
@@ -94,7 +94,7 @@ def test_match_persona_snapshot_is_immutable_and_revealed_without_secrets():
     assert "base_url" not in rows[0] and "profile_name" not in rows[0] and "api_key" not in rows[0]
 
 
-def test_prestart_deleted_roster_recovery_updates_frozen_revision(tmp_path):
+def test_prestart_deleted_roster_recovery_requires_reset_and_refreezes_roster(tmp_path):
     path = tmp_path / "persona-recovery.sqlite3"
     seed_admin(path, "persona_admin", "人设管理员", "persona-admin-password")
     app = create_app(path)
@@ -110,7 +110,8 @@ def test_prestart_deleted_roster_recovery_updates_frozen_revision(tmp_path):
     request(admin, "POST", "/api/login",
             {"username": "persona_admin", "password": "persona-admin-password"})
     room = request(admin, "POST", "/api/rooms", {"title": "冻结后的账号删除补位"})
-    base = f"/api/rooms/{room['room_id']}"
+    room_id = room["room_id"]
+    base = f"/api/rooms/{room_id}"
     players = (player_a, player_b)
     for index, client in enumerate(players):
         request(client, "POST", "/api/register", {
@@ -122,7 +123,7 @@ def test_prestart_deleted_roster_recovery_updates_frozen_revision(tmp_path):
     request(admin, "POST", base + "/ai", {"name": "保留 AI"})
     judge = request(admin, "POST", base + "/ai-judges", {"name": "手动 AI 裁判"})
 
-    # Preparation freezes the original two-human/one-AI roster.
+    # The first independent AI-question request freezes the original roster.
     request(admin, "POST", base + "/ai-judges/questions/generate")
     request(admin, "POST", base + f"/ai-judges/{judge['id']}/questions",
             {"text": "请描述一次你修正错误判断的经历。"})
@@ -130,18 +131,77 @@ def test_prestart_deleted_roster_recovery_updates_frozen_revision(tmp_path):
     for client in players:
         uid = client.get("/api/me").json()["user"]["uid"]
         request(admin, "DELETE", "/api/admin/users/" + uid, {"confirm": True})
-    assert admin.get(base).json()["roster_recovery"] is True
+    before_reset = admin.get(base).json()
+    assert before_reset["roster_recovery"] is True
+    assert before_reset["personas_frozen"] is True
 
-    # The only permitted post-freeze replacement is a manual AI seat. Its
-    # frozen roster revision must advance with the recovery snapshot.
+    # A frozen roster cannot be patched in place or started with the old AI question.
+    request(admin, "POST", base + "/ai", {"name": "账号删除补位 AI"}, expected=409)
+    request(admin, "POST", base + "/start", expected=409)
+
+    request(admin, "POST", base + "/personas/reset-preparation", {"confirm": True})
+    after_reset = admin.get(base).json()
+    assert after_reset["personas_frozen"] is False
+    assert after_reset["roster_recovery"] is True
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT COUNT(*) FROM match_persona_freezes WHERE room_id=?",
+                          (room_id,)).fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM match_seat_persona_snapshots WHERE room_id=?",
+                          (room_id,)).fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM ai_judge_questions WHERE room_id=?",
+                          (room_id,)).fetchone()[0] == 0
+
     request(admin, "POST", base + "/ai", {"name": "账号删除补位 AI"})
+    request(admin, "POST", base + f"/ai-judges/{judge['id']}/questions",
+            {"text": "请结合当前参赛名单描述一次修正错误判断的经历。"})
     request(admin, "POST", base + "/start")
+
     info = admin.get(base).json()
     assert info["match_started"] is True
     assert info["personas_frozen"] is True
     assert len(info["ais"]) == 2
     assert not info.get("seat_personas")  # details remain hidden until formal reveal
+    with sqlite3.connect(path) as db:
+        stored_revision = db.execute(
+            "SELECT participant_roster_revision FROM match_persona_freezes WHERE room_id=?",
+            (room_id,),
+        ).fetchone()[0]
+        assert stored_revision == participant_roster_revision(db, room_id)
+        snapshot_aliases = {
+            row[0] for row in db.execute(
+                "SELECT seat_key FROM match_seat_persona_snapshots "
+                "WHERE room_id=? AND match_number=1 AND seat_type='participant'",
+                (room_id,),
+            ).fetchall()
+        }
+        assert snapshot_aliases == {seat["alias"] for seat in info["ais"]}
+        assert db.execute("SELECT COUNT(*) FROM ai_judge_questions WHERE room_id=?",
+                          (room_id,)).fetchone()[0] == 1
 
+
+def test_invalid_model_generation_does_not_freeze_personas(tmp_path):
+    path = tmp_path / "invalid-persona-generation.sqlite3"
+    seed_admin(path, "persona_admin", "人设管理员", "persona-admin-password")
+    app = create_app(path)
+    admin = TestClient(app)
+
+    def request(method, url, data=None, expected=200):
+        me = admin.get("/api/me")
+        headers = {"X-CSRF-Token": me.json()["user"]["csrf"]} if me.status_code == 200 else {}
+        response = admin.request(method, url, json=data or {}, headers=headers)
+        assert response.status_code == expected, (url, response.status_code, response.text)
+        return response.json() if response.content else {}
+
+    request("POST", "/api/login",
+            {"username": "persona_admin", "password": "persona-admin-password"})
+    room = request("POST", "/api/rooms", {"title": "无效请求不应冻结人设"})
+    base = f"/api/rooms/{room['room_id']}"
+    request("POST", base + "/ai-judges", {"name": "手动 AI 裁判"})
+    request("POST", base + "/ai-judges/questions/generate", expected=409)
+    request("POST", base + "/ai/answers/generate", expected=409)
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT COUNT(*) FROM match_persona_freezes WHERE room_id=?",
+                          (room["room_id"],)).fetchone()[0] == 0
 
 def test_persona_api_freezes_and_allows_preparation_reset(tmp_path):
     path = tmp_path / "personas.sqlite3"

@@ -29,8 +29,7 @@ from social import register_social_routes, ensure_app_schema, cleanup_deleted_ac
 from match_orchestration import PersistentWorkflowWorker
 from seat_personas import (compose_system_prompt, freeze_match_personas, is_match_persona_frozen,
                             normalize_persona_config, output_token_limit, persona_catalog,
-                            persona_config_from_row, revealed_persona_rows,
-                            freeze_new_manual_participant_seat)
+                            persona_config_from_row, revealed_persona_rows)
 
 ROOT = Path(__file__).resolve().parent
 DATABASE = ROOT / 'data' / 'game.sqlite3'
@@ -2348,9 +2347,6 @@ def create_app(db_path=None):
             if not room or room['status']!='open' or room['verdict_locked_at']:
                 raise HTTPException(409,'比赛已结束或裁判判断已锁定，不能生成 AI 裁判问题。')
             ensure_persona_participant_roster_unchanged(db,room)
-            if not is_match_persona_frozen(db,room_id,room['match_number']):
-                freeze_match_personas(db,room,source='question_generation',
-                    participant_roster_revision=participant_roster_revision(db,room_id))
             if workflow:
                 actor_status=workflow_actor_valid(db,workflow)
                 if actor_status is not True:
@@ -2370,6 +2366,12 @@ def create_app(db_path=None):
             roster=aliases(db,room_id)[2]
             if len(roster)<2:
                 raise HTTPException(409,'至少需要两名在场参赛者才能生成 AI 裁判问题。')
+            if target_judge_id is not None and not db.execute(
+                    'SELECT 1 FROM ai_judges WHERE room_id=? AND id=?',(room_id,target_judge_id)).fetchone():
+                raise HTTPException(404,'AI 裁判席不存在。')
+            if not is_match_persona_frozen(db,room_id,room['match_number']):
+                freeze_match_personas(db,room,source='question_generation',
+                    participant_roster_revision=participant_roster_revision(db,room_id))
             rows=db.execute('''SELECT j.id AS judge_id,j.label,j.model_profile_id,
                     mp.*,u.deleted_at AS owner_deleted_at,q.id AS question_id
                 FROM ai_judges j
@@ -2483,9 +2485,6 @@ def create_app(db_path=None):
             room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
             if not room or room['status']!='open':
                 raise HTTPException(409,'比赛已结束。')
-            if not is_match_persona_frozen(db,room_id,room['match_number']):
-                freeze_match_personas(db,room,source='answer_generation',
-                    participant_roster_revision=participant_roster_revision(db,room_id))
             if workflow:
                 actor_status=workflow_actor_valid(db,workflow)
                 if actor_status is not True:
@@ -2505,6 +2504,10 @@ def create_app(db_path=None):
             if round_deadline_expired(rnd):
                 return {'generated':0,'skipped':0,'blocked':0,'failed':[],
                         'timed_out':True,'results':[]}
+            ensure_persona_participant_roster_unchanged(db,room)
+            if not is_match_persona_frozen(db,room_id,room['match_number']):
+                freeze_match_personas(db,room,source='answer_generation',
+                    participant_roster_revision=participant_roster_revision(db,room_id))
             rows=db.execute('''SELECT ai.alias,ai.name AS ai_name,mp.*,
                     mp.name AS profile_name,mp.model AS model_name FROM ai_players ai
                 JOIN model_profiles mp ON mp.id=ai.model_profile_id AND mp.ownership_issue IS NULL
@@ -4111,21 +4114,17 @@ def create_app(db_path=None):
         with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
-            ensure_roster_unlocked(db,room,allow_frozen=True)
-            recovery=needs_roster_recovery(db,room)
-            frozen=is_match_persona_frozen(db,room_id,room['match_number'])
-            if frozen and (not recovery or body.model_profile_id is not None):
-                raise HTTPException(409,'本场开始后仅可在删除账号导致参赛人数不足时补入手动 AI 席位；模型绑定与人设保持冻结。')
+            if room['status']!='open' or room['verdict_locked_at']:
+                raise HTTPException(409,'比赛已结束或裁判判断已锁定，不能添加 AI 参赛位。')
+            if is_match_persona_frozen(db,room_id,room['match_number']):
+                raise HTTPException(409,'本场准备已冻结；如需补位或修改 AI 席位，请先取消准备并重置配置。')
+            ensure_roster_unlocked(db,room)
             alias=new_alias(db,room_id)
             if body.model_profile_id is not None:
                 require_owned_model_profile(db,body.model_profile_id,u['id'])
             name=norm_text(body.name,60)
             db.execute('INSERT INTO ai_players(room_id,alias,name,model_profile_id) VALUES(?,?,?,?)',
                        (room_id,alias,name,body.model_profile_id))
-            if frozen:
-                freeze_new_manual_participant_seat(
-                    db,room,alias,name,
-                    participant_roster_revision=participant_roster_revision(db,room_id))
             log_event(db,room_id,1,'ai_joined',alias,'AI 参赛位已添加')
         await app.state.hub.notify(room_id,'ai_joined')
         return {'alias':alias,'automated':body.model_profile_id is not None}
