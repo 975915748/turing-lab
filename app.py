@@ -1230,7 +1230,11 @@ def public_room(db, room, user, mine):
             WHERE q.room_id=? AND q.round_number=?
             ORDER BY 3,6,1''',(room['id'],r['number'],room['id'],r['number'])).fetchall()
         body.append(dict(number=r['number'], question=r['question'], status=r['status'],
-                         revealed_at=r['revealed_at'], submitted=[a['alias'] for a in got if a['alias'] in roster or r['status']=='revealed'],
+                         revealed_at=r['revealed_at'], started_at=r['started_at'],
+                         duration_seconds=r['duration_seconds'],deadline_at=r['deadline_at'],
+                         timeout_ended_at=r['timeout_ended_at'],
+                         timed_out=timed_out_aliases(db,r['id']),
+                         submitted=[a['alias'] for a in got if a['alias'] in roster or r['status']=='revealed'],
                          questions=[{'id':x['id'],'text':x['text'],'created_at':x['created_at'],
                                      'judge':x['label'],'kind':x['kind'],'judge_id':x['judge_id'],
                                      'mine':x['kind']=='human' and x['judge_user_id']==user['id']} for x in qrows],
@@ -1275,7 +1279,7 @@ def public_room(db, room, user, mine):
             'revealed_at':room['revealed_at'],'mine':None,'is_admin':False,'is_judge':True,
             'my_judge_label':judge['label'],'my_verdict':my_verdict,
             'aliases':roster,'rounds':body,'suggestions':suggestions,
-            'judges_count':len(judges)}
+            'judges_count':len(judges),'server_now':utcnow()}
     suggestions = db.execute('''SELECT s.id,s.round_number,s.text,s.created_at,u.display_name,
         m.alias FROM suggestions s JOIN users u ON u.id=s.sender_id
         LEFT JOIN members m ON m.room_id=s.room_id AND m.user_id=s.sender_id
@@ -1336,8 +1340,10 @@ def public_room(db, room, user, mine):
                       [{'kind':r['kind'],'label':r['label'],'locked':bool(r['locked'])} for r in judges],
             'rounds':body,'suggestions':[dict(s) for s in suggestions],
             'ai_edits':ai_edits,'packets':[dict(p) for p in pkts],
-            'model_profiles':model_profiles,'model_api_enabled':has_valid_credential_key()}
+            'model_profiles':model_profiles,'model_api_enabled':has_valid_credential_key(),
+            'server_now':utcnow()}
     if manager:
+        result['round_duration_seconds']=room['round_duration_seconds']
         current_round_row=db.execute('SELECT status FROM rounds WHERE room_id=? AND number=?',
                                       (room['id'],room['current_round'])).fetchone()
         has_current_round=bool(current_round_row)
@@ -1455,10 +1461,11 @@ def round_markdown(db, room, number, user, mine):
         lines = [f'# {room["title"]} · 第 {number} 轮 · 裁判匿名记录', '',
                  f'状态：{r["status"]}', '', '## 本轮问题', '',
                  r['question'] or '（等待管理员开启作答）', '', '## 匿名参赛者回答', '']
-        for alias in sorted(set(data['aliases']) | set(r['answers'])):
+        for alias in sorted(set(data['aliases']) | set(r['answers']) | set(r['timed_out'])):
             answer = r['answers'].get(alias)
-            lines += [f'### 参与者 {alias}',
-                      answer['text'] if answer else '（已提交，待统一揭晓）' if alias in r['submitted'] else '（未提交）', '']
+            status_text=('（超时未提交）' if alias in r['timed_out'] else
+                         answer['text'] if answer else '（已提交，待统一揭晓）' if alias in r['submitted'] else '（未提交）')
+            lines += [f'### 参与者 {alias}',status_text,'']
         lines += ['## 本轮匿名提问与追问', '']
         for suggestion in data['suggestions']:
             if suggestion['round_number']==number:
@@ -1477,7 +1484,8 @@ def round_markdown(db, room, number, user, mine):
         # 未公开时只显示提交状态，自己可以看到自己的回答。
         lines += [f'### {a} · 人类 · {h["name"]} (@{h["username"]}) · UID {h["uid"]}',
                   f'提交时间：{answer["submitted_at"]}' if answer else '',
-                  answer['text'] if answer else '（已提交，待统一揭晓）' if a in r['submitted'] else '（未提交）', '']
+                  answer['text'] if answer else '（超时未提交）' if a in r['timed_out'] else
+                  '（已提交，待统一揭晓）' if a in r['submitted'] else '（未提交）', '']
     for departed in db.execute('''SELECT m.alias,u.id AS user_id,u.display_name,u.username,m.removed_at FROM members m
         JOIN users u ON m.user_id=u.id WHERE m.room_id=? AND m.removed_at IS NOT NULL ORDER BY m.alias''',(room['id'],)):
         a=departed['alias']
@@ -1487,7 +1495,9 @@ def round_markdown(db, room, number, user, mine):
     for ai in data['ais']:
         a = ai['alias']
         answer = r['answers'].get(a)
-        lines += [f'### {a} · AI · {ai["name"]}', '', answer['text'] if answer else '（已提交，待统一揭晓）' if a in r['submitted'] else '（未提交）', '']
+        lines += [f'### {a} · AI · {ai["name"]}', '',
+                  answer['text'] if answer else '（超时未提交）' if a in r['timed_out'] else
+                  '（已提交，待统一揭晓）' if a in r['submitted'] else '（未提交）', '']
     lines += ['', '## 本轮事件时间线', '']
     for event in db.execute('SELECT kind,actor,text,created_at FROM events WHERE room_id=? AND round_number=? ORDER BY id',
                             (room['id'],number)):
