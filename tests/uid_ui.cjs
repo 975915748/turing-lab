@@ -746,7 +746,7 @@ async function logout(page) {
         '非自定义预设不应展示可编辑的自定义提示词');
       await participantPersona.locator('[name="preset_id"]').selectOption('custom');
       assert.equal(await participantPersona.locator('[data-custom-prompt-field]').isVisible(), true);
-      assert.equal(await participantPersona.locator('[name="custom_system_prompt"]').isRequired(), true);
+      assert.equal(await participantPersona.locator('[name="custom_system_prompt"]').evaluate(element => element.required), true);
       await participantPersona.locator('[name="custom_system_prompt"]').fill('临时自定义风格');
       await participantPersona.locator('[name="preset_id"]').selectOption('analytical');
       assert.equal(await participantPersona.locator('[name="custom_system_prompt"]').inputValue(), '',
