@@ -10,7 +10,7 @@ OUTPUT_LENGTHS={
  "medium":{"label":"中","soft_chars":300,"token_cap":768},
  "long":{"label":"长","soft_chars":800,"token_cap":2048},
 }
-PARTICIPANT_PRESETS={
+PARTICIPANT_PRESETS_V1={
  "default":("默认风格","保持自然、直接，不刻意套用固定表达模板。"),
  "minimal":("极简交流者","优先使用短句，少作解释，直接回应问题；不为简短而遗漏必要信息。"),
  "casual":("日常闲聊者","使用自然口语，可以适度联想和承接对话；避免机械套用固定开场或结尾。"),
@@ -18,23 +18,31 @@ PARTICIPANT_PRESETS={
  "emotional":("情绪表达者","更关注语气、情绪和交流对象的感受；表达自然，不刻意夸大情绪或迎合对方。"),
  "custom":("自定义",""),
 }
-JUDGE_PRESETS={
+JUDGE_PRESETS_V1={
  "balanced":("默认均衡","综合衡量全部可用匿名证据，不因单一措辞或某种表达风格直接下结论。"),
  "language_detail":("语言细节","重点检查措辞、句式、语义衔接、表达细节及其在上下文中的一致性；不得把某个单独语言特征当作身份定论。"),
  "cross_round":("跨轮一致性","重点比较同一匿名代号跨轮回答中的立场、知识运用、表达习惯与自我修正；考虑正常变化，不把变化本身等同于 AI。"),
  "custom":("自定义",""),
 }
-def _catalog_for(seat_type):
- if seat_type=="participant": return PARTICIPANT_PRESETS
- if seat_type=="judge": return JUDGE_PRESETS
- raise ValueError("未知 AI 席位类型。")
+PERSONA_TEMPLATE_HISTORY={
+ 1:{"participant":PARTICIPANT_PRESETS_V1,"judge":JUDGE_PRESETS_V1},
+}
+def _catalog_for(seat_type,preset_version=None):
+ version=PERSONA_TEMPLATE_VERSION if preset_version is None else int(preset_version)
+ templates=PERSONA_TEMPLATE_HISTORY.get(version)
+ if not templates: raise ValueError("所需人设模板版本不可用，不能用新模板覆盖历史配置。")
+ catalog=templates.get(seat_type)
+ if catalog is None: raise ValueError("未知 AI 席位类型。")
+ return version,catalog
 def persona_catalog():
- return {"participant":[{"id":k,"name":v[0]} for k,v in PARTICIPANT_PRESETS.items()],
-         "judge":[{"id":k,"name":v[0]} for k,v in JUDGE_PRESETS.items()],
+ _,participants=_catalog_for("participant")
+ _,judges=_catalog_for("judge")
+ return {"participant":[{"id":k,"name":v[0]} for k,v in participants.items()],
+         "judge":[{"id":k,"name":v[0]} for k,v in judges.items()],
          "output_lengths":[{"id":k,"name":v["label"]} for k,v in OUTPUT_LENGTHS.items()],
          "template_version":PERSONA_TEMPLATE_VERSION}
-def normalize_persona_config(seat_type,*,preset_id="default",custom_system_prompt="",output_length="default",history_rounds=5):
- catalog=_catalog_for(seat_type)
+def normalize_persona_config(seat_type,*,preset_id="default",custom_system_prompt="",output_length="default",history_rounds=5,preset_version=None):
+ version,catalog=_catalog_for(seat_type,preset_version)
  if preset_id not in catalog: raise ValueError("所选人设预设不适用于当前席位。")
  if output_length not in OUTPUT_LENGTHS: raise ValueError("输出长度只能选择默认、短、中或长。")
  if isinstance(history_rounds,bool) or not isinstance(history_rounds,int) or not 0<=history_rounds<=100:
@@ -45,7 +53,7 @@ def normalize_persona_config(seat_type,*,preset_id="default",custom_system_promp
  if preset_id=="custom" and not custom_system_prompt: raise ValueError("选择自定义人设时，必须填写自定义 System Prompt。")
  if preset_id!="custom" and custom_system_prompt: raise ValueError("只有选择自定义人设时才能填写自定义 System Prompt。")
  name,template=catalog[preset_id]
- return {"preset_id":preset_id,"preset_version":PERSONA_TEMPLATE_VERSION,"display_name":name,
+ return {"preset_id":preset_id,"preset_version":version,"display_name":name,
          "custom_system_prompt":custom_system_prompt,"output_length":output_length,
          "history_rounds":history_rounds,"style_prompt":custom_system_prompt if preset_id=="custom" else template}
 def persona_config_from_row(row,seat_type):
@@ -53,7 +61,8 @@ def persona_config_from_row(row,seat_type):
   preset_id=row["persona_preset_id"] if "persona_preset_id" in row.keys() else ("balanced" if seat_type=="judge" else "default"),
   custom_system_prompt=row["persona_custom_prompt"] if "persona_custom_prompt" in row.keys() else "",
   output_length=row["persona_output_length"] if "persona_output_length" in row.keys() else "default",
-  history_rounds=int(row["persona_history_rounds"] if "persona_history_rounds" in row.keys() else 5))
+  history_rounds=int(row["persona_history_rounds"] if "persona_history_rounds" in row.keys() else 5),
+  preset_version=int(row["persona_preset_version"] if "persona_preset_version" in row.keys() else PERSONA_TEMPLATE_VERSION))
 def compose_system_prompt(platform_prompt,persona,*,task,final_verdict=False):
  style=(persona or {}).get("style_prompt","").strip()
  info=OUTPUT_LENGTHS.get((persona or {}).get("output_length","default"),OUTPUT_LENGTHS["default"])
