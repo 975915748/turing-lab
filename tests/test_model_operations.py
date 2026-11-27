@@ -202,6 +202,42 @@ def test_persona_presets_change_mock_prompts_and_output_limits(operation_lab):
     assert lab['state']['calls'] == 3
 
 
+def test_concurrent_independent_question_generation_freezes_once(operation_lab):
+    lab = operation_lab
+    admin, base, profile_id = lab['admin'], lab['base'], lab['profile_id']
+    add_ai_judge(admin, base, '并发冻结裁判', profile_id)
+    second_admin = TestClient(lab['app'])
+    post(second_admin, '/api/login', {
+        'username': 'ops_admin', 'password': 'ops-admin-password',
+    })
+    block = {'started': threading.Event(), 'release': threading.Event()}
+    lab['state']['block'] = block
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(post, admin, base + '/ai-judges/questions/generate')
+        assert block['started'].wait(5), '首个并发请求没有进入模型调用'
+        second = pool.submit(post, second_admin, base + '/ai-judges/questions/generate')
+        second_result = second.result(timeout=10)
+        block['release'].set()
+        first_result = first.result(timeout=15)
+
+    lab['state']['block'] = None
+    assert first_result['generated'] == 1
+    assert second_result['generated'] == 0
+    assert lab['state']['calls'] == 1
+    room = admin.get(base).json()
+    assert len(room['rounds'][0]['questions']) == 1
+    with db_open(lab['path']) as db:
+        assert db.execute(
+            'SELECT COUNT(*) FROM match_persona_freezes WHERE room_id=?',
+            (lab['room_id'],),
+        ).fetchone()[0] == 1
+        assert db.execute(
+            "SELECT COUNT(*) FROM model_operation_tasks WHERE room_id=? AND purpose='judge_question'",
+            (lab['room_id'],),
+        ).fetchone()[0] == 1
+
+
 def test_connection_and_game_calls_are_owner_scoped_and_cleaned_differently(operation_lab):
     lab = operation_lab
     admin, base, profile_id = lab['admin'], lab['base'], lab['profile_id']
