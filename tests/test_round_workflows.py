@@ -296,12 +296,18 @@ def test_round_timer_deadline_and_host_timeout_finish(workflow_app, monkeypatch)
         room, players = create_room_and_players(app, admin, count=2)
         base = f"/api/rooms/{room['room_id']}"
         ai = mutate(admin, base + '/ai', {'name': '手动 AI 席位'})
+        profile_id = create_profile(admin)
+        judge = mutate(admin, base + '/ai-judges', {
+            'name': '下一轮自动裁判', 'model_profile_id': profile_id,
+        })
         assert admin.get(base).json()['round_duration_seconds'] is None
         assert admin.put(base + '/round-timer',
                          json={'seconds': 29},
                          headers={'X-CSRF-Token': admin.get('/api/me').json()['user']['csrf']}).status_code == 422
         mutate(admin, base + '/round-timer', {'seconds': 30}, method='PUT')
-        mutate(admin, base + '/question', {'text': '请描述一次你解决问题的经历。'})
+        mutate(admin, base + f'/ai-judges/{judge["id"]}/questions',
+               {'text': '请描述一次你解决问题的经历。'})
+        mutate(admin, base + '/start', {})
         opened = admin.get(base).json()['rounds'][0]
         assert opened['status'] == 'collecting'
         assert opened['started_at']
@@ -353,8 +359,6 @@ def test_round_timer_deadline_and_host_timeout_finish(workflow_app, monkeypatch)
         public = admin.get(base).json()
         assert public['round_duration_seconds'] == 60
         assert public['rounds'][0]['duration_seconds'] == 30
-        profile_id = create_profile(admin)
-        mutate(admin, base + '/ai-judges', {'name': '下一轮自动裁判', 'model_profile_id': profile_id})
         async def fake_chat(profile, messages, api_key):
             return {'text': '第二轮裁判问题', 'usage': {'prompt_tokens': 3, 'completion_tokens': 4}}
         monkeypatch.setattr(app_module, 'chat_completion', fake_chat)
