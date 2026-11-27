@@ -101,6 +101,11 @@ def freeze_match_personas(db,room,*,source="workflow",participant_roster_revisio
       "max_tokens":int(p["max_tokens"]),"timeout_seconds":int(p["timeout_seconds"])}
     else: model={"profile_id":int(profile_id),"owner_user_id":None,"profile_name":None,"model_name":None,
       "base_url":None,"model":None,"temperature":None,"max_tokens":None,"timeout_seconds":None}
+   if model:
+    model["effective_output_max_tokens"]=output_token_limit(config,model["max_tokens"])
+    if seat_type=="judge":
+     # Final verdict JSON must retain the full frozen model budget.
+     model["verdict_max_tokens"]=model["max_tokens"]
    cj=json.dumps(config,ensure_ascii=False,sort_keys=True,separators=(",",":"))
    mj=json.dumps(model,ensure_ascii=False,sort_keys=True,separators=(",",":")) if model else None
    digest=hashlib.sha256((cj+"\0"+(mj or "")).encode()).hexdigest()
@@ -135,11 +140,16 @@ def revealed_persona_rows(db,room_id,match_number):
  result=[]
  for row in rows:
   c=json.loads(row["config_json"]); m=json.loads(row["model_json"]) if row["model_json"] else None
+  model_limit=m.get("max_tokens") if m else None
+  effective_limit=(m.get("effective_output_max_tokens") if m else None)
+  if effective_limit is None and model_limit is not None:
+   effective_limit=output_token_limit(c,model_limit)
+  verdict_limit=(m.get("verdict_max_tokens",model_limit) if m and row["seat_type"]=="judge" else None)
   result.append({"seat_type":row["seat_type"],"seat_key":row["seat_key"],
    "preset_id":c["preset_id"],"preset_version":c["preset_version"],"persona_name":c["display_name"],
    "style_prompt":c["style_prompt"],"custom_system_prompt":c["custom_system_prompt"],"output_length":c["output_length"],
    "history_rounds":c["history_rounds"],"model_name":m.get("model_name") if m else None,
-   "model_temperature":m.get("temperature") if m else None,
-   "model_max_tokens":m.get("max_tokens") if m else None,
+   "model_temperature":m.get("temperature") if m else None,"model_max_tokens":model_limit,
+   "effective_output_max_tokens":effective_limit,"verdict_max_tokens":verdict_limit,
    "model_timeout_seconds":m.get("timeout_seconds") if m else None})
  return result

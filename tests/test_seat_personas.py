@@ -77,6 +77,7 @@ def test_match_persona_snapshot_is_immutable_and_revealed_without_secrets():
     db.execute("INSERT INTO model_profiles VALUES(11,7,'private config','frozen-model',"
                "'https://provider.example/v1',0.3,1024,30)")
     db.execute("INSERT INTO ai_players VALUES(1,'A','Bot A',11,'analytical',1,'','short',0,1)")
+    db.execute("INSERT INTO ai_judges VALUES(7,1,'Judge 7',11,'language_detail',1,'','short',0,1)")
     room = {"id": 1, "match_number": 3, "match_started_at": None}
     assert freeze_match_personas(db, room, participant_roster_revision="roster-v1") is True
     assert freeze_match_personas(db, room, participant_roster_revision="roster-v2") is False
@@ -90,7 +91,11 @@ def test_match_persona_snapshot_is_immutable_and_revealed_without_secrets():
     assert rows[0]["model_name"] == "frozen-model"
     assert rows[0]["model_temperature"] == 0.3
     assert rows[0]["model_max_tokens"] == 1024
+    assert rows[0]["effective_output_max_tokens"] == 256
     assert rows[0]["model_timeout_seconds"] == 30
+    assert rows[1]["seat_type"] == "judge"
+    assert rows[1]["effective_output_max_tokens"] == 256
+    assert rows[1]["verdict_max_tokens"] == 1024
     assert "base_url" not in rows[0] and "profile_name" not in rows[0] and "api_key" not in rows[0]
 
 
