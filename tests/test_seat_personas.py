@@ -274,7 +274,7 @@ def test_persona_api_freezes_and_allows_preparation_reset(tmp_path):
     assert judge_view["is_judge"] is True
     assert judge_view["personas_revealed"] is False
     assert not judge_view.get("seat_personas")
-    pre_reveal_log = player_a.get(base + "/log")
+    pre_reveal_log = player_a.get(base + "/rounds/1/log")
     assert pre_reveal_log.status_code == 200
     assert "严谨分析者" not in pre_reveal_log.text
     assert "语言细节" not in pre_reveal_log.text
