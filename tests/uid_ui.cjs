@@ -716,10 +716,9 @@ async function logout(page) {
 
       await page.locator('[data-action="sync"]').click();
       await page.locator('[data-action="room-view"][data-view="admin"]').click();
-      const participantDetails = page.locator('details.persona-editor').filter({
-        has: page.locator('form[data-form="seat-persona"][data-seat-type="participant"]'),
-      });
-      await participantDetails.locator('summary').click();
+      const participantDetails = page.locator(
+        'details.persona-editor:has(form[data-form="seat-persona"][data-seat-type="participant"])');
+      await participantDetails.evaluate(element => { element.open = true; });
       const participantPersona = participantDetails.locator('form[data-form="seat-persona"]');
       await participantPersona.waitFor();
       await participantPersona.locator('[name="preset_id"]').selectOption('analytical');
@@ -732,10 +731,9 @@ async function logout(page) {
       assert.equal(participantSaveResponse.status(), 200, await participantSaveResponse.text());
 
       await page.locator('[data-action="room-view"][data-view="ai-judges"]').click();
-      const judgeDetails = page.locator('details.persona-editor').filter({
-        has: page.locator('form[data-form="seat-persona"][data-seat-type="judge"]'),
-      });
-      await judgeDetails.locator('summary').click();
+      const judgeDetails = page.locator(
+        'details.persona-editor:has(form[data-form="seat-persona"][data-seat-type="judge"])');
+      await judgeDetails.evaluate(element => { element.open = true; });
       const judgePersona = judgeDetails.locator('form[data-form="seat-persona"]');
       await judgePersona.waitFor();
       await judgePersona.locator('[name="preset_id"]').selectOption('language_detail');
@@ -758,6 +756,10 @@ async function logout(page) {
       assert.equal(frozenRoom.personas_frozen, true);
       assert.equal(frozenRoom.ais[0].persona.preset_id, 'analytical');
       assert.equal(frozenRoom.judges.find(item => item.kind === 'ai').persona.preset_id, 'language_detail');
+      await page.waitForFunction(() => {
+        const field = document.querySelector('form[data-form="seat-persona"][data-seat-type="judge"] [name="preset_id"]');
+        return field && field.disabled;
+      });
       assert.equal(await judgePersona.locator('[name="preset_id"]').isDisabled(), true);
 
       await page.locator('[data-action="room-view"][data-view="admin"]').click();
@@ -773,7 +775,11 @@ async function logout(page) {
       frozenRoom = await (await context.request.get(site + base)).json();
       assert.equal(frozenRoom.personas_frozen, false);
       assert.equal(frozenRoom.rounds[0].questions.length, 0);
-      await participantDetails.locator('summary').click();
+      await page.waitForFunction(() => {
+        const field = document.querySelector('form[data-form="seat-persona"][data-seat-type="participant"] [name="preset_id"]');
+        return field && !field.disabled;
+      });
+      await participantDetails.evaluate(element => { element.open = true; });
       await participantPersona.locator('[name="preset_id"]').waitFor({ state: 'visible' });
       assert.equal(await participantPersona.locator('[name="preset_id"]').isDisabled(), false);
 
