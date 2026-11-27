@@ -29,7 +29,8 @@ from social import register_social_routes, ensure_app_schema, cleanup_deleted_ac
 from match_orchestration import PersistentWorkflowWorker
 from seat_personas import (compose_system_prompt, freeze_match_personas, is_match_persona_frozen,
                             normalize_persona_config, output_token_limit, persona_catalog,
-                            persona_config_from_row, revealed_persona_rows)
+                            persona_config_from_row, revealed_persona_rows,
+                            freeze_new_manual_participant_seat)
 
 ROOT = Path(__file__).resolve().parent
 DATABASE = ROOT / 'data' / 'game.sqlite3'
@@ -1090,9 +1091,10 @@ def require_persona_editable(db, room):
 def ensure_roster_unlocked(db, room):
     if room['status'] != 'open':
         raise HTTPException(409, '比赛已结束。')
-    if is_match_persona_frozen(db,room['id'],room['match_number']):
+    recovery=needs_roster_recovery(db,room)
+    if is_match_persona_frozen(db,room['id'],room['match_number']) and not recovery:
         raise HTTPException(409,'本场 AI 席位配置已冻结；如首轮尚未开始，请先取消准备并重置配置。')
-    if needs_roster_recovery(db, room):
+    if recovery:
         return
     r = db.execute('SELECT question FROM rounds WHERE room_id=? AND number=1', (room['id'],)).fetchone()
     if (r and r['question']) or db.execute(
@@ -4073,11 +4075,18 @@ def create_app(db_path=None):
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
             ensure_roster_unlocked(db,room)
+            recovery=needs_roster_recovery(db,room)
+            frozen=is_match_persona_frozen(db,room_id,room['match_number'])
+            if frozen and (not recovery or body.model_profile_id is not None):
+                raise HTTPException(409,'本场开始后仅可在删除账号导致参赛人数不足时补入手动 AI 席位；模型绑定与人设保持冻结。')
             alias=new_alias(db,room_id)
             if body.model_profile_id is not None:
                 require_owned_model_profile(db,body.model_profile_id,u['id'])
+            name=norm_text(body.name,60)
             db.execute('INSERT INTO ai_players(room_id,alias,name,model_profile_id) VALUES(?,?,?,?)',
-                       (room_id,alias,norm_text(body.name,60),body.model_profile_id))
+                       (room_id,alias,name,body.model_profile_id))
+            if frozen:
+                freeze_new_manual_participant_seat(db,room,alias,name)
             log_event(db,room_id,1,'ai_joined',alias,'AI 参赛位已添加')
         await app.state.hub.notify(room_id,'ai_joined')
         return {'alias':alias,'automated':body.model_profile_id is not None}
