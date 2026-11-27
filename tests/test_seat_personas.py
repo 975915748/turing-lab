@@ -118,6 +118,12 @@ def test_persona_api_freezes_and_allows_preparation_reset(tmp_path):
             "password": "persona-player-password",
             "code": room["code"],
         })
+    human_judge = TestClient(app)
+    request(human_judge, "POST", "/api/register", {
+        "username": "persona_human_judge", "display_name": "真人裁判",
+        "password": "persona-judge-password",
+    })
+    request(human_judge, "POST", "/api/join", {"code": room["code"], "role": "judge"})
     ai = request(admin, "POST", base + "/ai", {"name": "AI 参赛席"})
     judge = request(admin, "POST", base + "/ai-judges", {"name": "AI 裁判席"})
     catalog = admin.get("/api/ai-seat-personas").json()
@@ -142,6 +148,10 @@ def test_persona_api_freezes_and_allows_preparation_reset(tmp_path):
     assert player_view["personas_revealed"] is False
     assert not player_view.get("seat_personas")
     assert all(seat.get("persona") is None for seat in player_view["ais"])
+    judge_view = human_judge.get(base).json()
+    assert judge_view["is_judge"] is True
+    assert judge_view["personas_revealed"] is False
+    assert not judge_view.get("seat_personas")
 
     # A preparation attempt freezes both seat configs even if the AI judge is manual.
     request(admin, "POST", base + "/ai-judges/questions/generate")
@@ -172,3 +182,18 @@ def test_persona_api_freezes_and_allows_preparation_reset(tmp_path):
     assert info["match_started"] is True
     request(admin, "PUT", base + f"/ai-judges/{judge['id']}/persona", judge_config, 409)
     request(admin, "POST", base + "/personas/reset-preparation", {"confirm": True}, 409)
+
+    # Formal reveal is the only point at which ordinary players and human judges
+    # receive the immutable persona details for this match.
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE rooms SET status='finished', revealed_at=?, verdict_locked_at=? WHERE id=?",
+                   ("2026-11-27T12:00:00+00:00", "2026-11-27T12:00:00+00:00", room["room_id"]))
+    for viewer in (player_a, human_judge):
+        revealed = viewer.get(base).json()
+        assert revealed["personas_revealed"] is True
+        personas = revealed["seat_personas"]
+        assert len(personas) == 2
+        assert any(item["persona_name"] == "严谨分析者" for item in personas)
+        assert any(item["persona_name"] == "语言细节" for item in personas)
+        assert all("seat_label" not in item and "profile_name" not in item
+                   and "base_url" not in item and "api_key" not in item for item in personas)
