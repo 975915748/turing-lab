@@ -298,7 +298,7 @@ def test_persona_api_freezes_and_allows_preparation_reset(tmp_path):
     request(admin, "POST", base + f"/ai-judges/{judge['id']}/questions",
             {"text": "请描述一次你修正错误判断的经历。"})
     prepared = request(admin, "POST", base + "/round-workflows", {
-        "match_number": room["match_number"], "round_number": 1,
+        "match_number": admin.get(base).json()["match_number"], "round_number": 1,
         "mode": "prepare_only", "include_ai_questions": False,
     }, expected=202, extra_headers={"Idempotency-Key": "persona-completed-preparation"})
     workflow_id = prepared["workflow"]["id"]
