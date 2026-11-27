@@ -310,3 +310,97 @@ def test_persona_api_freezes_and_allows_preparation_reset(tmp_path):
         assert exported.status_code == 200, exported.text
         assert "严谨分析者" not in exported.text
         assert "语言细节" not in exported.text
+
+
+def test_poststart_roster_recovery_invalidates_current_round_ai_questions(tmp_path):
+    path = tmp_path / "persona-poststart-recovery.sqlite3"
+    seed_admin(path, "persona_admin", "人设管理员", "persona-admin-password")
+    app = create_app(path)
+    admin, player_a, player_b = (TestClient(app) for _ in range(3))
+
+    def request(client, method, url, data=None, expected=200, extra_headers=None):
+        me = client.get("/api/me")
+        headers = {"X-CSRF-Token": me.json()["user"]["csrf"]} if me.status_code == 200 else {}
+        headers.update(extra_headers or {})
+        response = client.request(method, url, json=data or {}, headers=headers)
+        assert response.status_code == expected, (url, response.status_code, response.text)
+        return response.json() if response.content else {}
+
+    request(admin, "POST", "/api/login",
+            {"username": "persona_admin", "password": "persona-admin-password"})
+    room = request(admin, "POST", "/api/rooms", {"title": "开局后的账号删除补位"})
+    room_id = room["room_id"]
+    base = f"/api/rooms/{room_id}"
+    players = (player_a, player_b)
+    for index, client in enumerate(players):
+        request(client, "POST", "/api/register", {
+            "username": f"persona_poststart_player_{index}",
+            "display_name": f"参赛者 {index}",
+            "password": "persona-player-password",
+            "code": room["code"],
+        })
+    judge = request(admin, "POST", base + "/ai-judges", {"name": "手动 AI 裁判"})
+    request(admin, "POST", base + f"/ai-judges/{judge['id']}/questions",
+            {"text": "第一轮问题：请说明你的判断依据。"})
+    request(admin, "POST", base + "/start")
+    request(player_a, "POST", base + "/answers", {"text": "第一轮回答 A"})
+    request(player_b, "POST", base + "/answers", {"text": "第一轮回答 B"})
+    assert admin.get(base).json()["rounds"][0]["status"] == "revealed"
+
+    request(admin, "POST", base + "/next")
+    current = admin.get(base).json()
+    assert current["current_round"] == 2
+    request(admin, "POST", base + f"/ai-judges/{judge['id']}/questions",
+            {"text": "旧名单问题：请比较所有参赛者的论证。"})
+    workflow = request(
+        admin, "POST", base + "/round-workflows",
+        {"match_number": current["match_number"], "round_number": 2,
+         "mode": "prepare_only", "include_ai_questions": False},
+        expected=202,
+        extra_headers={"Idempotency-Key": "persona-poststart-recovery-round-2"},
+    )["workflow"]
+    workflow_id = workflow["id"]
+
+    deleted_uid = player_b.get("/api/me").json()["user"]["uid"]
+    request(admin, "DELETE", "/api/admin/users/" + deleted_uid, {"confirm": True})
+    before_recovery = admin.get(base).json()
+    assert before_recovery["match_started"] is True
+    assert before_recovery["roster_recovery"] is True
+    assert before_recovery["personas_frozen"] is True
+
+    replacement = request(admin, "POST", base + "/ai", {"name": "后续轮补位 AI"})
+    assert replacement["automated"] is False
+    after_recovery = admin.get(base).json()
+    assert len(after_recovery["ais"]) == 1
+    assert after_recovery["personas_frozen"] is True
+
+    with sqlite3.connect(path) as db:
+        workflow_state = db.execute(
+            "SELECT state FROM round_workflows WHERE id=?", (workflow_id,)
+        ).fetchone()[0]
+        assert workflow_state == "stale"
+        assert db.execute(
+            "SELECT COUNT(*) FROM ai_judge_questions WHERE room_id=? AND round_number=2",
+            (room_id,),
+        ).fetchone()[0] == 0
+        stored_revision = db.execute(
+            "SELECT participant_roster_revision FROM match_persona_freezes WHERE room_id=?",
+            (room_id,),
+        ).fetchone()[0]
+        assert stored_revision == participant_roster_revision(db, room_id)
+        snapshot_aliases = {
+            row[0] for row in db.execute(
+                "SELECT seat_key FROM match_seat_persona_snapshots "
+                "WHERE room_id=? AND match_number=1 AND seat_type='participant'",
+                (room_id,),
+            ).fetchall()
+        }
+        assert snapshot_aliases == {after_recovery["ais"][0]["alias"]}
+
+    # The old question cannot start the new roster; a fresh question is required.
+    request(admin, "POST", base + "/start", expected=409)
+    request(admin, "POST", base + f"/ai-judges/{judge['id']}/questions",
+            {"text": "新名单问题：请比较当前在场参赛者的论证。"})
+    request(admin, "POST", base + "/start")
+    assert admin.get(base).json()["rounds"][1]["status"] == "collecting"
+

@@ -4125,6 +4125,24 @@ def create_app(db_path=None):
             if post_start_recovery and body.model_profile_id is not None:
                 raise HTTPException(409,'比赛开始后因账号删除补位时，只能添加使用默认人设的手动 AI 席位。')
             ensure_roster_unlocked(db,room,allow_frozen=True)
+            invalidated_ai_questions=0
+            if post_start_recovery:
+                now=utcnow()
+                stale_reason='参赛名单变化；当前轮旧 AI 裁判问题和准备任务已作废，请重新准备。'
+                db.execute('''UPDATE round_workflows SET state='stale',stage='stale',
+                    execution_generation=execution_generation+1,worker_token=NULL,
+                    waiting_reason=NULL,error_message=?,finished_at=?,updated_at=?
+                    WHERE room_id=? AND match_number=? AND round_number=?
+                    AND state NOT IN ('stale','cancelled')''',
+                    (stale_reason,now,now,room_id,room['match_number'],room['current_round']))
+                db.execute('''UPDATE model_operation_tasks SET state='stale',error_message=?,
+                    finished_at=?,updated_at=?,result_applied=0
+                    WHERE room_id=? AND match_number=? AND round_number=?
+                    AND purpose='judge_question' AND state NOT IN ('stale','cancelled')''',
+                    (stale_reason,now,now,room_id,room['match_number'],room['current_round']))
+                invalidated_ai_questions=db.execute(
+                    'DELETE FROM ai_judge_questions WHERE room_id=? AND round_number=?',
+                    (room_id,room['current_round'])).rowcount
             alias=new_alias(db,room_id)
             if body.model_profile_id is not None:
                 require_owned_model_profile(db,body.model_profile_id,u['id'])
@@ -4139,9 +4157,12 @@ def create_app(db_path=None):
                 # Legacy in-progress matches may predate persona snapshots.
                 freeze_match_personas(db,room,source='roster_recovery',
                     participant_roster_revision=participant_roster_revision(db,room_id))
-            log_event(db,room_id,1,'ai_joined',alias,'AI 参赛位已添加')
+            log_event(db,room_id,room['current_round'],'ai_joined',alias,
+                      '补位 AI 已添加；当前轮旧 AI 裁判问题已作废' if post_start_recovery else 'AI 参赛位已添加')
+        app.state.workflow_worker.wake()
         await app.state.hub.notify(room_id,'ai_joined')
-        return {'alias':alias,'automated':body.model_profile_id is not None}
+        return {'alias':alias,'automated':body.model_profile_id is not None,
+                'invalidated_ai_questions':invalidated_ai_questions}
 
     @app.put('/api/rooms/{room_id}/ai/{alias}/model')
     async def bind_ai_player_model(room_id:int,alias:str,body:ModelBindingData,request:Request):
