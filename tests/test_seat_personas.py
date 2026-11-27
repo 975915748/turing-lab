@@ -140,7 +140,7 @@ def test_prestart_deleted_roster_recovery_updates_frozen_revision(tmp_path):
     assert info["match_started"] is True
     assert info["personas_frozen"] is True
     assert len(info["ais"]) == 2
-    assert len(info["seat_personas"]) == 0  # details remain hidden until formal reveal
+    assert not info.get("seat_personas")  # details remain hidden until formal reveal
 
 
 def test_persona_api_freezes_and_allows_preparation_reset(tmp_path):
