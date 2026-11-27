@@ -4406,7 +4406,19 @@ def create_app(db_path=None):
             name_lock_user_ids=room_lock_user_ids(db,room_id)
             roster=aliases(db,room_id)[2]
             settlement=settle_match_points(db,room,human_rows,roster,judges,utcnow())
-            db.execute('UPDATE rooms SET status=?,revealed_at=? WHERE id=?',('finished',utcnow(),room_id))
+            finished_at=utcnow()
+            db.execute('UPDATE rooms SET status=?,revealed_at=? WHERE id=?',('finished',finished_at,room_id))
+            db.execute("""UPDATE model_operation_tasks SET state='stale',finished_at=?,updated_at=?,
+                error_message='比赛已正式完赛；迟到的模型结果不得应用。',result_applied=0
+                WHERE room_id=? AND match_number=? AND state IN ('queued','requesting')""",
+                (finished_at,finished_at,room_id,room['match_number']))
+            db.execute("""UPDATE round_workflows SET state='cancelled',stage='cancelled',
+                execution_generation=execution_generation+1,worker_token=NULL,waiting_reason=NULL,
+                error_message='比赛已正式完赛，工作流已停止。',finished_at=?,updated_at=?
+                WHERE room_id=? AND match_number=? AND state IN
+                ('queued','generating_questions','starting_round','generating_answers',
+                 'waiting_input','blocked','failed')""",
+                (finished_at,finished_at,room_id,room['match_number']))
             clear_room_chat(db,room_id,room['match_number'])
             finished_match=room['match_number']
             log_event(db,room_id,room['current_round'],'identity_revealed','管理员','已揭晓真实身份与裁判得分')
