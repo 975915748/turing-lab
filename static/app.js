@@ -609,10 +609,10 @@ function personaEditor(type,key,p,disabled){
  const lengths=[['default','沿用模型上限'],['short','短'],['medium','中'],['long','长']];
  const opts=presets.map(x=>'<option value="'+x[0]+'" '+((p.preset_id||presets[0][0])===x[0]?'selected':'')+'>'+x[1]+'</option>').join('');
  const lens=lengths.map(x=>'<option value="'+x[0]+'" '+((p.output_length||'default')===x[0]?'selected':'')+'>'+x[1]+'</option>').join('');
- return '<details class="persona-editor"><summary>人设与回答策略 · '+esc(p.display_name||p.preset_id||'默认风格')+'</summary><form data-form="seat-persona" data-seat-type="'+type+'" data-seat-key="'+esc(key)+'" class="stack spaced">'+
+ return '<details class="persona-editor"><summary>人设与回答策略 · '+esc(p.display_name||p.preset_id||'默认风格')+' · '+(disabled?'已冻结 / 锁定':'可编辑')+'</summary><form data-form="seat-persona" data-seat-type="'+type+'" data-seat-key="'+esc(key)+'" class="stack spaced">'+
  '<label class="field">人设预设</label><select name="preset_id" '+(disabled?'disabled':'')+'>'+opts+'</select>'+
  '<label class="field">自定义 System Prompt（最多 8000 字；选择自定义时必填）</label><textarea name="custom_system_prompt" maxlength="8000" '+(disabled?'disabled':'')+'>'+esc(p.custom_system_prompt||'')+'</textarea>'+
- '<div class="grid2"><div><label class="field">输出长度</label><select name="output_length" '+(disabled?'disabled':'')+'>'+lens+'</select></div><div><label class="field">出题历史轮数（0～100）</label><input name="history_rounds" type="number" min="0" max="100" value="'+esc(p.history_rounds??5)+'" '+(disabled?'disabled':'')+'></div></div>'+
+ '<div class="grid2"><div><label class="field">输出长度</label><select name="output_length" '+(disabled?'disabled':'')+'>'+lens+'</select></div><div><label class="field">历史上下文轮数（0～100）</label><input name="history_rounds" type="number" min="0" max="100" required value="'+esc(p.history_rounds??5)+'" '+(disabled?'disabled':'')+'></div></div>'+
  '<p class="tiny muted">历史轮数只影响回答和出题；最终裁判判断仍读取完整匿名资料。正式揭晓后会展示自定义提示词，请勿填写密钥。</p><button class="small" type="submit" '+(disabled?'disabled':'')+'>保存人设</button></form></details>';
 }
 function renderAIBindingControls(r){
