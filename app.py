@@ -27,6 +27,9 @@ from model_api import (ModelAPIError, chat_completion, decrypt_api_key,
 from points import points_state, settle_match_points
 from social import register_social_routes, ensure_app_schema, cleanup_deleted_account
 from match_orchestration import PersistentWorkflowWorker
+from seat_personas import (compose_system_prompt, freeze_match_personas, is_match_persona_frozen,
+                            normalize_persona_config, output_token_limit, persona_catalog,
+                            persona_config_from_row, revealed_persona_rows)
 
 ROOT = Path(__file__).resolve().parent
 DATABASE = ROOT / 'data' / 'game.sqlite3'
@@ -95,12 +98,23 @@ def init_db(path):
             old_round_columns={x['name'] for x in old.execute('PRAGMA table_info(rounds)')} if 'rounds' in old_tables else set()
             old_task_columns={x['name'] for x in old.execute('PRAGMA table_info(model_operation_tasks)')} if 'model_operation_tasks' in old_tables else set()
             old_workflow_columns={x['name'] for x in old.execute('PRAGMA table_info(round_workflows)')} if 'round_workflows' in old_tables else set()
+            old_player_columns={x['name'] for x in old.execute('PRAGMA table_info(ai_players)')} if 'ai_players' in old_tables else set()
+            old_judge_columns={x['name'] for x in old.execute('PRAGMA table_info(ai_judges)')} if 'ai_judges' in old_tables else set()
+            persona_columns={'persona_preset_id','persona_preset_version','persona_custom_prompt',
+                             'persona_output_length','persona_history_rounds','persona_revision'}
+            needs_persona_schema=(
+                'match_persona_freezes' not in old_tables or 'match_seat_persona_snapshots' not in old_tables or
+                not persona_columns.issubset(old_player_columns) or
+                not persona_columns.issubset(old_judge_columns) or
+                not {'persona_snapshot_id','credential_version_hash','credential_version_changed'}.issubset(old_task_columns)
+            )
             needs_workflow_schema=(
                 'round_workflows' not in old_tables or 'round_timeouts' not in old_tables or
                 'round_duration_seconds' not in old_room_columns or
                 not {'started_at','duration_seconds','deadline_at','timeout_ended_at'}.issubset(old_round_columns) or
                 not {'workflow_id','workflow_generation'}.issubset(old_task_columns) or
-                ('round_workflows' in old_tables and 'manual_retry_authorized' not in old_workflow_columns)
+                ('round_workflows' in old_tables and 'manual_retry_authorized' not in old_workflow_columns) or
+                needs_persona_schema
             )
             if 'users' in old_tables and (
                 'model_operation_tasks' not in old_tables or
@@ -124,7 +138,8 @@ def init_db(path):
                     x['name'] for x in old.execute('PRAGMA table_info(answers)')}) or
                 needs_workflow_schema):
                 stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
-                backup_tag = ('v1_10' if needs_workflow_schema else
+                backup_tag = ('v1_11' if needs_persona_schema else
+                              'v1_10' if needs_workflow_schema else
                               'v1_9' if 'model_operation_tasks' not in old_tables or
                                   ('rooms' in old_tables and 'model_request_limit' not in {
                                       x['name'] for x in old.execute('PRAGMA table_info(rooms)')}) else
@@ -176,6 +191,12 @@ def init_db(path):
         CREATE TABLE IF NOT EXISTS ai_players (
             room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
             alias TEXT NOT NULL, name TEXT NOT NULL,
+            persona_preset_id TEXT NOT NULL DEFAULT 'default',
+            persona_preset_version INTEGER NOT NULL DEFAULT 1,
+            persona_custom_prompt TEXT NOT NULL DEFAULT '',
+            persona_output_length TEXT NOT NULL DEFAULT 'default',
+            persona_history_rounds INTEGER NOT NULL DEFAULT 5,
+            persona_revision INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY(room_id,alias));
         CREATE TABLE IF NOT EXISTS rounds (
             id INTEGER PRIMARY KEY, room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
@@ -227,7 +248,13 @@ def init_db(path):
         CREATE TABLE IF NOT EXISTS ai_judges (
             id INTEGER PRIMARY KEY,
             room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-            label TEXT NOT NULL, created_at TEXT NOT NULL);
+            label TEXT NOT NULL, created_at TEXT NOT NULL,
+            persona_preset_id TEXT NOT NULL DEFAULT 'balanced',
+            persona_preset_version INTEGER NOT NULL DEFAULT 1,
+            persona_custom_prompt TEXT NOT NULL DEFAULT '',
+            persona_output_length TEXT NOT NULL DEFAULT 'default',
+            persona_history_rounds INTEGER NOT NULL DEFAULT 5,
+            persona_revision INTEGER NOT NULL DEFAULT 1);
         CREATE TABLE IF NOT EXISTS model_profiles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -297,6 +324,9 @@ def init_db(path):
             retry_of INTEGER REFERENCES model_operation_tasks(id) ON DELETE SET NULL,
             workflow_id INTEGER REFERENCES round_workflows(id) ON DELETE SET NULL,
             workflow_generation INTEGER,
+            persona_snapshot_id INTEGER,
+            credential_version_hash TEXT,
+            credential_version_changed INTEGER NOT NULL DEFAULT 0,
             idempotency_key TEXT,
             queued_at TEXT NOT NULL, request_started_at TEXT, request_finished_at TEXT,
             finished_at TEXT, queue_ms INTEGER, duration_ms INTEGER,
@@ -305,6 +335,21 @@ def init_db(path):
             prompt_tokens INTEGER, completion_tokens INTEGER, total_tokens INTEGER,
             error_message TEXT, updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS match_persona_freezes (
+            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            match_number INTEGER NOT NULL,
+            frozen_at TEXT NOT NULL,
+            source TEXT NOT NULL,
+            PRIMARY KEY(room_id,match_number));
+        CREATE TABLE IF NOT EXISTS match_seat_persona_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            match_number INTEGER NOT NULL,
+            seat_type TEXT NOT NULL CHECK(seat_type IN ('participant','judge')),
+            seat_key TEXT NOT NULL, seat_label TEXT NOT NULL,
+            config_json TEXT NOT NULL, model_json TEXT,
+            config_hash TEXT NOT NULL, frozen_at TEXT NOT NULL,
+            UNIQUE(room_id,match_number,seat_type,seat_key));
         CREATE INDEX IF NOT EXISTS idx_model_operations_room_match_round
             ON model_operation_tasks(room_id,match_number,round_number,id DESC);
         CREATE INDEX IF NOT EXISTS idx_model_operations_owner
@@ -320,6 +365,19 @@ def init_db(path):
             db.execute('ALTER TABLE ai_players ADD COLUMN model_profile_id INTEGER REFERENCES model_profiles(id) ON DELETE SET NULL')
         if 'model_profile_id' not in {x['name'] for x in db.execute('PRAGMA table_info(ai_judges)')}:
             db.execute('ALTER TABLE ai_judges ADD COLUMN model_profile_id INTEGER REFERENCES model_profiles(id) ON DELETE SET NULL')
+        for table, default_preset in (('ai_players','default'),('ai_judges','balanced')):
+            columns={x['name'] for x in db.execute(f'PRAGMA table_info({table})')}
+            definitions=(
+                ('persona_preset_id',f"TEXT NOT NULL DEFAULT '{default_preset}'"),
+                ('persona_preset_version','INTEGER NOT NULL DEFAULT 1'),
+                ('persona_custom_prompt',"TEXT NOT NULL DEFAULT ''"),
+                ('persona_output_length',"TEXT NOT NULL DEFAULT 'default'"),
+                ('persona_history_rounds','INTEGER NOT NULL DEFAULT 5'),
+                ('persona_revision','INTEGER NOT NULL DEFAULT 1'),
+            )
+            for column, definition in definitions:
+                if column not in columns:
+                    db.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
         if 'removed_at' not in {x['name'] for x in db.execute('PRAGMA table_info(members)')}:
             db.execute('ALTER TABLE members ADD COLUMN removed_at TEXT')
         if 'edited_at' not in {x['name'] for x in db.execute('PRAGMA table_info(answers)')}:
@@ -334,6 +392,12 @@ def init_db(path):
             db.execute('ALTER TABLE model_operation_tasks ADD COLUMN workflow_id INTEGER REFERENCES round_workflows(id) ON DELETE SET NULL')
         if 'workflow_generation' not in task_columns:
             db.execute('ALTER TABLE model_operation_tasks ADD COLUMN workflow_generation INTEGER')
+        if 'persona_snapshot_id' not in task_columns:
+            db.execute('ALTER TABLE model_operation_tasks ADD COLUMN persona_snapshot_id INTEGER')
+        if 'credential_version_hash' not in task_columns:
+            db.execute('ALTER TABLE model_operation_tasks ADD COLUMN credential_version_hash TEXT')
+        if 'credential_version_changed' not in task_columns:
+            db.execute('ALTER TABLE model_operation_tasks ADD COLUMN credential_version_changed INTEGER NOT NULL DEFAULT 0')
         workflow_columns={x['name'] for x in db.execute('PRAGMA table_info(round_workflows)')}
         if 'manual_retry_authorized' not in workflow_columns:
             db.execute('ALTER TABLE round_workflows ADD COLUMN manual_retry_authorized INTEGER NOT NULL DEFAULT 0')
@@ -744,6 +808,11 @@ def model_profile_snapshot_valid(db, profile):
     if not row:
         return False
     current=dict(row)
+    if profile.get('_persona_snapshot_id') is not None:
+        # Match parameters are immutable snapshots. Personal profile edits do not
+        # rewrite an active match; only deletion, owner revocation or bad credentials block it.
+        return (current.get('owner_user_id')==profile.get('owner_user_id') and
+                not current.get('ownership_issue') and model_profile_credential_status(current)=='ok')
     if model_profile_credential_status(current)!='ok':
         return False
     fields=('owner_user_id','base_url','model','api_key_encrypted','temperature','max_tokens','timeout_seconds','updated_at')
@@ -751,6 +820,8 @@ def model_profile_snapshot_valid(db, profile):
 
 
 def model_profile_snapshot_hash(profile):
+    if profile.get('_persona_snapshot_id') is not None:
+        return profile['_frozen_model_hash']
     fields=('id','owner_user_id','base_url','model','api_key_encrypted','temperature',
             'max_tokens','timeout_seconds','updated_at')
     payload=[profile.get(field) for field in fields]
@@ -926,6 +997,8 @@ def check_restart_judge_conflicts(db, room_id, viewer=None):
 
 
 def check_judge_registration(db, room, user_id, viewer=None):
+    if is_match_persona_frozen(db,room['id'],room['match_number']):
+        raise HTTPException(409,'本场 AI 席位配置已冻结；如首轮尚未开始，请先取消准备并重置配置。')
     if room['owner_id'] == user_id:
         raise HTTPException(409, '房主不能同时担任本房间的独立裁判。')
     if room['status'] != 'open' or room['verdict_locked_at'] or db.execute(
@@ -984,6 +1057,8 @@ def needs_roster_recovery(db, room):
 def ensure_roster_unlocked(db, room):
     if room['status'] != 'open':
         raise HTTPException(409, '比赛已结束。')
+    if is_match_persona_frozen(db,room['id'],room['match_number']):
+        raise HTTPException(409,'本场 AI 席位配置已冻结；如首轮尚未开始，请先取消准备并重置配置。')
     if needs_roster_recovery(db, room):
         return
     r = db.execute('SELECT question FROM rounds WHERE room_id=? AND number=1', (room['id'],)).fetchone()
@@ -1004,7 +1079,7 @@ def clear_match_records(db, room_id):
     # 只清除比赛内容，房间、成员、AI 参赛位及裁判配置保留。
     for table in ('model_operation_tasks', 'rounds', 'suggestions', 'events', 'judge_questions', 'judge_verdicts',
                   'ai_judge_questions', 'ai_judge_verdicts', 'ai_answer_revisions', 'packets',
-                  'round_workflows', 'chat_messages'):
+                  'round_workflows', 'match_seat_persona_snapshots', 'match_persona_freezes', 'chat_messages'):
         db.execute(f'DELETE FROM {table} WHERE room_id=?', (room_id,))
     db.execute('''UPDATE rooms SET verdict_json=NULL,verdict_locked_at=NULL,
         revealed_at=NULL,records_deleted=1 WHERE id=?''', (room_id,))
@@ -1126,6 +1201,7 @@ def timed_out_aliases(db, round_id):
 
 
 def start_round_record(db, room, rnd, question):
+    freeze_match_personas(db,room,source='round_start')
     started=datetime.now(timezone.utc)
     duration=room['round_duration_seconds'] if 'round_duration_seconds' in room.keys() else None
     deadline=(started+timedelta(seconds=int(duration))).isoformat(timespec='milliseconds') if duration else None
@@ -1256,6 +1332,7 @@ def match_readiness(db, room):
 def model_operation_view(row):
     return {
         'id':row['id'],'workflow_id':row['workflow_id'] if 'workflow_id' in row.keys() else None,
+        'credential_version_changed':bool(row['credential_version_changed']) if 'credential_version_changed' in row.keys() else False,
         'purpose':row['purpose'],'target_type':row['target_type'],
         'target_key':row['target_key'],'target_label':row['target_label'],
         'profile_name':row['profile_name'],'model_name':row['model_name'],
@@ -2403,6 +2480,7 @@ def create_app(db_path=None):
             (room['id'],match_number,round_number)).fetchone()[0]
         if active_tasks:
             raise HTTPException(409,'本轮已有独立模型任务正在处理；请等待其结束后再创建服务端工作流。')
+        freeze_match_personas(db,room,source='workflow')
         now=operation_timestamp()
         roster_revision=workflow_roster_revision(db,room['id'])
         input_revision=workflow_input_revision(db,room['id'],round_number)
