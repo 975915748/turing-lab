@@ -4082,7 +4082,7 @@ def create_app(db_path=None):
         with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
-            ensure_roster_unlocked(db,room)
+            ensure_roster_unlocked(db,room,allow_frozen=True)
             recovery=needs_roster_recovery(db,room)
             frozen=is_match_persona_frozen(db,room_id,room['match_number'])
             if frozen and (not recovery or body.model_profile_id is not None):
