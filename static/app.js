@@ -1,7 +1,7 @@
 'use strict';
 const $ = (selector) => document.querySelector(selector);
 const app = $('#app');
-const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelSavePending:{},social:null,dmMessages:[],dmBeforeId:null,dmHasMore:false,dmSocket:null,personalModelEpoch:0,modelOperationRecords:[],modelOperationStats:{},modelOperationProfileOptions:[],modelOperationTotal:0,modelOperationOffset:0,modelOperationFilters:{profile_id:'',purpose:'',status:''},modelOperationsExpanded:false,modelOperationRequestVersion:0,modelOperationHistoryPanels:{},dmUid:null,dmOtherName:'',dmCanSend:false,dmPending:null,dmDraft:'',dmReconnect:null,dmLoadVersion:0,socialEpoch:0,pointsLedgerEntries:[],pointsLedgerBeforeId:null,pointsLedgerHasMore:false,pointsLedgerLoaded:false};
+const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelSavePending:{},social:null,dmMessages:[],dmBeforeId:null,dmHasMore:false,dmSocket:null,personalModelEpoch:0,modelOperationRecords:[],modelOperationStats:{},modelOperationProfileOptions:[],modelOperationTotal:0,modelOperationOffset:0,modelOperationFilters:{profile_id:'',purpose:'',status:''},modelOperationsExpanded:false,modelOperationRequestVersion:0,modelOperationHistoryPanels:{},serverTimeOffset:0,dmUid:null,dmOtherName:'',dmCanSend:false,dmPending:null,dmDraft:'',dmReconnect:null,dmLoadVersion:0,socialEpoch:0,pointsLedgerEntries:[],pointsLedgerBeforeId:null,pointsLedgerHasMore:false,pointsLedgerLoaded:false};
 const esc = (v) => String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const shortDate = s => s ? new Date(s).toLocaleString('zh-CN',{hour12:false}) : '';
 const val = (id) => document.getElementById(id)?.value??'';
@@ -14,9 +14,9 @@ function applyPrefs(){let theme=localStorage.getItem('turing_theme')||'light';do
 $('#themeBtn').addEventListener('click',()=>{localStorage.setItem('turing_theme',document.body.dataset.theme==='light'?'dark':'light');applyPrefs()});
 $('#fontSize').addEventListener('input',e=>{localStorage.setItem('turing_font',e.target.value);applyPrefs()});
 $('#logoutBtn').addEventListener('click',async()=>{try{await api('/api/logout',{method:'POST'});}catch(e){toast(e.message)} state.me=null;state.room=null;state.roomId=null;state.personalModels=[];clearPersonalModelState();state.chat=[];state.chatDraft='';state.drafts={};state.personalReturn=null;state.tab='login';state.legacyLogin=false;stopWs();history.replaceState(null,'',location.pathname);await init()});
-async function api(path,{method='GET',body,raw=false}={}){
+async function api(path,{method='GET',body,raw=false,headers:extraHeaders={}}={}){
  const requestUid=state.me?.user?.uid??null,requestCsrf=state.me?.user?.csrf??null,requestEpoch=state.personalModelEpoch||0;
- const opts={method,headers:{}};
+ const opts={method,headers:{...extraHeaders}};
  if(body!==undefined){opts.headers['Content-Type']='application/json';opts.body=JSON.stringify(body)}
  if(method!=='GET'&&state.me?.user?.csrf)opts.headers['X-CSRF-Token']=state.me.user.csrf;
  if(method!=='GET'&&state.room&&path.startsWith(`/api/rooms/${state.room.id}/`))opts.headers['X-Match-Number']=String(state.room.match_number);
@@ -47,7 +47,7 @@ function connectWs(roomId){stopWs();if(state.roomId!==roomId)return;
  ws.onclose=e=>{if(state.exitingRoom||state.roomId!==roomId||state.ws!==ws)return;if(e.code===1008){state.roomId=null;state.room=null;state.typing={};history.replaceState(null,'',location.pathname);loadLobby().then(()=>toast(e.reason==='房间已删除'?'房间已删除':'房间访问权限已失效或你已被移出')).catch(err=>toast(err.message));return;}setConnection('重连中',false);state.reconnect=setTimeout(()=>connectWs(roomId),3000)};
  ws.onerror=()=>setConnection('连接异常',false);
 }
-async function refreshRoom(){if(!state.roomId||location.hash.startsWith('#profile'))return;try{const r=await api(`/api/rooms/${state.roomId}`);if(state.exitingRoom||state.roomId!==r.id)return;if(!state.room||r.current_round!==state.room.current_round||r.match_number!==state.room.match_number){state.selectedRound=r.current_round;state.lastTyping=null;state.typing={};}
+async function refreshRoom(){if(!state.roomId||location.hash.startsWith('#profile'))return;try{const r=await api(`/api/rooms/${state.roomId}`);if(state.exitingRoom||state.roomId!==r.id)return;state.serverTimeOffset=Date.parse(r.server_now||new Date().toISOString())-Date.now();if(!state.room||r.current_round!==state.room.current_round||r.match_number!==state.room.match_number){state.selectedRound=r.current_round;state.lastTyping=null;state.typing={};}
  if(state.room&&(r.match_number!==state.room.match_number||(!state.room.records_deleted&&r.records_deleted))){for(const key of Object.keys(state.drafts))if(key.startsWith(`${r.id}:`))delete state.drafts[key];const dialog=$('#judgeNotice');if(dialog?.open)dialog.close();state.roomView='match';state.chat=[];state.chatDraft='';}
  state.room=r;
  if(r.is_judge||r.status==='finished'){state.chat=[];state.chatDraft='';}else await loadRoomChat().catch(()=>{});
@@ -118,7 +118,7 @@ function renderClosedRoom(r){
 function renderReadyRoom(r){
  app.innerHTML=`<div class="pagehead"><div><div class="overline">ROOM ${r.id} · 第 ${r.match_number} 场</div><h1>${esc(r.title)}</h1></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button data-action="back">← 返回大厅</button></div></div>${renderMyPointsResult(r)}<section class="card"><h2>${r.can_manage?'开始下一场比赛':'等待再次开赛'}</h2>${finishedActions(r)}</section>`;
 }
-async function openRoom(id,options={}){clearDmState();state.roomId=id;state.selectedRound=options.round||null;state.roomView=options.view||'match';state.chat=[];state.chatDraft='';try{const r=await api(`/api/rooms/${id}`);state.room=r;state.typing={};state.selectedRound=options.round&&r.rounds.some(x=>x.number===options.round)?options.round:r.current_round;history.replaceState(null,'',`#room=${id}`);await loadPersonalModels().catch(()=>{});if(!r.is_judge&&r.status!=='finished')await loadRoomChat().catch(()=>{});renderRoom();connectWs(id);maybeNotifyJudge();}catch(e){state.roomId=null;state.room=null;state.chat=[];history.replaceState(null,'',location.pathname);toast(e.message);await loadLobby()}}
+async function openRoom(id,options={}){clearDmState();state.roomId=id;state.selectedRound=options.round||null;state.roomView=options.view||'match';state.chat=[];state.chatDraft='';try{const r=await api(`/api/rooms/${id}`);state.serverTimeOffset=Date.parse(r.server_now||new Date().toISOString())-Date.now();state.room=r;state.typing={};state.selectedRound=options.round&&r.rounds.some(x=>x.number===options.round)?options.round:r.current_round;history.replaceState(null,'',`#room=${id}`);await loadPersonalModels().catch(()=>{});if(!r.is_judge&&r.status!=='finished')await loadRoomChat().catch(()=>{});renderRoom();connectWs(id);maybeNotifyJudge();}catch(e){state.roomId=null;state.room=null;state.chat=[];history.replaceState(null,'',location.pathname);toast(e.message);await loadLobby()}}
 async function loadLobby(){stopWs();state.roomId=null;state.room=null;history.replaceState(null,'',location.pathname);clearDmState();state.me=await api('/api/me');state.chat=[];state.chatDraft='';state.personalReturn=null;renderLobby()}
 
 async function loadPersonalModels(){
@@ -664,21 +664,83 @@ function judgeAdminPanel(r){
  return html+'</section>';
 }
 
+function workflowStateText(value){
+ const labels={queued:'排队中',generating_questions:'正在生成裁判问题',starting_round:'正在开启作答',
+  generating_answers:'正在生成 AI 回答',waiting_input:'等待输入或人工确认',blocked:'等待处理阻塞',
+  failed:'执行失败',completed:'自动步骤已完成',cancelled:'已取消',stale:'已作废'};
+ return labels[value]||value||'未知';
+}
+function renderRoundWorkflowPanel(r){
+ const wf=r.round_workflow;if(!wf)return '';
+ const actions=[];
+ if(wf.can_resume)actions.push('<button class="small primary" data-action="resume-round-workflow" data-id="'+wf.id+'">恢复工作流</button>');
+ if(wf.can_cancel)actions.push('<button class="small danger" data-action="cancel-round-workflow" data-id="'+wf.id+'">取消准备</button>');
+ return '<section class="card compact workflow-card"><div class="label-line"><h2>服务端比赛编排</h2><span class="pill">'+esc(workflowStateText(wf.state))+'</span></div>'+
+  '<p class="hint">任务由服务器持续推进；关闭网页、刷新或断线不会中断已授权的工作流。</p>'+
+  (wf.waiting_reason?'<p class="hint">'+esc(wf.waiting_reason)+'</p>':'')+
+  (wf.error_message?'<p class="operation-error">'+esc(wf.error_message)+'</p>':'')+
+  (actions.length?'<div class="buttonrow spaced">'+actions.join('')+'</div>':'')+
+  '</section>';
+}
+function renderRoundTimerSettings(r){
+ if(!r.can_manage||r.status!=='open')return '';
+ const value=r.round_duration_seconds===null||r.round_duration_seconds===undefined?'':esc(r.round_duration_seconds);
+ return '<section class="card compact"><div class="label-line"><h2>单轮答题限时</h2><span class="pill">'+(value?'已启用':'已关闭')+'</span></div>'+
+  '<p class="hint">留空表示关闭；启用范围为 30～3600 秒。当前轮次开始后，修改只影响后续轮次。</p>'+
+  '<form data-form="round-timer" class="operation-limit-form"><input name="seconds" type="number" min="30" max="3600" step="1" value="'+value+'" placeholder="留空表示关闭">'+
+  '<button class="small" type="submit">保存限时</button></form></section>';
+}
+function serverNowMs(){return Date.now()+(Number(state.serverTimeOffset)||0)}
+function formatCountdown(ms){
+ const seconds=Math.max(0,Math.ceil(ms/1000));
+ const hours=Math.floor(seconds/3600),minutes=Math.floor((seconds%3600)/60),rest=seconds%60;
+ return hours?String(hours).padStart(2,'0')+':'+String(minutes).padStart(2,'0')+':'+String(rest).padStart(2,'0'):
+  String(minutes).padStart(2,'0')+':'+String(rest).padStart(2,'0');
+}
+function renderRoundTimer(r,round,active){
+ if(round.duration_seconds===null||round.duration_seconds===undefined)return '';
+ const manager=!!r.can_manage&&active&&round.status==='collecting';
+ return '<div class="notice round-timer" data-round-timer><div class="label-line"><strong>本轮限时 · '+Math.round(round.duration_seconds/60*10)/10+' 分钟</strong>'+
+  '<strong id="roundCountdown" data-deadline="'+esc(round.deadline_at||'')+'">计算中…</strong></div>'+
+  (manager?'<div class="buttonrow spaced"><button class="small danger" id="finishRoundTimeoutBtn" data-action="finish-round-timeout" data-round="'+round.number+'" disabled>结束本轮</button></div>':'')+
+  '</div>';
+}
+function updateRoundCountdown(){
+ const el=$('#roundCountdown');if(!el)return;
+ const deadline=Date.parse(el.dataset.deadline||'');
+ if(!Number.isFinite(deadline))return;
+ const remaining=deadline-serverNowMs();
+ const round=state.room?.rounds?.find(x=>x.number===state.room.current_round);
+ const expired=remaining<=0;
+ el.textContent=expired?'时间已到':formatCountdown(remaining);
+ const button=$('#finishRoundTimeoutBtn');
+ if(button)button.disabled=!expired||round?.status!=='collecting';
+ const notice=el.closest('[data-round-timer]');
+ if(notice&&expired&&round?.status==='collecting'){
+  const hint=notice.querySelector('[data-timeout-hint]');
+  if(!hint){const p=document.createElement('p');p.className='hint';p.dataset.timeoutHint='1';p.textContent='已到截止时间；本轮不会自动结束，请房主确认结束。';notice.appendChild(p);}
+ }
+}
 function renderReadinessPanel(r){
- const x=r.readiness;if(!x||x.phase!=='draft')return '';
+ const workflowPanel=renderRoundWorkflowPanel(r);
+ const x=r.readiness;if(!x||x.phase!=='draft')return workflowPanel;
  const limit=x.model_request_limit===null?'不限':x.model_request_limit;
  const blockers=(x.blockers||[]).map(message=>'<li>'+esc(message)+'</li>').join('');
  const notices=(x.notices||[]).map(message=>'<li>'+esc(message)+'</li>').join('');
+ const wf=r.round_workflow;
+ const workflowBlocksNew=wf&&['queued','generating_questions','starting_round','generating_answers',
+  'waiting_input','blocked','failed'].includes(wf.state);
  let actions='';
- if(x.can_generate_and_start)actions+='<button class="primary" data-action="start-round" data-generate-questions="true">生成问题并开始</button>';
+ if(workflowBlocksNew)actions+='<button class="primary" disabled>服务端工作流处理中</button>';
+ else if(x.can_generate_and_start)actions+='<button class="primary" data-action="start-round" data-generate-questions="true">生成问题并开始</button>';
  else if(x.can_start)actions+='<button data-action="start-round" data-generate-questions="false">按已提交问题开始</button>';
  else actions+='<button data-action="start-round" disabled>开始本轮</button>';
- if(!x.can_start&&!x.can_generate_and_start){
+ if(!workflowBlocksNew&&!x.can_start&&!x.can_generate_and_start){
   if(x.participant_count<2)actions+='<button class="small" data-action="room-view" data-view="admin">前往参赛者管理补足参赛者</button>';
   if(x.manual_question_required)actions+='<button class="small" data-action="focus-manual-question">前往外部裁判问题录入</button>';
   else if(x.participant_count>=2&&x.suggested_view&&x.suggested_view!=='admin')actions+='<button class="small" data-action="room-view" data-view="'+esc(x.suggested_view)+'">前往裁判管理</button>';
  }
- return '<section class="card compact readiness-card"><div class="label-line"><h2>本轮准备</h2><span class="pill">'+(x.can_start?'可以开始':'尚未就绪')+'</span></div>'+
+ return workflowPanel+'<section class="card compact readiness-card"><div class="label-line"><h2>本轮准备</h2><span class="pill">'+(x.can_start?'可以开始':'尚未就绪')+'</span></div>'+
   '<div class="readiness-grid"><div><span class="tiny muted">参赛者</span><strong>'+x.participant_count+' 人已加入</strong></div>'+
   '<div><span class="tiny muted">裁判问题</span><strong>已提交 '+x.submitted_judges+' / '+x.total_judges+' 位裁判 · '+x.question_count+' 份</strong></div>'+
   '<div><span class="tiny muted">自动席位</span><strong>'+x.auto_pending+' 位可用模型 AI 裁判待出题'+(x.unavailable_ai_pending?' · '+x.unavailable_ai_pending+' 位配置不可用':'')+'</strong></div>'+
@@ -694,7 +756,7 @@ function renderModelOperationPanel(r){
  const tasks=r.model_operations||[],history=r.model_operation_history||[];
  const historyKey=String(r.id)+':'+String(r.match_number);
  const renderTask=(t,allowRetry)=>{
-  const retryable=allowRetry&&['failed','interrupted','blocked'].includes(t.state);
+  const retryable=allowRetry&&!t.workflow_id&&['failed','interrupted','blocked'].includes(t.state);
   const request=t.request_succeeded===true?'请求成功':t.request_succeeded===false?'请求失败':t.request_started_at?'请求结果待确认':'尚未开始请求';
   const applied=t.result_applied?'已写入比赛':t.request_succeeded===true?'结果未应用':'未写入比赛';
   const usage=t.usage_known?'Token：'+operationTokens(t.total_tokens):'Token：未返回';
@@ -731,7 +793,7 @@ function renderJudgeRoom(r){
  const canLock=!finished&&!r.my_verdict&&ready;
  const pending=r.rounds.find(x=>x.number===r.current_round)?.status==='draft';
  const questions=(round.questions||[]).map(q=>`<div class="feed-item"><strong>${esc(q.judge)}</strong><div class="feed-text">${esc(q.text)}</div></div>`).join('')||D('尚无裁判提交问题');
- const answers=round.status==='revealed'?aliases.map(a=>`<div class="answer-card"><strong>匿名参与者 ${esc(a)}</strong>${round.answers[a]?.edited_at?'<span class="pill">本轮答复已修订</span>':''}<div class="answer-content">${esc(round.answers[a]?.text||'（未提交）')}</div></div>`).join(''):
+ const answers=round.status==='revealed'?aliases.map(a=>`<div class="answer-card"><strong>匿名参与者 ${esc(a)}</strong>${round.timed_out?.includes(a)?'<span class="pill">超时未提交</span>':''}${round.answers[a]?.edited_at?'<span class="pill">本轮答复已修订</span>':''}<div class="answer-content">${esc(round.answers[a]?.text||(round.timed_out?.includes(a)?'（超时未提交）':'（未提交）'))}</div></div>`).join(''):
  `<div class="notice">🔒 尚未全部提交：${round.submitted.length}/${aliases.length}。在所有回答统一公开前，裁判同样不能读取任何回答正文。</div>`;
  const buttons=r.rounds.map(x=>`<button class="small ${x.number===n?'active':''}" data-action="round" data-id="${x.number}">第 ${x.number} 轮 ${x.status==='revealed'?'✓':''}</button>`).join('');
  const form=canLock?`<form data-form="judge-verdict"><p class="hint">只根据匿名回答判断。所有预测只保存在你的独立记录中，其他裁判始终无法通过网站读取。</p>${aliases.map(a=>`<div class="label-line" style="margin:8px 0"><label>参与者 ${esc(a)}</label><select name="pred-${esc(a)}" required><option value="">选择</option><option value="Human">人类</option><option value="AI">AI</option></select></div>`).join('')}<label class="field">判断依据</label><textarea name="evidence" data-draft="judge-evidence" required maxlength="5000">${myDraft('judge-evidence')}</textarea><label class="field">置信度 (0-100)</label><input name="confidence" type="number" min="0" max="100" value="50" required><label class="field">最弱环节（可选）</label><textarea name="weakness" maxlength="5000"></textarea><label class="field">可能误判原因（可选）</label><textarea name="possible_error" maxlength="5000"></textarea><div class="form-actions"><button class="primary" type="submit">锁定我自己的判断</button></div></form>`:
@@ -739,7 +801,7 @@ function renderJudgeRoom(r){
  '';
  app.innerHTML=`<div class="pagehead"><div><div class="overline">INDEPENDENT JUDGE / ROOM ${r.id}</div><h1>${esc(r.title)}</h1><div class="stat-row"><span class="pill">独立裁判 · ${esc(r.my_judge_label)}</span><span class="pill">${aliases.length} 位匿名参赛者</span><span class="pill">${finished?'比赛已结束':'匿名盲测中'}</span></div></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button data-action="back" class="ghost">← 返回大厅</button><button data-action="sync">↻ 刷新</button></div></div>
  ${finishedActions(r)}<div class="room-layout"><aside class="aside"><section class="card flat"><h2>匿名参赛者</h2><p class="hint">仅显示固定代号，隐藏所有账号、昵称和真实身份。即使比赛结束，此视图也不显示真实身份。</p>${aliases.map(a=>`<div class="roster-person"><span class="alias">${esc(a)}</span><span>匿名参赛者</span></div>`).join('')}</section><section class="card flat"><h2>比赛轮次</h2><div class="round-tags">${buttons}</div></section></aside>
- <div class="stack"><section class="card"><div class="label-line"><h2>第 ${n} 轮问题</h2><span class="pill">${round.status==='draft'?'收集问题中':round.status==='collecting'?'等待答复':'回答已公开'}</span></div><div class="feed">${questions}</div>${round.question?`<div class="question spaced">${esc(round.question)}</div>`:''}<div class="buttonrow spaced"><button data-action="download-log" class="small">↓ 下载匿名 Log</button>${finished?'<button data-action="download-full-log" class="small">↓ 下载整场匿名 Log</button>':''}</div></section>
+ <div class="stack"><section class="card"><div class="label-line"><h2>第 ${n} 轮问题</h2><span class="pill">${round.status==='draft'?'收集问题中':round.status==='collecting'?'等待答复':'回答已公开'}</span></div><div class="feed">${questions}</div>${round.question?`<div class="question spaced">${esc(round.question)}</div>${renderRoundTimer(r,round,active)}`:''}<div class="buttonrow spaced"><button data-action="download-log" class="small">↓ 下载匿名 Log</button>${finished?'<button data-action="download-full-log" class="small">↓ 下载整场匿名 Log</button>':''}</div></section>
  <section class="card"><h2>匿名回答</h2>${answers}</section></div>
  <div class="right-panel"><section class="card"><h2>我的裁判操作</h2>${active&&pending&&!questionSubmitted?`<form data-form="judge-question"><p class="hint">每位裁判每轮最多提交一个问题，房主统一开启本轮作答。</p><textarea name="text" data-draft="judge-question" maxlength="3000" required placeholder="输入你要向所有参赛者提出的问题…">${myDraft('judge-queion')}</textarea><div class="form-actions"><button class="primary" type="submit">提交并实时同步问题</button></div></form>`:pending?D('你已提交本轮问题，等待房主开启作答。'):D('本轮已经开始作答，不能再添加新问题。')}
  <div class="divider"></div><h3>独立身份判决</h3>${form}</section></div></div>`;
@@ -761,10 +823,10 @@ function renderRoom(){
  const r=state.room;if(!r)return;if(r.status==='closed'){renderClosedRoom(r);return;}if(r.records_deleted){renderReadyRoom(r);return;}if(r.is_judge){renderJudgeRoom(r);return;}const n=state.selectedRound||r.current_round;const round=r.rounds.find(x=>x.number===n)||r.rounds[r.rounds.length-1];const active=n===r.current_round;const finished=r.status==='finished';const canManage=r.can_manage;const humans=r.humans.length,ais=r.ais.length;const submitted=new Set(round.submitted);const locked=!!r.verdict_locked||(r.judges||[]).some(j=>j.locked);
  const rtab=r.rounds.map(x=>`<button class="small ${x.number===n?'active':''}" data-action="round" data-id="${x.number}">第 ${x.number} 轮 ${x.status==='revealed'?'✓':''}</button>`).join('');
  const roster=[...r.humans.map(p=>({...p,role:'人类',label:p.name})),...r.ais.map(p=>({...p,role:'AI',label:p.name}))].sort((a,b)=>a.alias.localeCompare(b.alias));
- const answerView=round.status==='revealed'?roster.map(p=>`<div class="answer-card"><strong>${esc(p.alias)} · ${esc(p.label)}</strong><span class="pill" style="margin-left:7px">${p.role}</span><div class="tiny muted">${esc(shortDate(round.answers[p.alias]?.submitted_at))}</div>${round.answers[p.alias]?.edited_at?'<span class="pill">主持人已修订</span>':''}<div class="answer-content">${esc(round.answers[p.alias]?.text||'（无回答）')}</div></div>`).join(''):
+ const answerView=round.status==='revealed'?roster.map(p=>`<div class="answer-card"><strong>${esc(p.alias)} · ${esc(p.label)}</strong><span class="pill" style="margin-left:7px">${p.role}</span>${round.timed_out?.includes(p.alias)?'<span class="pill">超时未提交</span>':''}<div class="tiny muted">${esc(shortDate(round.answers[p.alias]?.submitted_at))}</div>${round.answers[p.alias]?.edited_at?'<span class="pill">主持人已修订</span>':''}<div class="answer-content">${esc(round.answers[p.alias]?.text||(round.timed_out?.includes(p.alias)?'（超时未提交）':'（无回答）'))}</div></div>`).join(''):
    `<div class="notice">🔒 回答暂时隐藏。已提交 ${round.submitted.length} / ${roster.length}；全部参赛者（含 AI）提交后，服务器会自动向所有在线玩家公布。</div>${round.answers[r.mine]?.text?`<div class="answer-card"><strong>我已提交的回答</strong><div class="answer-content">${esc(round.answers[r.mine].text)}</div></div>`:''}`;
  const canAnswer=active&&!finished&&round.status==='collecting'&&r.mine&&!submitted.has(r.mine);
- const judgeBox= canManage?`<section class="card compact"><div class="label-line"><h2>参赛者管理</h2><span class="pill">${r.is_owner?'房主':'管理员'}</span></div>
+ const judgeBox= canManage?`<section class="card compact"><div class="label-line"><h2>参赛者管理</h2><span class="pill">${r.is_owner?'房主':'管理员'}</span></div>${renderRoundTimerSettings(r)}
  ${active&&round.status==='draft'&&!finished&&!round.questions?.length&&!(r.judges||[]).length?`<div class="divider"></div><form id="manual-question-form" data-form="question"><label class="field">录入裁判的第 ${n} 轮问题</label><textarea name="question" data-draft="question" maxlength="6000" required placeholder="从裁判聊天窗口复制原文…">${myDraft('question')}</textarea><div class="form-actions"><button class="primary" type="submit">向所有玩家发布问题</button></div></form>`:''}
  ${active&&round.status==='collecting'&&!finished&&r.ais.some(a=>a.model_profile_id&&a.model_profile?.credential_status==='ok'&&!submitted.has(a.alias))?`<div class="divider"></div><button class="primary" data-action="generate-ai-answers">自动生成模型 AI 回复</button>`:''}
   ${active&&round.status==='collecting'&&!finished&&r.ais.some(a=>(!a.model_profile_id||a.model_profile?.credential_status!=='ok')&&!submitted.has(a.alias))?`<div class="divider"></div><form data-form="ai-answer"><label class="field">录入 AI 原始回答</label><select name="alias">${r.ais.filter(a=>(!a.model_profile_id||a.model_profile?.credential_status!=='ok')&&!submitted.has(a.alias)).map(a=>`<option value="${a.alias}">${a.alias} · ${esc(a.name)}</option>`).join('')}</select><label class="field">AI 回答（复制原文）</label><textarea name="answer" data-draft="ai-answer" maxlength="12000" required placeholder="请粘贴 AI 原样回答，不做修改…">${myDraft('ai-answer')}</textarea><div class="fom-actions"><button class="primary" type="submit">录入 AI 回答</button></div></form>`:''}
@@ -782,7 +844,7 @@ function renderRoom(){
  app.innerHTML=`<div class="pagehead"><div><div class="overline">ROOM ${r.id} / REAL-TIME MATCH</div><h1>${esc(r.title)}</h1><div class="stat-row"><span class="pill ${finished?'ok':'warn'}">${finished?'比赛已结束':'比赛进行中'}</span><span cass="pill">${humans} 位人类 · ${ais} 位 AI</span><span class="pill">${r.judges?.length?`${r.judges.length} 位裁判（真人 / AI）`:`外部裁判：${esc(r.judge)}`}</span></div></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button class="ghost" data-action="back">← 比赛大厅</button><button data-action="sync">↻ 刷新</button></div></div>
  ${finishedActions(r)}${renderMyPointsResult(r)}<div class="room-layout ${canManage?'admin-room-layout':''}"><aside class="aside"><section class="card flat"><h2>参赛者身份</h2><div class="roster">${makeRoster(r)}</div></section><section class="card flat"><h2>比赛轮次</h2><div class="round-tags">${rtab}</div></section></aside>
  <div class="stack">${canManage&&state.roomView==='human-judges'?renderHumanJudgeAdminPanel(r):canManage&&state.roomView==='ai-judges'?judgeAdminPanel(r)+renderModelOperationPanel(r):canManage&&state.roomView==='admin'?judgeBox+renderReadinessPanel(r)+renderJudgeWorkflowPanel(r)+renderModelOperationPanel(r):''}
- <div class="${canManage&&state.roomView!=='match'?'hide':'stack'}"><section class="card"><div class="label-line"><div><div class="overline">JUDGE / ROUND ${n}</div><h2 style="margin:5px 0 0">裁判问题</h2></div><span class="pill ${round.status==='revealed'?'ok':'warn'}">${round.status==='draft'?'等待发布':round.status==='collecting'?'正在收集回答':'本轮已揭晓'}</span></div><div class="question spaced">${esc(round.question||'管理员尚未开启本轮作答。')}</div>${round.status==='draft'&&round.questions?.length?`<div class="feed spaced">${round.questions.map(q=>`<div class="feed-item"><strong>${esc(q.judge)}</strong><div class="feed-text">${esc(q.text)}</div></div>`).join('')}</div>`:''}<div class="buttonrow spaced"><button class="small" data-action="download-log">↓ 下载本轮 Log (.md)</button>${finished?'<button class="small" data-action="download-full-log">↓ 下载整场 Log (.md)</button>':''}</div></section>
+ <div class="${canManage&&state.roomView!=='match'?'hide':'stack'}"><section class="card"><div class="label-line"><div><div class="overline">JUDGE / ROUND ${n}</div><h2 style="margin:5px 0 0">裁判问题</h2></div><span class="pill ${round.status==='revealed'?'ok':'warn'}">${round.status==='draft'?'等待发布':round.status==='collecting'?'正在收集回答':'本轮已揭晓'}</span></div><div class="question spaced">${esc(round.question||'管理员尚未开启本轮作答。')}</div>${renderRoundTimer(r,round,active)}${round.status==='draft'&&round.questions?.length?`<div class="feed spaced">${round.questions.map(q=>`<div class="feed-item"><strong>${esc(q.judge)}</strong><div class="feed-text">${esc(q.text)}</div></div>`).join('')}</div>`:''}<div class="buttonrow spaced"><button class="small" data-action="download-log">↓ 下载本轮 Log (.md)</button>${finished?'<button class="small" data-action="download-full-log">↓ 下载整场 Log (.md)</button>':''}</div></section>
  <section class="card"><div class="label-line"><h2>参赛者回答</h2><span class="pill">${round.submitted.length}/${roster.length} 已提交</span></div>${answerView}
  ${canAnswer?`<form data-form="answer" class="spaced"><label class="field">我的本轮回答 · ${esc(r.mine)}</label><textarea name="answer" data-draft="answer" maxlength="12000" required placeholder="在这里回答裁判的问题。提交后不可修改，直到全员提交才统一公开。">${myDraft('answer')}</textarea><div class="form-actions"><button class="primary" type="submit">提交本轮回答</button></div></form>`:''}
  ${!r.mine&&!finished?D('在参赛者管理选择以人类身份加入。'):''}</section>
@@ -791,11 +853,13 @@ ${renderPublicChat(r)}
  ${finished&&!r.verdicts?.length?`<section class="card"><div class="overline">MATCH ACCURACY / 比赛识别统计</div><h2>最终判决与真实身份</h2><div class="score">${scored}/${roster.length}</div><p class="muted">裁判 ${esc(r.judge)} · 置信度 ${r.verdict?.confidence??'?'}%</p>${roster.map(p=>`<div class="answer-card"><strong>${p.alias} · ${esc(p.label)}</strong><div>真实身份：${p.role} / 裁判判断：${r.verdict?.predictions?.[p.alias]==='Human'?'人类':'AI'} ${r.verdict?.predictions?.[p.alias]===(p.role==='AI'?'AI':'Human')?'✓':'✗'}</div></div>`).join('')}<h3 class="spaced">判断依据</h3><div class="question">${esc(r.verdict?.evidence)}</div><p class="hint spaced">最弱环节：${esc(r.verdict?.weakness||'未填写')}</p><p class="hint">可能误判：${esc(r.verdict?.possible_error||'未填写')}</p></section>`:''}
  </div></div><div class="right-panel">${canManage?renderAdminRoomNav(r,finished):`<section class="card flat"><div class="overline">PARTICIPANT</div><h2>等待主持人推进比赛</h2><p class="hint">你的每次提交都会发送到服务器；全员提交完成后自动揭晓。若网络断开，请等待自动重连或手动刷新。</p></section>`}</div></div>`;
  updateTypingBadges();
+ updateRoundCountdown();
  if(editingDraft){
    const next=app.querySelector(`[data-draft="${editingDraft}"]`);
    if(next){next.focus();if(editingPos!==null)next.setSelectionRange(editingPos,editingPos)}
  }
 }
+setInterval(updateRoundCountdown,1000);
 async function downloadLog(){const id=state.roomId,n=state.selectedRound;const file=await api(`/api/rooms/${id}/rounds/${n}/log`,{raw:true});const href=URL.createObjectURL(file);const a=document.createElement('a');a.href=href;a.download=`room-${id}-round-${n}.md`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(href),1500)}
 async function downloadFullLog(){const id=state.roomId;const file=await api(`/api/rooms/${id}/log`,{raw:true});const href=URL.createObjectURL(file);const a=document.createElement('a');a.href=href;a.download=`room-${id}-full-log.md`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(href),1500)}
 app.addEventListener('toggle',e=>{
@@ -959,27 +1023,47 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
    }
   }
   if(action==='admin-join'){await api('/api/join',{method:'POST',body:{code:state.room.invite_code}});await refreshRoom();toast('已作为玩家加入')}
-  if(action==='next-round'){if(confirm('确定开启下一轮？')){await api(`/api/rooms/${state.roomId}/next`,{method:'POST'});await refreshRoom();const q=await api(`/api/rooms/${state.roomId}/ai-judges/questions/generate`,{method:'POST'});await refreshRoom();toast('下一轮已开启；'+aiQuestionFeedback(q))}}
+  if(action==='next-round'){if(confirm('确定创建下一轮？服务器会在后台准备可用 AI 裁判问题，但不会自动开放作答。')){const result=await api(`/api/rooms/${state.roomId}/next`,{method:'POST'});await refreshRoom();toast('第 '+result.number+' 轮已创建；服务端正在准备问题，准备完成后仍需单独开始答题。')}}
   if(action==='start-round'){
    const shouldGenerate=b.dataset.generateQuestions==='true';
-   const prompt=shouldGenerate?'确认先生成可用 AI 裁判问题，再按当前已提交问题重新检查并开启作答？':'确认按当前已提交的合规问题开启作答？未交题席位不会阻止本轮开始。';
+   const prompt=shouldGenerate?'提交一次服务端开局任务？服务器会先生成可用 AI 裁判问题，再检查条件、开启作答并自动生成 AI 回答。':'提交一次服务端开局任务？服务器会按当前已提交问题检查条件、开启作答并自动生成 AI 回答。';
    if(confirm(prompt)){
-    b.disabled=true;b.textContent=shouldGenerate?'正在生成问题…':'正在开启本轮…';
-    let q={generated:0,skipped:0,blocked:0,failed:[]};
-    if(shouldGenerate){
-     q=await api('/api/rooms/'+state.roomId+'/ai-judges/questions/generate',{method:'POST'});
-     await refreshRoom();
-    }
-    if(!state.room?.readiness?.can_start){
-     throw new Error(q.failed?.length?aiQuestionFeedback(q):'服务器重新检查后发现本轮尚不满足开局条件；请查看准备区提示。');
-    }
-    await api('/api/rooms/'+state.roomId+'/start',{method:'POST'});
+    b.disabled=true;b.textContent='已提交…';
+    const key=crypto.randomUUID?crypto.randomUUID():Array.from(crypto.getRandomValues(new Uint8Array(16)),x=>x.toString(16).padStart(2,'0')).join('');
+    const result=await api('/api/rooms/'+state.roomId+'/round-workflows',{
+     method:'POST',headers:{'Idempotency-Key':key},
+     body:{match_number:state.room.match_number,round_number:state.room.current_round,
+      include_ai_questions:shouldGenerate,mode:'start'}
+    });
     await refreshRoom();
-    const a=await api('/api/rooms/'+state.roomId+'/ai/answers/generate',{method:'POST'});
-    await refreshRoom();
-    const detail=a.failed?.length?'；失败：'+a.failed.map(x=>x.alias+' '+x.error).join('；'):'';
-    const questionDetail=q.generated||q.skipped||q.blocked||q.failed?.length?'；'+aiQuestionFeedback(q):'';
-    toast('本轮已开始，模型自动提交 '+(a.generated||0)+' 个回答'+detail+questionDetail);
+    toast('服务端开局任务已提交：'+workflowStateText(result.workflow?.state));
+   }
+  }
+  if(action==='finish-round-timeout'){
+   if(confirm('答题期限已到。结束本轮后，未提交席位会标记为“超时未提交”，已有回答将统一公开；不会自动开启下一轮或结算积分。')){
+    await api('/api/rooms/'+state.roomId+'/rounds/'+Number(b.dataset.round)+'/finish-timeout',{
+     method:'POST',body:{match_number:state.room.match_number,confirm:true}
+    });
+    await refreshRoom();toast('本轮已结束，超时状态和已有回答已公开');
+   }
+  }
+  if(action==='cancel-round-workflow'){
+   if(confirm('确定取消本次服务端准备？已发出的第三方模型请求可能仍会产生费用，但迟到结果不会写入比赛。')){
+    await api('/api/rooms/'+state.roomId+'/round-workflows/'+Number(b.dataset.id)+'/cancel',{
+     method:'POST',body:{confirm:true}
+    });
+    await refreshRoom();toast('服务端工作流已取消');
+   }
+  }
+  if(action==='resume-round-workflow'){
+   const wf=state.room?.round_workflow;
+   const unknown=!!wf?.requires_unknown_confirmation;
+   const prompt=unknown?'存在结果未知的模型请求。请先核对比赛内容；确认再次请求可能产生费用后继续？':'恢复此服务端工作流？服务器会只补齐尚未完成的席位。';
+   if(confirm(prompt)){
+    await api('/api/rooms/'+state.roomId+'/round-workflows/'+Number(b.dataset.id)+'/resume',{
+     method:'POST',body:{confirm_unknown_attempts:unknown}
+    });
+    await refreshRoom();toast('已请求恢复服务端工作流');
    }
   }
   if(action==='packet'){await api(`/api/rooms/${state.roomId}/packets`,{method:'POST'});await refreshRoom();toast('已生成匿名裁判包快照')}
@@ -1043,6 +1127,13 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
   if(type==='model-operation-filters'){
     state.modelOperationFilters={profile_id:data.profile_id||'',purpose:data.purpose||'',status:data.status||''};
     state.modelOperationOffset=0;await loadModelOperationRecords();renderPersonalCenter();return;
+   }
+   if(type==='round-timer'){
+    const raw=String(data.seconds||'').trim();
+    const seconds=raw===''?null:Number(raw);
+    if(seconds!==null&&(!Number.isSafeInteger(seconds)||seconds<30||seconds>3600))throw new Error('单轮限时必须为 30～3600 秒，或留空表示关闭。');
+    await api('/api/rooms/'+state.roomId+'/round-timer',{method:'PUT',body:{seconds}});
+    await refreshRoom();toast(seconds===null?'单轮限时已关闭':'单轮限时已设置为 '+seconds+' 秒');return;
    }
    if(type==='model-request-limit'){
     const value=String(data.limit||'').trim()===''?null:Number(data.limit);
