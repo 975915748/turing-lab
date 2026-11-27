@@ -912,6 +912,11 @@ def check_match_number(room, number):
         raise HTTPException(409, '房间已开始另一场比赛，请刷新后重试。')
 
 
+def check_round_number(room, number):
+    if str(room['current_round']) != str(number):
+        raise HTTPException(409, '房间当前轮次已变化，请刷新后重试。')
+
+
 def active_participant_count(db, room_id):
     humans=db.execute('''SELECT COUNT(*) FROM members m JOIN users u ON u.id=m.user_id
         WHERE m.room_id=? AND m.removed_at IS NULL AND u.deleted_at IS NULL''',(room_id,)).fetchone()[0]
@@ -1702,10 +1707,13 @@ def create_app(db_path=None):
         if mutate:
             check_csrf(request, u)
             match = re.match(r'^/api/rooms/(\d+)(?:/|$)', request.url.path)
-            if match and 'x-match-number' in request.headers:
+            if match and ('x-match-number' in request.headers or 'x-round-number' in request.headers):
                 room = db.execute('SELECT * FROM rooms WHERE id=?', (int(match[1]),)).fetchone()
                 if room:
-                    check_match_number(room, request.headers['x-match-number'])
+                    if 'x-match-number' in request.headers:
+                        check_match_number(room, request.headers['x-match-number'])
+                    if 'x-round-number' in request.headers:
+                        check_round_number(room, request.headers['x-round-number'])
         return u
 
     def set_session(response, db, user_id):
