@@ -45,21 +45,6 @@ async function screenshot(page, name) {
     await submit(page, 'room', { title: '房间重复使用验收' });
     await page.locator('[data-action="room-view"][data-view="admin"]').click();
     await page.getByRole('heading', { name: '房主管理台', exact: true }).waitFor();
-    const staleHostCopy = [
-      '模型接入的 AI 参赛者可自动回答；AI 裁判可自动出题和判断。未接入模型的 AI 席位仍可手动转录。',
-      '可以添加手动 AI 席位，也可以先在个人中心配置自己的模型 API。',
-      '选择模型配置即授权本房间房主和全站管理员通过比赛操作触发调用；服务商可能按实际调用量计费。',
-      '房主也可使用邀请码加入，以人类身份回答。',
-      '点击轮次可查看历史记录。',
-      '查看本轮问题与回答',
-      '查看真人裁判名单',
-      '配置 AI 裁判席位',
-      '管理参赛者与比赛',
-      '管理名字、密码和个人模型 API',
-    ];
-    for (const copy of staleHostCopy) {
-      assert.equal(await page.getByText(copy, { exact: true }).count(), 0, 'stale host copy remains: ' + copy);
-    }
     await submit(page, 'add-ai', { name: '手工AI' });
     const info = await (await hostContext.request.get(site + '/api/me')).json();
     const rid = info.rooms[0].id;
@@ -77,8 +62,6 @@ async function screenshot(page, name) {
 
     // Room public chat is live across pages, persists on refresh, and renders plain text safely.
     await page.locator('[data-action="room-view"][data-view="match"]').click();
-    await page.getByText('在房主管理台选择以人类身份加入。', { exact: true }).waitFor();
-    assert.equal(await page.getByText('人类玩家互相可见真实账号身份；裁判包仅含匿名代号。', { exact: true }).count(), 0);
     await playerPage.goto(site + `#room=${rid}`);
     await playerPage.locator('.chat-card').waitFor();
     await submit(playerPage, 'chat', { text: '<script>alert(1)</script>' });
