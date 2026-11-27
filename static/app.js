@@ -1128,6 +1128,13 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
     state.modelOperationFilters={profile_id:data.profile_id||'',purpose:data.purpose||'',status:data.status||''};
     state.modelOperationOffset=0;await loadModelOperationRecords();renderPersonalCenter();return;
    }
+   if(type==='round-timer'){
+    const raw=String(data.seconds||'').trim();
+    const seconds=raw===''?null:Number(raw);
+    if(seconds!==null&&(!Number.isSafeInteger(seconds)||seconds<30||seconds>3600))throw new Error('单轮限时必须为 30～3600 秒，或留空表示关闭。');
+    await api('/api/rooms/'+state.roomId+'/round-timer',{method:'PUT',body:{seconds}});
+    await refreshRoom();toast(seconds===null?'单轮限时已关闭':'单轮限时已设置为 '+seconds+' 秒');return;
+   }
    if(type==='model-request-limit'){
     const value=String(data.limit||'').trim()===''?null:Number(data.limit);
     if(value!==null&&(!Number.isSafeInteger(value)||value<1||value>1000000))throw new Error('请求上限必须为正整数，或留空表示不限。');
