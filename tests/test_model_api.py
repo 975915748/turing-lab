@@ -720,17 +720,19 @@ def test_queued_model_answer_is_revalidated_before_provider_call(tmp_path, monke
                     json={'model_profile_id': None},
                     headers={'X-CSRF-Token': me['csrf']},
                 )
-            assert changed.status_code == 200, changed.text
+            assert changed.status_code == (409 if mutation == 'seat_rebound' else 200), changed.text
 
             release.set()
             generated = await asyncio.wait_for(generate_task, 3)
             assert generated.status_code == 200, generated.text
             payload = generated.json()
-            assert started == 4, '第五个排队任务不应在状态失效后触发服务商调用'
             if mutation == 'seat_rebound':
-                assert payload['generated'] == 4
-                assert payload['skipped'] == 1
+                # The first preparation freezes every seat binding; rebinding is rejected.
+                assert started == 5
+                assert payload['generated'] == 5
+                assert payload['skipped'] == 0
             else:
+                assert started == 4, '第五个排队任务不应在状态失效后触发服务商调用'
                 assert payload['generated'] == 0
                 assert payload['skipped'] == 5
 
@@ -853,24 +855,25 @@ def test_queued_ai_judge_question_revalidates_context_before_provider_call(
                         'new_password': 'model-admin-password-new',
                         'confirm_password': 'model-admin-password-new',
                     }, headers=headers)
-            assert changed.status_code == 200, changed.text
+            assert changed.status_code == (409 if mutation == 'seat_rebound' else 200), changed.text
 
             release.set()
             response = await asyncio.wait_for(generate_task, 3)
             assert response.status_code == 200, response.text
             payload = response.json()
-            assert len(started_judges) == 4, '第五个排队任务在状态失效后不应触发服务商调用'
             if mutation == 'seat_rebound':
-                assert payload['generated'] == 4
-                assert payload['skipped'] == 1
-                assert queued_judge_id not in started_judges
+                assert len(started_judges) == 5
+                assert payload['generated'] == 5
+                assert payload['skipped'] == 0
+                assert queued_judge_id in started_judges
             else:
+                assert len(started_judges) == 4, '第五个排队任务在状态失效后不应触发服务商调用'
                 assert payload['generated'] == 0
                 assert payload['skipped'] == 5
             assert all(item.get('reason') for item in payload['results'] if item['status'] == 'skipped')
             if mutation != 'session_revoked':
                 current = (await async_admin.get(base)).json()
-                expected_questions = 4 if mutation == 'seat_rebound' else 0
+                expected_questions = 5 if mutation == 'seat_rebound' else 0
                 assert len(current['rounds'][0]['questions']) == expected_questions
 
     asyncio.run(scenario())
