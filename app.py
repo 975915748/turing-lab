@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 from starlette.staticfiles import StaticFiles
 
 from model_api import (ModelAPIError, chat_completion, decrypt_api_key,
@@ -685,6 +685,17 @@ class ChangePasswordData(BaseModel, extra='forbid'):
 class ModelBindingData(BaseModel, extra='forbid'):
     model_profile_id: Optional[int] = Field(default=None, ge=1)
     keep_existing: bool = False
+
+
+class SeatPersonaData(BaseModel, extra='forbid'):
+    preset_id: str = Field(min_length=1, max_length=40)
+    custom_system_prompt: str = Field(default='', max_length=8000)
+    output_length: Literal['default','short','medium','long'] = 'default'
+    history_rounds: StrictInt = Field(default=5, ge=0, le=100)
+
+
+class PersonaResetData(ConfirmData):
+    pass
 
 
 class ModelRequestLimitData(BaseModel, extra='forbid'):
@@ -3675,6 +3686,10 @@ def create_app(db_path=None):
         await app.state.hub.notify(room_id,'judge_added')
         return {'ok':True}
 
+    @app.get('/api/ai-seat-personas')
+    def list_ai_seat_personas():
+        return persona_catalog()
+
     @app.post('/api/rooms/{room_id}/ai-judges')
     async def add_ai_judge(room_id:int,body:AIData,request:Request):
         with connection(immediate=True) as db:
@@ -4068,6 +4083,89 @@ def create_app(db_path=None):
                        (body.model_profile_id,room_id,alias))
         await app.state.hub.notify(room_id,'model_profile_changed')
         return {'ok':True}
+
+    @app.put('/api/rooms/{room_id}/ai-judges/{judge_id}/persona')
+    async def update_ai_judge_persona(room_id:int,judge_id:int,body:SeatPersonaData,request:Request):
+        try:
+            config=normalize_persona_config('judge',preset_id=body.preset_id,
+                custom_system_prompt=body.custom_system_prompt,output_length=body.output_length,
+                history_rounds=body.history_rounds)
+        except ValueError as exc:
+            raise HTTPException(422,str(exc))
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            require_persona_editable(db,room)
+            cur=db.execute('''UPDATE ai_judges SET persona_preset_id=?,persona_preset_version=?,
+                persona_custom_prompt=?,persona_output_length=?,persona_history_rounds=?,
+                persona_revision=persona_revision+1 WHERE room_id=? AND id=?''',
+                (config['preset_id'],config['preset_version'],config['custom_system_prompt'],
+                 config['output_length'],config['history_rounds'],room_id,judge_id))
+            if cur.rowcount!=1:
+                raise HTTPException(404,'AI 裁判席不存在。')
+        await app.state.hub.notify(room_id,'seat_persona_changed')
+        return {'ok':True}
+
+    @app.put('/api/rooms/{room_id}/ai/{alias}/persona')
+    async def update_ai_player_persona(room_id:int,alias:str,body:SeatPersonaData,request:Request):
+        alias=alias.upper()
+        try:
+            config=normalize_persona_config('participant',preset_id=body.preset_id,
+                custom_system_prompt=body.custom_system_prompt,output_length=body.output_length,
+                history_rounds=body.history_rounds)
+        except ValueError as exc:
+            raise HTTPException(422,str(exc))
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            require_persona_editable(db,room)
+            cur=db.execute('''UPDATE ai_players SET persona_preset_id=?,persona_preset_version=?,
+                persona_custom_prompt=?,persona_output_length=?,persona_history_rounds=?,
+                persona_revision=persona_revision+1 WHERE room_id=? AND alias=?''',
+                (config['preset_id'],config['preset_version'],config['custom_system_prompt'],
+                 config['output_length'],config['history_rounds'],room_id,alias))
+            if cur.rowcount!=1:
+                raise HTTPException(404,'AI 参赛席不存在。')
+        await app.state.hub.notify(room_id,'seat_persona_changed')
+        return {'ok':True}
+
+    @app.post('/api/rooms/{room_id}/personas/reset-preparation')
+    async def reset_persona_preparation(room_id:int,body:PersonaResetData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            rnd=current_round(db,room)
+            if (room['status']!='open' or room['verdict_locked_at'] or
+                    room['match_started_at'] or room['current_round']!=1 or rnd['status']!='draft'):
+                raise HTTPException(409,'只有首轮尚未开始的比赛才能取消准备并编辑人设。')
+            workflows=db.execute('''SELECT id FROM round_workflows
+                WHERE room_id=? AND match_number=? AND state IN
+                ('queued','generating_questions','starting_round','generating_answers',
+                 'waiting_input','blocked','failed')''',
+                (room_id,room['match_number'])).fetchall()
+            if not is_match_persona_frozen(db,room_id,room['match_number']) and not workflows:
+                return {'ok':True,'reset':False}
+            now=operation_timestamp()
+            for row in workflows:
+                db.execute("""UPDATE round_workflows SET state='cancelled',stage='cancelled',
+                    execution_generation=execution_generation+1,worker_token=NULL,waiting_reason=NULL,
+                    error_message='房主取消准备并编辑席位配置。',finished_at=?,updated_at=?
+                    WHERE id=?""",(now,now,row['id']))
+            db.execute("""UPDATE model_operation_tasks SET state='stale',finished_at=?,updated_at=?,
+                error_message='准备已取消；旧模型结果不得写入。',result_applied=0
+                WHERE room_id=? AND match_number=? AND state IN ('queued','requesting')""",
+                (now,now,room_id,room['match_number']))
+            # AI judge questions are regenerated from the new snapshot; human judge questions remain.
+            db.execute('DELETE FROM ai_judge_questions WHERE room_id=? AND round_number=1',(room_id,))
+            db.execute('DELETE FROM match_seat_persona_snapshots WHERE room_id=? AND match_number=?',
+                       (room_id,room['match_number']))
+            db.execute('DELETE FROM match_persona_freezes WHERE room_id=? AND match_number=?',
+                       (room_id,room['match_number']))
+            db.execute('UPDATE rooms SET match_started_at=NULL WHERE id=? AND match_number=?',
+                       (room_id,room['match_number']))
+        app.state.workflow_worker.wake()
+        await app.state.hub.notify(room_id,'persona_preparation_reset')
+        return {'ok':True,'reset':True,'cancelled_workflows':len(workflows)}
 
     @app.post('/api/rooms/{room_id}/question')
     async def set_question(room_id:int,body:TextData,request:Request):
