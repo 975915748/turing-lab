@@ -754,12 +754,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
    const summary=(result.results||[]).map(x=>(x.label||x.alias||('席位 '+(x.judge_id||'')))+'：'+(x.status==='generated'?'已完成':x.error||x.reason||x.status)).join('；');
    toast('已重试指定席位'+(summary?'；'+summary:''));
   }
-   const taskId=Number(b.dataset.id);b.disabled=true;b.textContent='正在重试…';
-   const result=await api('/api/rooms/'+state.roomId+'/model-operations/'+taskId+'/retry',{method:'POST'});
-   await refreshRoom();
-   const summary=(result.results||[]).map(x=>(x.label||x.alias||('席位 '+(x.judge_id||'')))+'：'+(x.status==='generated'?'已完成':x.error||x.reason||x.status)).join('；');
-   toast('已重试指定席位'+(summary?'；'+summary:''));
-  }
+
   if(action==='model-operations-page'){
    state.modelOperationOffset=Math.max(0,state.modelOperationOffset+(b.dataset.direction==='next'?20:-20));
    await loadModelOperationRecords();renderPersonalCenter();
@@ -865,27 +860,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
     }finally{if(b.isConnected){b.disabled=false;b.textContent=originalText}}
    }
   }
-   const shouldGenerate=b.dataset.generateQuestions==='true';
-   const prompt=shouldGenerate?'确认先生成可用 AI 裁判问题，再按当前已提交问题重新检查并开启作答？':'确认按当前已提交的合规问题开启作答？未交题席位不会阻止本轮开始。';
-   if(confirm(prompt)){
-    b.disabled=true;b.textContent=shouldGenerate?'正在生成问题…':'正在开启本轮…';
-    let q={generated:0,skipped:0,blocked:0,failed:[]};
-    if(shouldGenerate){
-     q=await api('/api/rooms/'+state.roomId+'/ai-judges/questions/generate',{method:'POST'});
-     await refreshRoom();
-    }
-    if(!state.room?.readiness?.can_start){
-     throw new Error(q.failed?.length?aiQuestionFeedback(q):'服务器重新检查后发现本轮尚不满足开局条件；请查看准备区提示。');
-    }
-    await api('/api/rooms/'+state.roomId+'/start',{method:'POST'});
-    await refreshRoom();
-    const a=await api('/api/rooms/'+state.roomId+'/ai/answers/generate',{method:'POST'});
-    await refreshRoom();
-    const detail=a.failed?.length?'；失败：'+a.failed.map(x=>x.alias+' '+x.error).join('；'):'';
-    const questionDetail=q.generated||q.skipped||q.blocked||q.failed?.length?'；'+aiQuestionFeedback(q):'';
-    toast('本轮已开始，模型自动提交 '+(a.generated||0)+' 个回答'+detail+questionDetail);
-   }
-  }
+
   if(action==='packet'){await api(`/api/rooms/${state.roomId}/packets`,{method:'POST'});await refreshRoom();toast('已生成匿名裁判包快照')}
   if(action==='view-packet'){const pack=await api(`/api/rooms/${state.roomId}/packets/${b.dataset.id}`);const win=window.open('','_blank');if(win){win.document.title='裁判匿名消息包';const pre=win.document.createElement('pre');pre.style.cssText='white-space:pre-wrap;overflow-wrap:anywhere;font:15px/1.7 sans-serif;padding:24px';pre.textContent=pack.content;win.document.body.appendChild(pre);}else{await navigator.clipboard.writeText(pack.content);toast('弹窗被阻止，已复制裁判包');}}
   if(action==='mark-sent'){if(confirm('确认已亲自发送此版本到裁判窗口？标记并不代表系统已自动发送。')){await api(`/api/rooms/${state.roomId}/packets/${b.dataset.id}/sent`,{method:'POST'});await refreshRoom();toast('已记录手动发送时间')}}
