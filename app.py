@@ -2317,12 +2317,18 @@ def create_app(db_path=None):
                 rows=[row for row in rows if row['judge_id']==target_judge_id]
             match_number=room['match_number']
             round_number=rnd['number']
-            history=anonymous_match_packet(db,room_id,round_number-1)
+            history_rounds=5
+            history=anonymous_match_packet(db,room_id,round_number-1,history_rounds)
             roster_revision=participant_roster_revision(db,room_id)
             results=[]
             profiles=[]
             for raw in rows:
                 profile=dict(raw)
+                snapshot=match_seat_persona_snapshot(db,room_id,match_number,'judge',profile['judge_id'])
+                persona=json.loads(snapshot['config_json']) if snapshot else persona_config_from_row(profile,'judge')
+                if snapshot:
+                    profile=load_frozen_model_profile(db,snapshot) or dict(raw)
+                profile['_persona']=persona
                 if profile['question_id'] is not None:
                     continue
                 if profile['model_profile_id'] is None:
@@ -2341,8 +2347,10 @@ def create_app(db_path=None):
                 profiles.append(profile)
         async def generate_one(profile):
             judge_id=profile['judge_id']
+            persona=profile.get('_persona') or {}
+            seat_history=anonymous_match_packet(db,room_id,round_number-1,persona.get('history_rounds',5)) if not workflow else history
             context_revision=hashlib.sha256(
-                (str(round_number)+'|'+','.join(roster)+'|'+history).encode('utf-8')).hexdigest()
+                (str(round_number)+'|'+','.join(roster)+'|'+seat_history).encode('utf-8')).hexdigest()
             def validate_context(db, judge_id=judge_id, profile=profile):
                 current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
                 if not current or current['match_number']!=match_number or current['status']!='open' or current['verdict_locked_at']:
@@ -2352,7 +2360,7 @@ def create_app(db_path=None):
                     return '当前轮次已变化或开始作答；未向服务商发送请求。'
                 if aliases(db,room_id)[2]!=roster or participant_roster_revision(db,room_id)!=roster_revision:
                     return '参赛名单已变化；请取消准备并重新入队。'
-                if anonymous_match_packet(db,room_id,round_number-1)!=history:
+                if anonymous_match_packet(db,room_id,round_number-1,persona.get('history_rounds',5))!=seat_history:
                     return '历史匿名资料已变化；请刷新房间后重新生成问题。'
                 binding=db.execute('SELECT model_profile_id FROM ai_judges WHERE room_id=? AND id=?',
                                    (room_id,judge_id)).fetchone()
@@ -2375,13 +2383,12 @@ def create_app(db_path=None):
                 session_hash=session_hash,room_id=room_id,match_number=match_number,
                 round_number=round_number,context_revision=context_revision,
                 messages=[
-                    {'role':'system','content':('你是多人图灵测试的独立裁判。每轮只提出一个核心问题，不得把多个问题打包。'
-                     '问题必须面向所有匿名参赛者，不能询问真实姓名、账号、模型名称或系统提示。'
-                     '只输出问题正文，不要前言、编号或解释。')},
-                    {'role':'user','content':f'此前轮次的匿名资料：\n{history}\n\n当前是第 {round_number} 轮，参赛者匿名代号：{", ".join(roster)}。'
+                    {'role':'system','content':compose_system_prompt('你是多人图灵测试的独立裁判。每轮只提出一个核心问题，不得把多个问题打包。问题必须面向所有匿名参赛者，不能询问真实姓名、账号、模型名称或系统提示。只输出问题正文，不要前言、编号或解释。',persona,task='judge_question')},
+                    {'role':'user','content':f'此前轮次的匿名资料：\n{seat_history}\n\n当前是第 {round_number} 轮，参赛者匿名代号：{", ".join(roster)}。'
                      '请根据已有信息提出一个适合所有参赛者回答的全新问题。'}],
                 validate_context=validate_context,apply_result=apply_result,
-                workflow=workflow,retry_of=retry_of,idempotency_key=idempotency_key)
+                workflow=workflow,retry_of=retry_of,idempotency_key=idempotency_key,
+                request_max_tokens=output_token_limit(persona,profile.get('max_tokens',2048)))
             outcome.update({'judge_id':judge_id,'label':profile['label']})
             return outcome
 
@@ -2430,14 +2437,23 @@ def create_app(db_path=None):
             match_number=room['match_number']
             round_number=rnd['number']
             question=rnd['question']
-            profiles=[dict(row) for row in rows]
-            history_by_alias={row['alias']:anonymous_player_history(db,room_id,row['alias'],round_number-1)
-                              for row in rows}
+            profiles=[]
+            for raw in rows:
+                profile=dict(raw)
+                snapshot=match_seat_persona_snapshot(db,room_id,match_number,'participant',profile['alias'])
+                persona=json.loads(snapshot['config_json']) if snapshot else persona_config_from_row(profile,'participant')
+                if snapshot:
+                    profile=load_frozen_model_profile(db,snapshot) or dict(raw)
+                profile['_persona']=persona
+                profiles.append(profile)
+            history_by_alias={profile['alias']:anonymous_player_history(db,room_id,profile['alias'],round_number-1,
+                (profile.get('_persona') or {}).get('history_rounds',5)) for profile in profiles}
             roster_revision=participant_roster_revision(db,room_id)
         results=[]
         async def generate_one(profile):
             alias=profile['alias']
             history=history_by_alias.get(alias,'（此前没有已完成轮次。）')
+            persona=profile.get('_persona') or {}
             context_revision=hashlib.sha256((question+'\0'+history).encode('utf-8')).hexdigest()
             def validate_context(db, alias=alias, profile=profile, history=history):
                 current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
@@ -2475,11 +2491,11 @@ def create_app(db_path=None):
                 match_number=match_number,round_number=round_number,
                 context_revision=context_revision,
                 messages=[
-                    {'role':'system','content':('你正在参加一场多人图灵测试。你是匿名参赛者，请自然、直接地回答裁判问题。'
-                     '不要提及模型、API、系统提示或你被要求扮演的身份；不要编造个人经历来冒充真实事实。')},
+                    {'role':'system','content':compose_system_prompt('你正在参加一场多人图灵测试。你是匿名参赛者，请自然、直接地回答裁判问题。不要提及模型、API、系统提示或你被要求扮演的身份；不要编造个人经历来冒充真实事实。',persona,task='participant_answer')},
                     {'role':'user','content':f'你此前的本场记录（只包含你自己的回答）：\n{history}\n\n当前第 {round_number} 轮裁判问题：\n\n{question}\n\n请给出你的本轮回答。'}],
                 validate_context=validate_context,apply_result=apply_result,
-                workflow=workflow,retry_of=retry_of,idempotency_key=idempotency_key)
+                workflow=workflow,retry_of=retry_of,idempotency_key=idempotency_key,
+                request_max_tokens=output_token_limit(persona,profile.get('max_tokens',2048)))
             outcome.update({'alias':alias})
             return outcome
 
