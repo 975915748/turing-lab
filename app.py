@@ -820,9 +820,18 @@ def model_profile_snapshot_valid(db, profile):
         return False
     current=dict(row)
     if profile.get('_persona_snapshot_id') is not None:
-        # Match parameters are immutable snapshots. Personal profile edits do not
-        # rewrite an active match; only deletion, owner revocation or bad credentials block it.
-        return (current.get('owner_user_id')==profile.get('owner_user_id') and
+        snapshot=db.execute('''SELECT config_hash,model_json FROM match_seat_persona_snapshots
+            WHERE id=? AND room_id=? AND match_number=?''',
+            (profile['_persona_snapshot_id'],profile.get('_persona_snapshot_room_id'),
+             profile.get('_persona_snapshot_match_number'))).fetchone()
+        frozen=bool(snapshot and snapshot['config_hash']==profile.get('_persona_snapshot_config_hash')
+                    and snapshot['model_json'] is not None
+                    and hashlib.sha256(snapshot['model_json'].encode('utf-8')).hexdigest()==profile.get('_frozen_model_hash')
+                    and is_match_persona_frozen(db,profile.get('_persona_snapshot_room_id'),
+                                                profile.get('_persona_snapshot_match_number')))
+        # Profile edits and API-key rotation do not rewrite a match; deletion,
+        # owner revocation, credential damage, or preparation reset invalidate it.
+        return (frozen and current.get('owner_user_id')==profile.get('owner_user_id') and
                 not current.get('ownership_issue') and model_profile_credential_status(current)=='ok')
     if model_profile_credential_status(current)!='ok':
         return False
@@ -2123,6 +2132,9 @@ def create_app(db_path=None):
                         'ownership_issue':row['ownership_issue'],'owner_deleted_at':row['owner_deleted_at'],
                         'profile_name':model.get('profile_name'),'model_name':model.get('model_name'),
                         '_persona_snapshot_id':snapshot['id'],
+                        '_persona_snapshot_room_id':snapshot['room_id'],
+                        '_persona_snapshot_match_number':snapshot['match_number'],
+                        '_persona_snapshot_config_hash':snapshot['config_hash'],
                         '_persona':json.loads(snapshot['config_json']),
                         '_frozen_model_hash':hashlib.sha256(snapshot['model_json'].encode('utf-8')).hexdigest()})
         return profile
@@ -2350,11 +2362,15 @@ def create_app(db_path=None):
                 profile=dict(raw)
                 snapshot=match_seat_persona_snapshot(db,room_id,match_number,'judge',profile['judge_id'])
                 persona=json.loads(snapshot['config_json']) if snapshot else persona_config_from_row(profile,'judge')
-                if snapshot:
+                if snapshot and profile['model_profile_id'] is not None:
                     frozen_profile=load_frozen_model_profile(db,snapshot)
-                    if frozen_profile:
-                        frozen_profile.update({key:profile[key] for key in ('judge_id','label','alias','ai_name') if key in profile})
-                        profile=frozen_profile
+                    if not frozen_profile:
+                        results.append({'judge_id':profile['judge_id'],'label':profile['label'],
+                            'status':'skipped','reason':'本场冻结的模型配置或所属账号已不可用；请修复凭据后重试。'})
+                        continue
+                    frozen_profile.update({key:profile[key] for key in
+                        ('judge_id','label','model_profile_id','question_id') if key in profile})
+                    profile=frozen_profile
                 profile['_persona']=persona
                 if profile['question_id'] is not None:
                     continue
@@ -2468,21 +2484,24 @@ def create_app(db_path=None):
             round_number=rnd['number']
             question=rnd['question']
             profiles=[]
+            results=[]
             for raw in rows:
                 profile=dict(raw)
                 snapshot=match_seat_persona_snapshot(db,room_id,match_number,'participant',profile['alias'])
                 persona=json.loads(snapshot['config_json']) if snapshot else persona_config_from_row(profile,'participant')
                 if snapshot:
                     frozen_profile=load_frozen_model_profile(db,snapshot)
-                    if frozen_profile:
-                        frozen_profile.update({key:profile[key] for key in ('judge_id','label','alias','ai_name') if key in profile})
-                        profile=frozen_profile
+                    if not frozen_profile:
+                        results.append({'alias':profile['alias'],'status':'skipped',
+                            'reason':'本场冻结的模型配置或所属账号已不可用；请修复凭据后重试。'})
+                        continue
+                    frozen_profile.update({key:profile[key] for key in ('alias','ai_name') if key in profile})
+                    profile=frozen_profile
                 profile['_persona']=persona
                 profiles.append(profile)
             history_by_alias={profile['alias']:anonymous_player_history(db,room_id,profile['alias'],round_number-1,
                 (profile.get('_persona') or {}).get('history_rounds',5)) for profile in profiles}
             roster_revision=participant_roster_revision(db,room_id)
-        results=[]
         async def generate_one(profile):
             alias=profile['alias']
             history=history_by_alias.get(alias,'（此前没有已完成轮次。）')
@@ -2498,7 +2517,8 @@ def create_app(db_path=None):
                     return '当前轮次、问题或答题期限已变化；未向服务商发送请求。'
                 if participant_roster_revision(db,room_id)!=roster_revision:
                     return '参赛名单已变化；旧回答不能写入当前比赛。'
-                current_history=anonymous_player_history(db,room_id,alias,round_number-1)
+                current_history=anonymous_player_history(db,room_id,alias,round_number-1,
+                    persona.get('history_rounds',5))
                 if current_history!=history:
                     return '该 AI 参赛席自己的历史回答已变化；旧回答不能写入当前比赛。'
                 binding=db.execute('SELECT model_profile_id FROM ai_players WHERE room_id=? AND alias=?',
@@ -4567,9 +4587,12 @@ def create_app(db_path=None):
                 persona=json.loads(snapshot['config_json']) if snapshot else persona_config_from_row(profile,'judge')
                 if snapshot:
                     frozen_profile=load_frozen_model_profile(db,snapshot)
-                    if frozen_profile:
-                        frozen_profile.update({key:profile[key] for key in ('judge_id','label','alias','ai_name') if key in profile})
-                        profile=frozen_profile
+                    if not frozen_profile:
+                        results.append({'judge_id':profile['judge_id'],'status':'skipped',
+                            'reason':'本场冻结的模型配置或所属账号已不可用；请修复凭据后重试。'})
+                        continue
+                    frozen_profile.update({key:profile[key] for key in ('judge_id','label') if key in profile})
+                    profile=frozen_profile
                 profile['_persona']=persona
                 profiles.append(profile)
             retry_of=getattr(request.state,'model_operation_retry_of',None)
