@@ -3867,10 +3867,15 @@ def create_app(db_path=None):
             db.execute('INSERT INTO rounds(room_id,number,created_at) VALUES(?,?,?)',
                        (room_id,next_num,utcnow()))
             db.execute('UPDATE rooms SET current_round=? WHERE id=?',(next_num,room_id))
+            next_round_row=current_round(db,room,next_num)
+            workflow_id,_,_=create_round_workflow(
+                db,room,u,next_round_row,mode='prepare_only',include_ai_questions=True,
+                idempotency_key=f'prepare:{room["match_number"]}:{next_num}')
             log_event(db,room_id,next_num,'new_round','管理员','进入下一轮')
         app.state.hub.typing.pop(room_id,None)
+        app.state.workflow_worker.wake()
         await app.state.hub.notify(room_id,'new_round')
-        return {'number':next_num}
+        return {'number':next_num,'workflow_id':workflow_id}
 
     @app.get('/api/rooms/{room_id}/rounds/{number}/log')
     def download_log(room_id:int,number:int,request:Request):
