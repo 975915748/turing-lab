@@ -441,6 +441,54 @@ def test_ai_question_uses_frozen_profile_when_profile_changes_during_provider_ca
     assert task['result_applied'] is True
     assert room['model_request_count'] == 1
 
+def test_short_persona_keeps_full_frozen_token_budget_for_final_verdict(operation_lab):
+    lab = operation_lab
+    admin, p1, p2, base, profile_id = (
+        lab['admin'], lab['p1'], lab['p2'], lab['base'], lab['profile_id'])
+    judge = add_ai_judge(admin, base, '短档最终判断裁判', profile_id)
+    put(admin, base + f"/ai-judges/{judge['id']}/persona", {
+        "preset_id": "language_detail",
+        "custom_system_prompt": "",
+        "output_length": "short",
+        "history_rounds": 0,
+    })
+
+    # First AI judge question freezes the persona and model parameters.
+    question_result = post(admin, base + "/ai-judges/questions/generate")
+    assert question_result['generated'] == 1
+    assert lab['state']['requests'][-1]['max_tokens'] == 256
+
+    # Later edits to the personal profile must not replace the frozen model.
+    changed = dict(lab['profile_body'], model='changed-live-model', api_key='')
+    put(admin, f"/api/me/models/{profile_id}", changed)
+
+    post(admin, base + "/start")
+    post(p1, base + "/answers", {"text": "我会先核对事实，再调整自己的判断。"})
+    post(p2, base + "/answers", {"text": "我会结合上下文分析表达习惯。"})
+    assert admin.get(base).json()['rounds'][0]['status'] == 'revealed'
+
+    verdict_result = post(admin, base + "/ai-judges/verdicts/generate")
+    assert verdict_result['generated'] == 1
+    request = lab['state']['requests'][-1]
+    assert request['model'] == lab['profile_body']['model']
+    assert request['max_tokens'] == lab['profile_body']['max_tokens']
+    assert request['temperature'] == lab['profile_body']['temperature']
+    assert '约 80 个中文字符' in request['system']
+    assert '不得截断或省略 JSON 字段' in request['system']
+    with db_open(lab['path']) as db:
+        row = db.execute(
+            'SELECT verdict_json,locked_at FROM ai_judge_verdicts WHERE room_id=? AND ai_judge_id=?',
+            (lab['room_id'], judge['id'])).fetchone()
+        assert row and row['locked_at']
+        verdict = json.loads(row['verdict_json'])
+        assert set(verdict['predictions']) == {'A', 'B'}
+        task = db.execute(
+            "SELECT state,result_applied FROM model_operation_tasks "
+            "WHERE room_id=? AND purpose='judge_verdict' ORDER BY id DESC LIMIT 1",
+            (lab['room_id'],)).fetchone()
+        assert task['state'] == 'completed' and task['result_applied'] == 1
+
+
 def test_startup_marks_unfinished_tasks_interrupted_without_replaying(operation_lab):
     lab = operation_lab
     admin, base, profile_id = lab['admin'], lab['base'], lab['profile_id']
