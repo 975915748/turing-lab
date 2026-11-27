@@ -84,6 +84,7 @@ def test_match_persona_snapshot_is_immutable_and_revealed_without_secrets():
     db.execute("UPDATE model_profiles SET model='changed-model' WHERE id=11")
     rows = revealed_persona_rows(db, 1, 3)
     assert rows[0]["persona_name"] == "严谨分析者"
+    assert "事实依据" in rows[0]["style_prompt"]
     assert rows[0]["output_length"] == "short"
     assert rows[0]["model_name"] == "frozen-model"
     assert rows[0]["model_temperature"] == 0.3
