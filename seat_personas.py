@@ -96,6 +96,22 @@ def freeze_match_personas(db,room,*,source="workflow"):
       config_json,model_json,config_hash,frozen_at) VALUES(?,?,?,?,?,?,?,?,?)""",
       (room_id,match_number,seat_type,str(row[key_column]),row[label_column],cj,mj,digest,frozen_at))
  return True
+def freeze_new_manual_participant_seat(db,room,alias,name):
+ """Freeze a manual recovery seat added after the match snapshot already exists."""
+ room_id=int(room["id"]); match_number=int(room["match_number"])
+ freeze=db.execute("SELECT frozen_at FROM match_persona_freezes WHERE room_id=? AND match_number=?",
+                   (room_id,match_number)).fetchone()
+ if not freeze: return False
+ config=normalize_persona_config("participant")
+ cj=json.dumps(config,ensure_ascii=False,sort_keys=True,separators=(",",":"))
+ digest=hashlib.sha256((cj+"\\0").encode("utf-8")).hexdigest()
+ db.execute("""INSERT INTO match_seat_persona_snapshots(room_id,match_number,seat_type,seat_key,
+     seat_label,config_json,model_json,config_hash,frozen_at)
+     VALUES(?,?,'participant',?,?,?,NULL,?,?)""",
+     (room_id,match_number,str(alias),str(name),cj,digest,freeze["frozen_at"]))
+ return True
+
+
 def revealed_persona_rows(db,room_id,match_number):
  rows=db.execute("""SELECT seat_type,seat_key,seat_label,config_json,model_json FROM match_seat_persona_snapshots
   WHERE room_id=? AND match_number=? ORDER BY CASE seat_type WHEN 'participant' THEN 0 ELSE 1 END,seat_key""",
