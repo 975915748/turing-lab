@@ -4369,6 +4369,22 @@ def create_app(db_path=None):
             app.state.hub.typing.get(room_id,{}).pop(websocket,None)
             await app.state.hub.typing_status(room_id)
 
+    app.state.workflow_worker=PersistentWorkflowWorker(
+        claim_next=claim_next_workflow,
+        process=process_round_workflow,
+        on_error=fail_round_workflow,
+        poll_interval=0.5,
+    )
+
+    @app.on_event('startup')
+    async def start_round_workflow_worker():
+        await app.state.workflow_worker.start()
+        app.state.workflow_worker.wake()
+
+    @app.on_event('shutdown')
+    async def stop_round_workflow_worker():
+        await app.state.workflow_worker.stop()
+
     register_social_routes(
         app, connection=connection, caller=caller, hub=app.state.hub,
         auth=auth, db_open=db_open, check_origin=check_origin, cookie=COOKIE,
