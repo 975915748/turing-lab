@@ -889,6 +889,39 @@ async function logout(page) {
       assert.equal(await page.locator('form[data-form="personal-model-create"]').count(), 0);
       await page.unroute('**/api/me/models');
 
+      // A delayed 401 from A's old request must not clear B's newly authenticated state.
+      await logout(page);
+      await page.getByRole('button', { name: '使用旧登录名', exact: true }).click();
+      await page.locator('[name="username"]').fill('browser_admin');
+      await page.locator('[name="password"]').fill('browser-password');
+      await clickSubmit(page, 'login');
+      await uidIs(page, 'TL00000001');
+      let releaseExpiredList, expiredListStartedResolve;
+      const expiredListGate = new Promise(resolve => { releaseExpiredList = resolve; });
+      const expiredListStarted = new Promise(resolve => { expiredListStartedResolve = resolve; });
+      await page.route('**/api/me/models', async route => {
+        if (route.request().method() !== 'GET') return route.continue();
+        expiredListStartedResolve();
+        await expiredListGate;
+        const headers = await route.request().allHeaders();
+        const response = await route.fetch({ headers });
+        assert.equal(response.status(), 401, '注销后的 A 会话必须得到 401');
+        await route.fulfill({ response });
+      });
+      await page.locator('[data-action="personal-center"]').click();
+      await expiredListStarted;
+      await logout(page);
+      await page.locator('[name="uid"]').fill(otherMe.user.uid);
+      await page.locator('[name="password"]').fill('model-page-race-password');
+      await clickSubmit(page, 'login');
+      await uidIs(page, otherMe.user.uid);
+      releaseExpiredList();
+      await page.waitForTimeout(250);
+      assert.equal(await page.evaluate(() => state.me?.user?.uid), otherMe.user.uid,
+        'A 的迟到 401 不能清除 B 的当前登录状态');
+      assert.equal(await page.locator('form[data-form="login"]').count(), 0);
+      await page.unroute('**/api/me/models');
+
       // Same-account navigation must also invalidate delayed edit and delete renders.
       await page.locator('[data-action="personal-center"]').click();
       const profile = page.locator('details[data-model-config][data-id="' + otherProfile.id + '"]');
@@ -920,7 +953,7 @@ async function logout(page) {
       const profileAfterEdit = page.locator('details[data-model-config][data-id="' + otherProfile.id + '"]');
       await profileAfterEdit.waitFor();
       assert.equal(await profileAfterEdit.locator('[name="model"]').inputValue(), 'edited-before-navigation');
-      await profileAfterEdit.locator('summary').click();
+      if (!await profileAfterEdit.evaluate(element => element.open)) await profileAfterEdit.locator('summary').click();
       let releaseDelete, deleteStartedResolve;
       const deleteGate = new Promise(resolve => { releaseDelete = resolve; });
       const deleteStarted = new Promise(resolve => { deleteStartedResolve = resolve; });

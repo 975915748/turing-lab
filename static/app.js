@@ -15,6 +15,7 @@ $('#themeBtn').addEventListener('click',()=>{localStorage.setItem('turing_theme'
 $('#fontSize').addEventListener('input',e=>{localStorage.setItem('turing_font',e.target.value);applyPrefs()});
 $('#logoutBtn').addEventListener('click',async()=>{try{await api('/api/logout',{method:'POST'});}catch(e){toast(e.message)} state.me=null;state.room=null;state.roomId=null;state.personalModels=[];clearPersonalModelState();state.chat=[];state.chatDraft='';state.drafts={};state.personalReturn=null;state.tab='login';state.legacyLogin=false;stopWs();history.replaceState(null,'',location.pathname);await init()});
 async function api(path,{method='GET',body,raw=false,matchNumber,roundNumber,idempotencyKey}={}){
+ const requestAccountEpoch=state.personalModelEpoch,requestUid=state.me?.user?.uid,requestCsrf=state.me?.user?.csrf;
  const opts={method,headers:{}};
  if(body!==undefined){opts.headers['Content-Type']='application/json';opts.body=JSON.stringify(body)}
  if(method!=='GET'&&state.me?.user?.csrf)opts.headers['X-CSRF-Token']=state.me.user.csrf;
@@ -26,7 +27,7 @@ async function api(path,{method='GET',body,raw=false,matchNumber,roundNumber,ide
  try{response=await fetch(path,opts)}catch(error){error.networkFailure=true;throw error}
  if(raw){if(!response.ok){const error=new Error('下载失败');error.status=response.status;throw error;}return response.blob()}
  const data=await response.json().catch(()=>({detail:'网络连接错误'}));
- if(!response.ok){if(response.status===401&&state.me){state.me=null;state.room=null;state.roomId=null;state.personalModels=[];clearPersonalModelState();state.chat=[];state.chatDraft='';state.drafts={};stopWs();renderAuth();}const error=new Error(typeof data.detail==='string'?data.detail:'请求失败');error.status=response.status;throw error;}
+ if(!response.ok){if(response.status===401&&state.me&&state.personalModelEpoch===requestAccountEpoch&&state.me?.user?.uid===requestUid&&state.me?.user?.csrf===requestCsrf){state.me=null;state.room=null;state.roomId=null;state.personalModels=[];clearPersonalModelState();state.chat=[];state.chatDraft='';state.drafts={};stopWs();renderAuth();}const error=new Error(typeof data.detail==='string'?data.detail:'请求失败');error.status=response.status;throw error;}
  return data;
 }
 function newIdempotencyKey(){return globalThis.crypto?.randomUUID?.()||('op-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2));}
@@ -283,9 +284,14 @@ async function openPersonalCenter(options={}){
  else if(!state.personalReturn)state.personalReturn=profileReturnFromHash();
  stopWs();const back=state.personalReturn;const hash=back?.roomId?`#profile?room=${back.roomId}&view=${encodeURIComponent(back.view)}&round=${back.round||1}`:'#profile';history.replaceState(null,'',hash);
  const context={accountEpoch:state.personalModelEpoch,pageEpoch:epoch,uid,csrf};
- await loadPersonalModels();if(!isCurrentPersonalCenterContext(context))return;
- await loadModelOperationRecords();if(!isCurrentPersonalCenterContext(context))return;
- renderPersonalCenter();
+ try{
+  await loadPersonalModels();if(!isCurrentPersonalCenterContext(context))return;
+  await loadModelOperationRecords();if(!isCurrentPersonalCenterContext(context))return;
+  renderPersonalCenter();
+ }catch(error){
+  if(!isCurrentPersonalCenterContext(context))return;
+  throw error;
+ }
 }
 async function returnFromPersonalCenter(){
  const back=state.personalReturn;state.personalReturn=null;
