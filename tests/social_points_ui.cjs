@@ -316,7 +316,7 @@ function friendDmButton(page, uid) {
     const delayedReady = new Promise(resolve => { signalDelayedResponseReady = resolve; });
     const delayedResponsePromise = pageA.waitForResponse(response =>
       response.url().endsWith('/api/messages/' + encodeURIComponent(uidB)) &&
-      response.request().method() === 'POST');
+      response.request().method() === 'POST', { timeout: 0 });
     await pageA.route('**/api/messages/' + uidB, async route => {
       if (route.request().method() !== 'POST') { await route.continue(); return; }
       const response = await route.fetch();
