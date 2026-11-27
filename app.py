@@ -1689,48 +1689,45 @@ def create_app(db_path=None):
                     if not task or task['state']!='queued':
                         outcome='stale'
                         outcome_reason='模型任务已不再处于排队状态。'
-                    elif task['workflow_id'] is not None:
-                        workflow=db.execute('SELECT state,execution_generation FROM round_workflows WHERE id=?',
-                                             (task['workflow_id'],)).fetchone()
-                        if (not workflow or workflow['execution_generation']!=task['workflow_generation'] or
-                                workflow['state'] not in ('generating_questions','starting_round','generating_answers')):
-                            outcome='stale'
-                            outcome_reason='比赛工作流执行代次已变化；旧模型任务未发送。'
-                        else:
-                            room_id=task['room_id']
                     else:
                         room_id=task['room_id']
-                        if preflight is not None:
+                        if task['workflow_id'] is not None:
+                            workflow=db.execute('SELECT state,execution_generation FROM round_workflows WHERE id=?',
+                                                 (task['workflow_id'],)).fetchone()
+                            if (not workflow or workflow['execution_generation']!=task['workflow_generation'] or
+                                    workflow['state'] not in ('generating_questions','starting_round','generating_answers')):
+                                outcome='stale'
+                                outcome_reason='比赛工作流执行代次已变化；旧模型任务未发送。'
+                        if outcome is None and preflight is not None:
                             preflight_result=preflight()
                             if preflight_result is not True:
                                 outcome_reason=preflight_result if isinstance(preflight_result,str) else ''
-                                finish_model_operation_in_db(db,operation_id,'stale',
-                                    error=outcome_reason or '排队期间权限、配置或比赛上下文发生变化；未向服务商发送请求。')
                                 outcome='stale'
                         if outcome is None:
                             room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone() if room_id is not None else None
                             if room_id is not None and (not room or room['match_number']!=task['match_number']):
                                 outcome_reason='房间或比赛场次已变化；未向服务商发送请求。'
-                                finish_model_operation_in_db(db,operation_id,'stale',error=outcome_reason)
                                 outcome='stale'
+                            elif room_id is not None:
+                                attempts=model_request_count(db,room_id,task['match_number'])
+                                limit=room['model_request_limit']
+                                if limit is not None and attempts>=limit:
+                                    outcome='blocked'
+                            if outcome is not None:
+                                finish_model_operation_in_db(
+                                    db,operation_id,outcome,error=outcome_reason or
+                                    ('本场模型请求次数已达上限；请提高上限或手动转录。' if outcome=='blocked' else
+                                     '排队期间权限、配置或比赛上下文发生变化；未向服务商发送请求。'))
                             else:
-                                if room_id is not None:
-                                    attempts=model_request_count(db,room_id,task['match_number'])
-                                    limit=room['model_request_limit']
-                                    if limit is not None and attempts>=limit:
-                                        finish_model_operation_in_db(db,operation_id,'blocked',
-                                            error='本场模型请求次数已达上限；请提高上限或手动转录。')
-                                        outcome='blocked'
-                                if outcome is None:
-                                    now=operation_timestamp()
-                                    try:
-                                        queued=datetime.fromisoformat(task['queued_at'])
-                                        wait_ms=max(0,int((datetime.now(timezone.utc)-queued).total_seconds()*1000))
-                                    except (TypeError,ValueError):
-                                        wait_ms=0
-                                    db.execute("""UPDATE model_operation_tasks SET state='requesting',
-                                        request_started_at=?,queue_ms=?,updated_at=?
-                                        WHERE id=? AND state='queued'""",(now,wait_ms,now,operation_id))
+                                now=operation_timestamp()
+                                try:
+                                    queued=datetime.fromisoformat(task['queued_at'])
+                                    wait_ms=max(0,int((datetime.now(timezone.utc)-queued).total_seconds()*1000))
+                                except (TypeError,ValueError):
+                                    wait_ms=0
+                                db.execute("""UPDATE model_operation_tasks SET state='requesting',
+                                    request_started_at=?,queue_ms=?,updated_at=?
+                                    WHERE id=? AND state='queued'""",(now,wait_ms,now,operation_id))
                 if outcome is not None:
                     if room_id is not None:
                         await app.state.hub.notify(room_id,'model_operation_updated')
