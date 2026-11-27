@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -222,9 +223,10 @@ def test_persona_api_freezes_and_allows_preparation_reset(tmp_path):
     app = create_app(path)
     admin, player_a, player_b = (TestClient(app) for _ in range(3))
 
-    def request(client, method, url, data=None, expected=200):
+    def request(client, method, url, data=None, expected=200, extra_headers=None):
         me = client.get("/api/me")
         headers = {"X-CSRF-Token": me.json()["user"]["csrf"]} if me.status_code == 200 else {}
+        headers.update(extra_headers or {})
         response = client.request(method, url, json=data or {}, headers=headers)
         assert response.status_code == expected, (url, response.status_code, response.text)
         return response.json() if response.content else {}
@@ -295,6 +297,20 @@ def test_persona_api_freezes_and_allows_preparation_reset(tmp_path):
     # entered AI judge question based on the old roster must not start the round.
     request(admin, "POST", base + f"/ai-judges/{judge['id']}/questions",
             {"text": "请描述一次你修正错误判断的经历。"})
+    prepared = request(admin, "POST", base + "/round-workflows", {
+        "match_number": room["match_number"], "round_number": 1,
+        "mode": "prepare_only", "include_ai_questions": False,
+    }, expected=202, extra_headers={"Idempotency-Key": "persona-completed-preparation"})
+    workflow_id = prepared["workflow"]["id"]
+    workflow_state = None
+    for _ in range(200):
+        current = admin.get(base).json()
+        workflow_state = (current.get("round_workflow") or {}).get("state")
+        if workflow_state == "completed":
+            break
+        time.sleep(0.01)
+    assert workflow_state == "completed", "已有人工 AI 裁判问题时，prepare-only 工作流应完成"
+
     late_player = TestClient(app)
     request(late_player, "POST", "/api/register", {
         "username": "persona_player_late", "display_name": "迟到参赛者",
@@ -308,6 +324,9 @@ def test_persona_api_freezes_and_allows_preparation_reset(tmp_path):
     with sqlite3.connect(path) as db:
         assert db.execute("SELECT COUNT(*) FROM ai_judge_questions WHERE room_id=?",
                           (room["room_id"],)).fetchone()[0] == 0
+        workflow_state = db.execute("SELECT state FROM round_workflows WHERE id=?",
+                                     (workflow_id,)).fetchone()[0]
+        assert workflow_state == "cancelled", "重置必须使已完成的旧准备工作流失效"
     request(admin, "PUT", base + f"/ai/{ai['alias']}/persona", participant_config)
 
     request(admin, "POST", base + f"/ai-judges/{judge['id']}/questions",
@@ -347,6 +366,54 @@ def test_persona_api_freezes_and_allows_preparation_reset(tmp_path):
         assert "严谨分析者" not in exported.text
         assert "语言细节" not in exported.text
 
+
+
+def test_prestart_legacy_freeze_without_roster_revision_requires_reset(tmp_path):
+    path = tmp_path / "legacy-persona-freeze.sqlite3"
+    seed_admin(path, "persona_admin", "人设管理员", "persona-admin-password")
+    app = create_app(path)
+    admin, player_a, player_b = (TestClient(app) for _ in range(3))
+
+    def request(client, method, url, data=None, expected=200):
+        me = client.get("/api/me")
+        headers = {"X-CSRF-Token": me.json()["user"]["csrf"]} if me.status_code == 200 else {}
+        response = client.request(method, url, json=data or {}, headers=headers)
+        assert response.status_code == expected, (url, response.status_code, response.text)
+        return response.json() if response.content else {}
+
+    request(admin, "POST", "/api/login",
+            {"username": "persona_admin", "password": "persona-admin-password"})
+    room = request(admin, "POST", "/api/rooms", {"title": "旧版快照缺少名单指纹"})
+    base = f"/api/rooms/{room['room_id']}"
+    for index, client in enumerate((player_a, player_b)):
+        request(client, "POST", "/api/register", {
+            "username": f"legacy_persona_player_{index}",
+            "display_name": f"参赛者 {index}",
+            "password": "persona-player-password",
+            "code": room["code"],
+        })
+    judge = request(admin, "POST", base + "/ai-judges", {"name": "旧版手动 AI 裁判"})
+    with sqlite3.connect(path) as db:
+        db.execute("""INSERT INTO match_persona_freezes(
+            room_id,match_number,frozen_at,source,participant_roster_revision)
+            VALUES(?,1,'2026-11-27T00:00:00+00:00','legacy',NULL)""",
+            (room["room_id"],))
+    request(admin, "POST", base + f"/ai-judges/{judge['id']}/questions",
+            {"text": "请描述一次你修正错误判断的经历。"})
+    request(admin, "POST", base + "/start", expected=409)
+
+    reset = request(admin, "POST", base + "/personas/reset-preparation", {"confirm": True})
+    assert reset["reset"] is True
+    request(admin, "POST", base + f"/ai-judges/{judge['id']}/questions",
+            {"text": "请结合当前名单描述一次你修正错误判断的经历。"})
+    request(admin, "POST", base + "/start")
+
+    with sqlite3.connect(path) as db:
+        stored_revision = db.execute(
+            "SELECT participant_roster_revision FROM match_persona_freezes WHERE room_id=?",
+            (room["room_id"],),
+        ).fetchone()[0]
+        assert stored_revision == participant_roster_revision(db, room["room_id"])
 
 def test_poststart_roster_recovery_invalidates_current_round_ai_questions(tmp_path):
     path = tmp_path / "persona-poststart-recovery.sqlite3"

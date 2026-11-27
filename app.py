@@ -1255,8 +1255,10 @@ def ensure_persona_participant_roster_unchanged(db,room):
     frozen=db.execute('''SELECT participant_roster_revision FROM match_persona_freezes
         WHERE room_id=? AND match_number=?''',(room['id'],room['match_number'])).fetchone()
     expected=frozen['participant_roster_revision'] if frozen else None
-    if expected and expected!=participant_roster_revision(db,room['id']):
-        raise HTTPException(409,'首轮准备期间参赛名单或匿名代号已变化；请取消准备并重新入队。')
+    # A pre-upgrade freeze may have no roster fingerprint. Fail closed rather
+    # than silently trusting a snapshot whose original roster cannot be verified.
+    if frozen and (not expected or expected!=participant_roster_revision(db,room['id'])):
+        raise HTTPException(409,'首轮准备期间参赛名单或匿名代号已变化，或旧快照缺少名单校验；请取消准备并重新入队。')
 
 
 def start_round_record(db, room, rnd, question):
@@ -4241,9 +4243,10 @@ def create_app(db_path=None):
                     room['match_started_at'] or room['current_round']!=1 or rnd['status']!='draft'):
                 raise HTTPException(409,'只有首轮尚未开始的比赛才能取消准备并编辑人设。')
             workflows=db.execute('''SELECT id FROM round_workflows
-                WHERE room_id=? AND match_number=? AND state IN
-                ('queued','generating_questions','starting_round','generating_answers',
-                 'waiting_input','blocked','failed')''',
+                WHERE room_id=? AND match_number=? AND
+                (state IN ('queued','generating_questions','starting_round','generating_answers',
+                           'waiting_input','blocked','failed') OR
+                 (state='completed' AND mode='prepare_only'))''',
                 (room_id,room['match_number'])).fetchall()
             if not is_match_persona_frozen(db,room_id,room['match_number']) and not workflows:
                 return {'ok':True,'reset':False}
