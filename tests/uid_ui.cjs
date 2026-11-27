@@ -703,6 +703,7 @@ async function logout(page) {
         headers, data: { name: 'Persona Judge', model_profile_id: profile.id },
       });
       assert.equal(addJudge.status(), 200, await addJudge.text());
+      const judgeSeat = await addJudge.json();
 
       const playerContexts = [];
       for (const username of ['persona_ui_human_a', 'persona_ui_human_b']) {
@@ -713,6 +714,19 @@ async function logout(page) {
         });
         assert.equal(joined.status(), 200, await joined.text());
       }
+
+      const judgeContext = await browser.newContext();
+      const judgeRegistered = await judgeContext.request.post(site + '/api/register', {
+        data: { username: 'persona_ui_human_judge', display_name: '人设验收裁判',
+          password: 'persona-ui-password' },
+      });
+      assert.equal(judgeRegistered.status(), 200, await judgeRegistered.text());
+      const judgeAccount = await (await judgeContext.request.get(site + '/api/me')).json();
+      const judgeJoin = await judgeContext.request.post(site + '/api/join', {
+        headers: { 'X-CSRF-Token': judgeAccount.user.csrf },
+        data: { code: room.invite_code, role: 'judge' },
+      });
+      assert.equal(judgeJoin.status(), 200, await judgeJoin.text());
 
       await page.locator('[data-action="sync"]').click();
       await page.locator('[data-action="room-view"][data-view="admin"]').click();
@@ -795,6 +809,48 @@ async function logout(page) {
       const finalRoom = await (await context.request.get(site + base)).json();
       assert.equal(finalRoom.ais[0].persona.preset_id, 'custom');
       assert.equal(finalRoom.ais[0].persona.custom_system_prompt, customStyle);
+
+      // Complete the match and verify that a human judge sees the frozen
+      // persona details only after formal reveal.
+      const manualQuestion = await context.request.post(
+        site + base + `/ai-judges/${judgeSeat.id}/questions`,
+        { headers, data: { text: '请描述一次你修正错误判断的经历。' } });
+      assert.equal(manualQuestion.status(), 200, await manualQuestion.text());
+      const started = await context.request.post(site + base + '/start', { headers });
+      assert.equal(started.status(), 200, await started.text());
+      const liveRoom = await (await context.request.get(site + base)).json();
+      for (let i = 0; i < playerContexts.length; i++) {
+        const playerMe = await (await playerContexts[i].request.get(site + '/api/me')).json();
+        const answer = await playerContexts[i].request.post(site + base + '/answers', {
+          headers: { 'X-CSRF-Token': playerMe.user.csrf },
+          data: { text: '这是第 ' + (i + 1) + ' 位人类参赛者的回答。' },
+        });
+        assert.equal(answer.status(), 200, await answer.text());
+      }
+      const aiAnswer = await context.request.post(site + base + '/ai/answers/generate', { headers });
+      assert.equal(aiAnswer.status(), 200, await aiAnswer.text());
+      const aliases = [...liveRoom.humans.map(item => item.alias), ...liveRoom.ais.map(item => item.alias)];
+      const predictions = Object.fromEntries(aliases.map((alias, index) =>
+        [alias, index === 0 ? 'Human' : 'AI']));
+      const judgeVerdict = await judgeContext.request.post(site + base + '/judge-verdict', {
+        headers: { 'X-CSRF-Token': judgeAccount.user.csrf },
+        data: { predictions, evidence: '依据匿名回答作出判断。', confidence: 80 },
+      });
+      assert.equal(judgeVerdict.status(), 200, await judgeVerdict.text());
+      const aiVerdict = await context.request.post(
+        site + base + `/ai-judges/${judgeSeat.id}/verdict`,
+        { headers, data: { predictions, evidence: '依据匿名回答作出判断。', confidence: 80 } });
+      assert.equal(aiVerdict.status(), 200, await aiVerdict.text());
+      const revealed = await context.request.post(site + base + '/reveal', { headers });
+      assert.equal(revealed.status(), 200, await revealed.text());
+
+      const judgePage = await judgeContext.newPage();
+      await judgePage.goto(site + '#room=' + roomId);
+      await judgePage.getByRole('heading', { name: '本场 AI 席位人设', exact: true }).waitFor();
+      assert((await judgePage.locator('#app').innerText()).includes(customStyle));
+      await judgePage.close();
+      await judgeContext.close();
+
       await screenshot(page, 'ai-seat-personas-desktop-light.png');
       await page.setViewportSize({ width: 390, height: 844 });
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
