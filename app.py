@@ -3662,6 +3662,7 @@ def create_app(db_path=None):
                 raise HTTPException(404,'AI 裁判席不存在。')
             if body.keep_existing:
                 return {'ok':True,'unchanged':True}
+            require_persona_editable(db,room)
             if room['status']!='open' or room['verdict_locked_at'] or db.execute(
                 'SELECT 1 FROM judge_verdicts WHERE room_id=? LIMIT 1',(room_id,)).fetchone() or db.execute(
                 'SELECT 1 FROM ai_judge_verdicts WHERE room_id=? LIMIT 1',(room_id,)).fetchone():
@@ -4018,6 +4019,7 @@ def create_app(db_path=None):
                 raise HTTPException(404,'AI 参赛席不存在。')
             if body.keep_existing:
                 return {'ok':True,'unchanged':True}
+            require_persona_editable(db,room)
             if room['status']!='open' or room['verdict_locked_at'] or db.execute(
                 'SELECT 1 FROM judge_verdicts WHERE room_id=? LIMIT 1',(room_id,)).fetchone() or db.execute(
                 'SELECT 1 FROM ai_judge_verdicts WHERE room_id=? LIMIT 1',(room_id,)).fetchone():
