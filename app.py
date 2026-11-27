@@ -1777,7 +1777,7 @@ def create_app(db_path=None):
             profile_id,profile_owner_user_id,trigger_user_id,profile_name,model_name,
             profile_snapshot_hash,context_revision,state,retry_of,workflow_id,workflow_generation,
             idempotency_key,queued_at,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'queued',?,?,?,?,?)''',
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'queued',?,?,?,?,?,?)''',
             (room_id,match_number,round_number,purpose,target_type,str(target_key),target_label,
              profile['id'],profile['owner_user_id'],trigger_user_id,profile_name,model_name,
              model_profile_snapshot_hash(profile),context_revision,retry_of,workflow_id,
