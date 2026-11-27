@@ -741,6 +741,7 @@ async function logout(page) {
       await participantDetails.evaluate(element => { element.open = true; });
       const participantPersona = participantDetails.locator('form[data-form="seat-persona"]');
       await participantPersona.waitFor();
+      assert.equal(await participantPersona.getByText('回答历史轮数（0～100）', { exact: true }).count(), 1);
       await participantPersona.locator('[name="preset_id"]').selectOption('analytical');
       await participantPersona.locator('[name="output_length"]').selectOption('medium');
       await participantPersona.locator('[name="history_rounds"]').fill('12');
@@ -756,6 +757,7 @@ async function logout(page) {
       await judgeDetails.evaluate(element => { element.open = true; });
       const judgePersona = judgeDetails.locator('form[data-form="seat-persona"]');
       await judgePersona.waitFor();
+      assert.equal(await judgePersona.getByText('出题历史轮数（0～100）', { exact: true }).count(), 1);
       await judgePersona.locator('[name="preset_id"]').selectOption('language_detail');
       await judgePersona.locator('[name="output_length"]').selectOption('short');
       await judgePersona.locator('[name="history_rounds"]').fill('0');
