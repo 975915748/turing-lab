@@ -2298,8 +2298,8 @@ def create_app(db_path=None):
             room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
             if not room or room['status']!='open' or room['verdict_locked_at']:
                 raise HTTPException(409,'比赛已结束或裁判判断已锁定，不能生成 AI 裁判问题。')
-            if not workflow:
-                freeze_match_personas(db,room,source='independent_question_generation')
+            if not is_match_persona_frozen(db,room_id,room['match_number']):
+                freeze_match_personas(db,room,source='question_generation')
             if workflow:
                 actor_status=workflow_actor_valid(db,workflow)
                 if actor_status is not True:
@@ -2361,11 +2361,8 @@ def create_app(db_path=None):
         async def generate_one(profile):
             judge_id=profile['judge_id']
             persona=profile.get('_persona') or {}
-            if workflow:
-                seat_history=history
-            else:
-                with connection() as history_db:
-                    seat_history=anonymous_match_packet(history_db,room_id,round_number-1,persona.get('history_rounds',5))
+            with connection() as history_db:
+                seat_history=anonymous_match_packet(history_db,room_id,round_number-1,persona.get('history_rounds',5))
             context_revision=hashlib.sha256(
                 (str(round_number)+'|'+','.join(roster)+'|'+seat_history).encode('utf-8')).hexdigest()
             def validate_context(db, judge_id=judge_id, profile=profile):
@@ -2424,6 +2421,8 @@ def create_app(db_path=None):
             room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
             if not room or room['status']!='open':
                 raise HTTPException(409,'比赛已结束。')
+            if not is_match_persona_frozen(db,room_id,room['match_number']):
+                freeze_match_personas(db,room,source='answer_generation')
             if workflow:
                 actor_status=workflow_actor_valid(db,workflow)
                 if actor_status is not True:
