@@ -722,20 +722,25 @@ function updateRoundCountdown(){
  }
 }
 function renderReadinessPanel(r){
- const x=r.readiness;if(!x||x.phase!=='draft')return '';
+ const workflowPanel=renderRoundWorkflowPanel(r);
+ const x=r.readiness;if(!x||x.phase!=='draft')return workflowPanel;
  const limit=x.model_request_limit===null?'不限':x.model_request_limit;
  const blockers=(x.blockers||[]).map(message=>'<li>'+esc(message)+'</li>').join('');
  const notices=(x.notices||[]).map(message=>'<li>'+esc(message)+'</li>').join('');
+ const wf=r.round_workflow;
+ const workflowBlocksNew=wf&&['queued','generating_questions','starting_round','generating_answers',
+  'waiting_input','blocked','failed'].includes(wf.state);
  let actions='';
- if(x.can_generate_and_start)actions+='<button class="primary" data-action="start-round" data-generate-questions="true">生成问题并开始</button>';
+ if(workflowBlocksNew)actions+='<button class="primary" disabled>服务端工作流处理中</button>';
+ else if(x.can_generate_and_start)actions+='<button class="primary" data-action="start-round" data-generate-questions="true">生成问题并开始</button>';
  else if(x.can_start)actions+='<button data-action="start-round" data-generate-questions="false">按已提交问题开始</button>';
  else actions+='<button data-action="start-round" disabled>开始本轮</button>';
- if(!x.can_start&&!x.can_generate_and_start){
+ if(!workflowBlocksNew&&!x.can_start&&!x.can_generate_and_start){
   if(x.participant_count<2)actions+='<button class="small" data-action="room-view" data-view="admin">前往参赛者管理补足参赛者</button>';
   if(x.manual_question_required)actions+='<button class="small" data-action="focus-manual-question">前往外部裁判问题录入</button>';
   else if(x.participant_count>=2&&x.suggested_view&&x.suggested_view!=='admin')actions+='<button class="small" data-action="room-view" data-view="'+esc(x.suggested_view)+'">前往裁判管理</button>';
  }
- return '<section class="card compact readiness-card"><div class="label-line"><h2>本轮准备</h2><span class="pill">'+(x.can_start?'可以开始':'尚未就绪')+'</span></div>'+
+ return workflowPanel+'<section class="card compact readiness-card"><div class="label-line"><h2>本轮准备</h2><span class="pill">'+(x.can_start?'可以开始':'尚未就绪')+'</span></div>'+
   '<div class="readiness-grid"><div><span class="tiny muted">参赛者</span><strong>'+x.participant_count+' 人已加入</strong></div>'+
   '<div><span class="tiny muted">裁判问题</span><strong>已提交 '+x.submitted_judges+' / '+x.total_judges+' 位裁判 · '+x.question_count+' 份</strong></div>'+
   '<div><span class="tiny muted">自动席位</span><strong>'+x.auto_pending+' 位可用模型 AI 裁判待出题'+(x.unavailable_ai_pending?' · '+x.unavailable_ai_pending+' 位配置不可用':'')+'</strong></div>'+
