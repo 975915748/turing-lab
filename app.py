@@ -1561,7 +1561,10 @@ def create_app(db_path=None):
                                     profile, trigger_user_id, room_id=None, match_number=None,
                                     round_number=None, context_revision=None, retry_of=None,
                                     idempotency_key=None):
-        supplied_key=(idempotency_key or '').strip()[:128] or None
+        raw_key=(idempotency_key or '').strip()
+        if len(raw_key)>128:
+            raise HTTPException(422,'Idempotency-Key 长度不能超过 128 个字符。')
+        supplied_key=raw_key or None
         profile_hash=model_profile_snapshot_hash(profile)
         scope_key=json.dumps([
             int(trigger_user_id),purpose,target_type,str(target_key),
@@ -1634,8 +1637,12 @@ def create_app(db_path=None):
             raise HTTPException(409,'原模型任务已不存在；请确认当前比赛状态后重新操作。')
         if task['state']=='failed':
             raise HTTPException(502,task['error_message'] or '原模型请求失败；如需再次尝试，请发起新的操作。')
+        if task['state'] in ('queued','requesting'):
+            raise HTTPException(409,'该幂等请求仍在处理中；请查看模型调用记录，不要发起新的模型请求。')
         if task['state'] in ('blocked','stale','interrupted'):
             raise HTTPException(409,task['error_message'] or '原模型任务未完成；如需再次尝试，请发起新的操作。')
+        if task['state']!='completed' or not task['request_succeeded']:
+            raise HTTPException(502,task['error_message'] or '原模型请求未成功；如需再次尝试，请发起新的操作。')
         usage={}
         if task['usage_known']:
             usage={
