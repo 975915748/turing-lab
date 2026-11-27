@@ -162,6 +162,7 @@ def snapshot(db):
         'account_points', 'match_settlements', 'points_ledger',
         'friend_requests', 'friendships', 'friend_notes',
         'dm_conversations', 'dm_messages', 'dm_read_positions', 'api_rate_limits',
+        'round_workflows', 'round_timeouts',
     )
     placeholders = ','.join('?' for _ in schema_additions)
     tables = [r[0] for r in db.execute(
@@ -178,11 +179,16 @@ def snapshot(db):
             for row in rows:
                 row.pop('model_request_limit', None)
                 row.pop('match_started_at', None)
-        # Exit migration adds nullable state; all original values must still match.
-        added_column={'rooms':'closed_at','members':'leave_reason','room_judges':'left_at'}.get(name)
-        if added_column:
+        # Exit, timer and workflow migrations add nullable / defaulted columns.
+        added_columns={
+            'rooms':('closed_at','round_duration_seconds'),
+            'members':('leave_reason',),
+            'room_judges':('left_at',),
+            'rounds':('started_at','duration_seconds','deadline_at','timeout_ended_at'),
+        }.get(name,())
+        for column in added_columns:
             for row in rows:
-                assert row.pop(added_column,None) is None
+                assert row.pop(column,None) is None
         result[name] = rows
     return result
 
@@ -202,12 +208,12 @@ def test_legacy_migration_preserves_all_records_backup_and_passwords(tmp_path):
             assert row.pop('records_deleted') == 0
         assert after == before
         assert db.execute('PRAGMA foreign_key_check').fetchall() == []
-    backups = list(tmp_path.glob('legacy.pre-v1_9-*.sqlite3'))
+    backups = list(tmp_path.glob('legacy.pre-v1_10-*.sqlite3'))
     assert len(backups) == 1
     with db_open(backups[0]) as db:
         assert snapshot(db) == before
     create_app(path)
-    assert len(list(tmp_path.glob('legacy.pre-v1_9-*.sqlite3'))) == 1
+    assert len(list(tmp_path.glob('legacy.pre-v1_10-*.sqlite3'))) == 1
     assert seed_admin(path, 'legacy_admin', '不覆盖', 'new-password') is False
     # All original identities retain their IDs; old username login is explicit.
     for old_name, uid in (('legacy_admin', 'TL00000007'), ('legacy_player', 'TL00000023'), ('TL00000023', 'TL00000030')):
