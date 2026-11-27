@@ -3043,9 +3043,16 @@ def create_app(db_path=None):
                     affected=room_lock_user_ids(db,room_id)
                     db.execute("UPDATE rooms SET status='closed',closed_at=? WHERE id=?",(now,room_id))
                     db.execute("""UPDATE model_operation_tasks SET state='stale',error_message=?,
-                        finished_at=?,updated_at=? WHERE room_id=? AND match_number=?
+                        finished_at=?,updated_at=?,result_applied=0 WHERE room_id=? AND match_number=?
                         AND state IN ('queued','requesting')""",
                         ('房主已关闭房间，旧任务不再应用。',now,now,room_id,room['match_number']))
+                    db.execute("""UPDATE round_workflows SET state='cancelled',stage='cancelled',
+                        execution_generation=execution_generation+1,worker_token=NULL,
+                        waiting_reason=NULL,error_message='房主已关闭房间，工作流已取消。',
+                        finished_at=?,updated_at=? WHERE room_id=? AND match_number=?
+                        AND state IN ('queued','generating_questions','starting_round','generating_answers',
+                                      'waiting_input','blocked','failed')""",
+                        (now,now,room_id,room['match_number']))
                     log_event(db,room_id,room['current_round'],'room_closed','房主','关闭房间；保留记录，不结算积分')
                 else:
                     if member and member['removed_at'] is None:
