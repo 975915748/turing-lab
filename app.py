@@ -827,11 +827,14 @@ def model_profile_snapshot_valid(db, profile):
         return False
     current=dict(row)
     if profile.get('_persona_snapshot_id') is not None:
-        snapshot=db.execute('''SELECT config_hash,model_json FROM match_seat_persona_snapshots
+        snapshot=db.execute('''SELECT config_hash,config_json,model_json FROM match_seat_persona_snapshots
             WHERE id=? AND room_id=? AND match_number=?''',
             (profile['_persona_snapshot_id'],profile.get('_persona_snapshot_room_id'),
              profile.get('_persona_snapshot_match_number'))).fetchone()
+        actual_snapshot_hash=(hashlib.sha256((snapshot['config_json']+"\\0"+(snapshot['model_json'] or "")).encode('utf-8')).hexdigest()
+                              if snapshot else None)
         frozen=bool(snapshot and snapshot['config_hash']==profile.get('_persona_snapshot_config_hash')
+                    and snapshot['config_hash']==actual_snapshot_hash
                     and snapshot['model_json'] is not None
                     and hashlib.sha256(snapshot['model_json'].encode('utf-8')).hexdigest()==profile.get('_frozen_model_hash')
                     and is_match_persona_frozen(db,profile.get('_persona_snapshot_room_id'),

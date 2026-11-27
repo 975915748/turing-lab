@@ -41,12 +41,18 @@ def delete(client, path, expected=200):
 def operation_lab(tmp_path, monkeypatch):
     monkeypatch.setenv('MODEL_CREDENTIAL_KEY', Fernet.generate_key().decode('ascii'))
     monkeypatch.setattr(app_module, 'validate_base_url', lambda value: value.strip().rstrip('/'))
-    state = {'calls': 0, 'fail_next': 0, 'block': None}
+    state = {'calls': 0, 'fail_next': 0, 'block': None, 'requests': []}
     lock = threading.Lock()
 
     async def fake_chat(profile, messages, api_key):
         with lock:
             state['calls'] += 1
+            state['requests'].append({
+                'model': profile.get('model'),
+                'max_tokens': profile.get('max_tokens'),
+                'temperature': profile.get('temperature'),
+                'system': messages[0]['content'] if messages else '',
+            })
             fail = state['fail_next'] > 0
             if fail:
                 state['fail_next'] -= 1
@@ -102,6 +108,48 @@ def operation_lab(tmp_path, monkeypatch):
 
 def add_ai_judge(client, base, name, profile_id):
     return post(client, base + '/ai-judges', {'name': name, 'model_profile_id': profile_id})
+
+
+def test_persona_presets_change_mock_prompts_and_output_limits(operation_lab):
+    lab = operation_lab
+    admin, base, profile_id = lab['admin'], lab['base'], lab['profile_id']
+    judge = add_ai_judge(admin, base, '语言细节裁判', profile_id)
+    analytical = post(admin, base + '/ai', {'name': '严谨参赛席', 'model_profile_id': profile_id})
+    custom = post(admin, base + '/ai', {'name': '自定义参赛席', 'model_profile_id': profile_id})
+
+    put(admin, base + f"/ai-judges/{judge['id']}/persona", {
+        'preset_id': 'language_detail', 'custom_system_prompt': '',
+        'output_length': 'short', 'history_rounds': 0,
+    })
+    put(admin, base + f"/ai/{analytical['alias']}/persona", {
+        'preset_id': 'analytical', 'custom_system_prompt': '',
+        'output_length': 'medium', 'history_rounds': 5,
+    })
+    custom_style = '使用自然口语，只给出直接回应，不使用分点列表。'
+    put(admin, base + f"/ai/{custom['alias']}/persona", {
+        'preset_id': 'custom', 'custom_system_prompt': custom_style,
+        'output_length': 'short', 'history_rounds': 2,
+    })
+
+    questions = post(admin, base + '/ai-judges/questions/generate')
+    assert questions['generated'] == 1
+    post(admin, base + '/start')
+    answers = post(admin, base + '/ai/answers/generate')
+    assert answers['generated'] == 2
+
+    requests = lab['state']['requests']
+    judge_request = next(x for x in requests if '重点检查措辞' in x['system'])
+    analytical_request = next(x for x in requests if '事实依据' in x['system'])
+    custom_request = next(x for x in requests if custom_style in x['system'])
+    assert judge_request['max_tokens'] == 256
+    assert '约 80 个中文字符' in judge_request['system']
+    assert analytical_request['max_tokens'] == 768
+    assert '约 300 个中文字符' in analytical_request['system']
+    assert custom_request['max_tokens'] == 256
+    assert '约 80 个中文字符' in custom_request['system']
+    assert {x['model'] for x in requests} == {'ops-test-model'}
+    assert {x['temperature'] for x in requests} == {0.4}
+    assert lab['state']['calls'] == 3
 
 
 def test_connection_and_game_calls_are_owner_scoped_and_cleaned_differently(operation_lab):

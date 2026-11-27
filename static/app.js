@@ -624,7 +624,7 @@ function personaEditor(type,key,p,disabled){
  return '<details class="persona-editor"><summary>人设与回答策略 · '+esc(presetLabel)+' · '+(disabled?'已冻结 / 锁定':'可编辑')+'</summary><form data-form="seat-persona" data-seat-type="'+type+'" data-seat-key="'+esc(key)+'" class="stack spaced">'+
  '<label class="field">人设预设</label><select name="preset_id" '+(disabled?'disabled':'')+'>'+opts+'</select>'+
  '<label class="field">自定义 System Prompt（最多 8000 字；选择自定义时必填）</label><textarea name="custom_system_prompt" maxlength="8000" '+(disabled?'disabled':'')+'>'+esc(p.custom_system_prompt||'')+'</textarea>'+
- '<div class="grid2"><div><label class="field">输出长度</label><select name="output_length" '+(disabled?'disabled':'')+'>'+lens+'</select></div><div><label class="field">历史上下文轮数（0～100）</label><input name="history_rounds" type="number" min="0" max="100" required value="'+esc(p.history_rounds??5)+'" '+(disabled?'disabled':'')+'></div></div>'+
+ '<div class="grid2"><div><label class="field">输出长度</label><select name="output_length" '+(disabled?'disabled':'')+'>'+lens+'</select></div><div><label class="field">出题历史轮数（0～100）</label><input name="history_rounds" type="number" min="0" max="100" required value="'+esc(p.history_rounds??5)+'" '+(disabled?'disabled':'')+'></div></div>'+
  '<p class="tiny muted">历史轮数只影响回答和出题；最终裁判判断仍读取完整匿名资料。正式揭晓后会展示自定义提示词，请勿填写密钥。</p><button class="small" type="submit" '+(disabled?'disabled':'')+'>保存人设</button></form></details>';
 }
 function renderAIBindingControls(r){
