@@ -790,6 +790,7 @@ function renderModelOperationPanel(r){
   return '<article class="operation-record"><div class="label-line"><strong>'+esc(t.target_label)+' · '+operationPurposeLabel(t.purpose)+'</strong><span class="operation-status '+esc(t.state)+'">'+operationStateLabel(t.state)+'</span></div>'+
    '<div class="tiny muted">'+esc(t.profile_name)+' · '+esc(t.model_name)+'</div>'+
    '<div class="operation-meta"><span>'+request+'</span><span>'+applied+'</span></div>'+
+   (t.credential_version_changed?'<div class="tiny muted">本次调用使用了轮换后的 API Key；模型与请求参数仍采用本场冻结版本。</div>':'')+
    '<div class="tiny muted">等待 '+(t.queue_ms===null?'—':esc(t.queue_ms)+' ms')+' · 请求 '+(t.duration_ms===null?'—':esc(t.duration_ms)+' ms')+' · '+usage+'</div>'+
    (t.retry_of?'<div class="tiny muted">重试自任务 #'+esc(t.retry_of)+'</div>':'')+
    (t.error_message?'<p class="operation-error">'+esc(t.error_message)+'</p>':'')+
