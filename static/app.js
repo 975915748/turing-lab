@@ -859,7 +859,8 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
      if(!isCurrentRoomContext(context))return;
      const answerProblems=[...(a.failed||[]).map(x=>(x.alias||'AI参赛者')+'：'+x.error),...(a.results||[]).filter(x=>x.status==='skipped'&&x.reason).map(x=>(x.alias||'AI参赛者')+'：'+x.reason)];
      const details=[questionSkips.length?'裁判出题跳过：'+questionSkips.join('；'):'',answerProblems.length?'AI回答问题：'+answerProblems.join('；'):''].filter(Boolean).join('；');
-     toast(`本轮已开始，模型自动提交 ${a.generated||0} 个回答${details?'；'+details:''}`);
+     const questionSummary=q.generated?`成功生成 ${q.generated} 个 AI 裁判问题`:'未新增 AI 裁判问题';
+     toast(`${questionSummary}；本轮已开始，模型自动提交 ${a.generated||0} 个回答${details?'；'+details:''}`);
     }finally{if(b.isConnected){b.disabled=false;b.textContent=originalText}}
    }
   }
