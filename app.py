@@ -2286,7 +2286,8 @@ def create_app(db_path=None):
             'finished_at':row['finished_at'],
             'can_cancel':state in ('queued','generating_questions','starting_round',
                                    'generating_answers','waiting_input','blocked','failed'),
-            'can_resume':state in ('waiting_input','blocked','failed'),
+            'can_resume':state in ('blocked','failed') or
+                (state=='waiting_input' and bool(row['waiting_reason'] and '结果未知' in row['waiting_reason'])),
             'requires_unknown_confirmation':bool(row['allow_unknown_retry']) is False and
                 bool(row['waiting_reason'] and '结果未知' in row['waiting_reason']),
         }
@@ -3676,6 +3677,8 @@ def create_app(db_path=None):
                 raise HTTPException(404,'比赛工作流不存在。')
             if row['state'] not in ('waiting_input','blocked','failed'):
                 raise HTTPException(409,'当前工作流状态不能手动恢复。')
+            if row['state']=='waiting_input' and not (row['waiting_reason'] and '结果未知' in row['waiting_reason']):
+                raise HTTPException(409,'当前工作流正在等待人工输入或本轮超时处理；完成对应操作后服务器会自动继续。')
             check_match_number(room,row['match_number'])
             if room['status']!='open' or room['current_round']!=row['round_number']:
                 raise HTTPException(409,'房间或轮次已变化，旧工作流不能恢复。')
