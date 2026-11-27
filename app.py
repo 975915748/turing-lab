@@ -1434,7 +1434,7 @@ def anonymous_match_packet(db, room_id, through_round=None):
         answers = {row['alias']: row['text'] for row in db.execute(
             'SELECT alias,text FROM answers WHERE round_id=?',(rnd['id'],))}
         timed_out=set(timed_out_aliases(db,rnd['id']))
-        for alias in roster:
+        for alias in sorted(set(roster)|set(answers)|timed_out):
             content=answers.get(alias)
             if content is None:
                 content='（超时未提交）' if alias in timed_out else '（本轮没有有效回答）'
@@ -1536,7 +1536,7 @@ def round_markdown(db, room, number, user, mine):
         a=departed['alias']
         answer=r['answers'].get(a)
         lines += [f'### {a} · 已移出的原人类参赛者 · {departed["display_name"]} (@{departed["username"]}) · UID {user_uid(departed["user_id"])}',
-                  answer['text'] if answer else '（本轮未提交）', '']
+                  answer['text'] if answer else '（超时未提交）' if a in r['timed_out'] else '（本轮未提交）', '']
     for ai in data['ais']:
         a = ai['alias']
         answer = r['answers'].get(a)
