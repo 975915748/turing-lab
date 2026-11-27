@@ -9,7 +9,9 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 import app as app_module
-from app import create_app, db_open, seed_admin
+from app import (
+    anonymous_match_packet, anonymous_player_history, create_app, db_open, seed_admin,
+)
 from model_api import ModelAPIError
 
 
@@ -109,6 +111,53 @@ def operation_lab(tmp_path, monkeypatch):
 
 def add_ai_judge(client, base, name, profile_id):
     return post(client, base + '/ai-judges', {'name': name, 'model_profile_id': profile_id})
+
+
+def test_persona_history_windows_are_bounded_and_participant_history_is_private(operation_lab):
+    lab = operation_lab
+    admin, base = lab['admin'], lab['base']
+    ai = post(admin, base + '/ai', {'name': '仅使用自身历史的 AI'})
+    room = admin.get(base).json()
+    human_aliases = [item['alias'] for item in room['humans']]
+    assert len(human_aliases) == 2
+
+    with db_open(lab['path']) as db:
+        first = db.execute('SELECT id FROM rounds WHERE room_id=? AND number=1',
+                           (lab['room_id'],)).fetchone()
+        for number in range(1, 7):
+            if number == 1:
+                round_id = first['id']
+                db.execute("UPDATE rounds SET question=?,status='revealed' WHERE id=?",
+                           (f'QUESTION_{number}', round_id))
+            else:
+                cur = db.execute('''INSERT INTO rounds(room_id,number,question,status,created_at)
+                    VALUES(?,?,?,'revealed',?)''',
+                    (lab['room_id'], number, f'QUESTION_{number}', f'2026-11-27T12:0{number}:00+00:00'))
+                round_id = cur.lastrowid
+            for alias, marker in ((human_aliases[0], 'HUMAN_A'), (human_aliases[1], 'HUMAN_B'),
+                                  (ai['alias'], 'AI_SELF')):
+                db.execute('''INSERT INTO answers(round_id,alias,text,submitted_at)
+                    VALUES(?,?,?,?)''',
+                    (round_id, alias, f'{marker}_ANSWER_{number}', f'2026-11-27T12:1{number}:00+00:00'))
+
+        packet_zero = anonymous_match_packet(db, lab['room_id'], 6, history_rounds=0)
+        packet_five = anonymous_match_packet(db, lab['room_id'], 6, history_rounds=5)
+        packet_hundred = anonymous_match_packet(db, lab['room_id'], 6, history_rounds=100)
+        full_packet = anonymous_match_packet(db, lab['room_id'])
+        own_zero = anonymous_player_history(db, lab['room_id'], ai['alias'], 6, history_rounds=0)
+        own_five = anonymous_player_history(db, lab['room_id'], ai['alias'], 6, history_rounds=5)
+        own_hundred = anonymous_player_history(db, lab['room_id'], ai['alias'], 6, history_rounds=100)
+
+    assert 'QUESTION_1' not in packet_zero and 'QUESTION_6' not in packet_zero
+    assert 'QUESTION_1' not in packet_five and all(f'QUESTION_{n}' in packet_five for n in range(2, 7))
+    assert all(f'QUESTION_{n}' in packet_hundred for n in range(1, 7))
+    assert all(f'QUESTION_{n}' in full_packet for n in range(1, 7))
+    assert 'AI_SELF_ANSWER_1' not in own_zero
+    assert 'AI_SELF_ANSWER_1' not in own_five
+    assert all(f'AI_SELF_ANSWER_{n}' in own_five for n in range(2, 7))
+    assert all(f'AI_SELF_ANSWER_{n}' in own_hundred for n in range(1, 7))
+    assert 'HUMAN_A_ANSWER_' not in own_hundred
+    assert 'HUMAN_B_ANSWER_' not in own_hundred
 
 
 def test_persona_presets_change_mock_prompts_and_output_limits(operation_lab):
