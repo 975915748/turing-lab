@@ -2547,6 +2547,9 @@ def create_app(db_path=None):
             elif answer_result.get('timed_out'):
                 update_workflow_state(workflow,'waiting_input',
                     waiting_reason='答题期限已到；请房主结束本轮，工作流不会自动结束或开启下一轮。')
+            elif self_deadline_reached(room_id,workflow['round_number']):
+                update_workflow_state(workflow,'waiting_input',
+                    waiting_reason='答题期限已到；请房主结束本轮，工作流不会自动结束或开启下一轮。')
             elif answer_result.get('blocked'):
                 update_workflow_state(workflow,'blocked',error='AI 回答生成被本场请求额度阻止。')
             elif answer_result.get('failed'):
