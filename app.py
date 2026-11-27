@@ -1997,6 +1997,14 @@ def create_app(db_path=None):
             attempt_key=(f'workflow:{workflow_id}:{purpose}:{target_type}:{target_key}:{attempt_no}'
                          if workflow else idempotency_key)
             with connection(immediate=True) as task_db:
+                if workflow is None:
+                    active_workflow=task_db.execute("""SELECT 1 FROM round_workflows
+                        WHERE room_id=? AND match_number=? AND round_number=?
+                          AND state IN ('queued','generating_questions','starting_round','generating_answers',
+                                        'waiting_input','blocked','failed') LIMIT 1""",
+                        (room_id,match_number,round_number)).fetchone()
+                    if active_workflow:
+                        return {'status':'skipped','reason':'本轮已进入服务端工作流，独立模型任务不得绕过工作流。'}
                 operation_id,created,active_state=create_model_operation_task(
                     task_db,purpose=purpose,target_type=target_type,target_key=target_key,
                     target_label=target_label,profile=profile,trigger_user_id=actor_id,
