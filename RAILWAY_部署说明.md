@@ -18,7 +18,7 @@
 
 1. 将需要上线的文档或代码提交到 Railway 已连接的目标分支；如果 service 配置为跟随 `main` 自动部署，应在升级前备份完成后再将已审查的提交合入 `main`，Railway 会按该配置启动部署。
 2. 确认这次部署使用的是预期的 commit SHA。不要因为仓库已有新提交，就默认 Railway 已经部署到该提交。
-3. 等待 Railway 部署完成，查看该 service 的部署日志。确认应用启动完成（例如出现 `Application startup complete`），并检查数据库迁移、自动备份路径、工作流 worker 启动或其他启动阶段没有异常；仅仅构建成功不代表应用已正常启动。
+3. 等待 Railway 部署完成，查看该 service 的部署日志。确认应用启动完成（例如出现 `Application startup complete`），并检查数据库迁移、自动备份路径，以及应用启动期间没有工作流 worker 异常；仅仅构建成功不代表应用已正常启动。
 
 ### 1.3 健康检查与公网验收
 
