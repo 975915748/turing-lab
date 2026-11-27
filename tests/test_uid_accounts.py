@@ -163,6 +163,7 @@ def snapshot(db):
         'friend_requests', 'friendships', 'friend_notes',
         'dm_conversations', 'dm_messages', 'dm_read_positions', 'api_rate_limits',
         'round_workflows', 'round_timeouts',
+        'match_persona_freezes', 'match_seat_persona_snapshots',
     )
     placeholders = ','.join('?' for _ in schema_additions)
     tables = [r[0] for r in db.execute(
@@ -185,6 +186,10 @@ def snapshot(db):
             'members':('leave_reason',),
             'room_judges':('left_at',),
             'rounds':('started_at','duration_seconds','deadline_at','timeout_ended_at'),
+            'ai_players':('persona_preset_id','persona_preset_version','persona_custom_prompt',
+                          'persona_output_length','persona_history_rounds','persona_revision'),
+            'ai_judges':('persona_preset_id','persona_preset_version','persona_custom_prompt',
+                         'persona_output_length','persona_history_rounds','persona_revision'),
         }.get(name,())
         for column in added_columns:
             for row in rows:
