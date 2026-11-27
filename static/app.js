@@ -953,7 +953,8 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
    }finally{
     if(type==='personal-model-edit'&&isCurrentPersonalModelAccountContext(context))setPersonalModelSavePending(profileId,false);
    }
-  }  if(type==='reset-password'){
+  }
+  if(type==='reset-password'){
    const uid=form.dataset.uid;
    if(confirm(`确定修改 ${uid} 的密码并使其所有登录会话失效？`)){
     const result=await api(`/api/admin/users/${uid}/password`,{method:'POST',body:{password:data.password,confirm:true}});
