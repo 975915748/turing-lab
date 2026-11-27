@@ -180,16 +180,22 @@ def snapshot(db):
             for row in rows:
                 row.pop('model_request_limit', None)
                 row.pop('match_started_at', None)
-        # Exit, timer and workflow migrations add nullable / defaulted columns.
+        # Persona migration adds non-null defaults, which are not legacy data.
+        persona_columns={
+            'ai_players':('persona_preset_id','persona_preset_version','persona_custom_prompt',
+                          'persona_output_length','persona_history_rounds','persona_revision'),
+            'ai_judges':('persona_preset_id','persona_preset_version','persona_custom_prompt',
+                         'persona_output_length','persona_history_rounds','persona_revision'),
+        }.get(name,())
+        for column in persona_columns:
+            for row in rows:
+                row.pop(column,None)
+        # Exit, timer and workflow migrations add nullable columns.
         added_columns={
             'rooms':('closed_at','round_duration_seconds'),
             'members':('leave_reason',),
             'room_judges':('left_at',),
             'rounds':('started_at','duration_seconds','deadline_at','timeout_ended_at'),
-            'ai_players':('persona_preset_id','persona_preset_version','persona_custom_prompt',
-                          'persona_output_length','persona_history_rounds','persona_revision'),
-            'ai_judges':('persona_preset_id','persona_preset_version','persona_custom_prompt',
-                         'persona_output_length','persona_history_rounds','persona_revision'),
         }.get(name,())
         for column in added_columns:
             for row in rows:
