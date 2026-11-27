@@ -674,6 +674,115 @@ async function logout(page) {
       assert.equal(matchText.includes('点击轮次可查看历史记录。'), false);
       assert.equal(await page.locator('.roster-person').count(), 1, '精简说明不能删除参赛者身份卡片');
       await screenshot(page, 'copy-cleanup-match-desktop-light.png');
+    } else if (scenario === 'personas') {
+      await page.getByRole('button', { name: '使用旧登录名', exact: true }).click();
+      await page.locator('[name="username"]').fill('browser_admin');
+      await page.locator('[name="password"]').fill('browser-password');
+      await clickSubmit(page, 'login');
+      await uidIs(page, 'TL00000001');
+      await page.locator('form[data-form="room"] [name="title"]').fill('AI 席位人设浏览器验收');
+      const roomCreated = page.waitForResponse(response =>
+        response.url().endsWith('/api/rooms') && response.request().method() === 'POST');
+      await clickSubmit(page, 'room');
+      const createdRoom = await roomCreated;
+      assert.equal(createdRoom.status(), 200, await createdRoom.text());
+
+      const baseInfo = await (await context.request.get(site + '/api/me')).json();
+      const roomId = baseInfo.rooms[0].id;
+      const base = '/api/rooms/' + roomId;
+      const room = await (await context.request.get(site + base)).json();
+      const models = await (await context.request.get(site + '/api/me/models')).json();
+      const profile = models.models.find(item => item.credential_status === 'ok');
+      assert(profile, '人设浏览器验收需要有效的模型配置');
+      const headers = { 'X-CSRF-Token': baseInfo.user.csrf };
+      const addAI = await context.request.post(site + base + '/ai', {
+        headers, data: { name: 'Persona Participant', model_profile_id: profile.id },
+      });
+      assert.equal(addAI.status(), 200, await addAI.text());
+      const addJudge = await context.request.post(site + base + '/ai-judges', {
+        headers, data: { name: 'Persona Judge', model_profile_id: profile.id },
+      });
+      assert.equal(addJudge.status(), 200, await addJudge.text());
+
+      const playerContexts = [];
+      for (const username of ['persona_ui_human_a', 'persona_ui_human_b']) {
+        const playerContext = await browser.newContext();
+        playerContexts.push(playerContext);
+        const joined = await playerContext.request.post(site + '/api/register', {
+          data: { username, display_name: username, password: 'persona-ui-password', code: room.invite_code },
+        });
+        assert.equal(joined.status(), 200, await joined.text());
+      }
+
+      await page.locator('[data-action="room-view"][data-view="admin"]').click();
+      const participantPersona = page.locator('form[data-form="seat-persona"][data-seat-type="participant"]');
+      await participantPersona.waitFor();
+      await participantPersona.locator('[name="preset_id"]').selectOption('analytical');
+      await participantPersona.locator('[name="output_length"]').selectOption('medium');
+      await participantPersona.locator('[name="history_rounds"]').fill('12');
+      const participantSaved = page.waitForResponse(response =>
+        response.url().endsWith('/persona') && response.request().method() === 'PUT');
+      await participantPersona.locator('[type="submit"]').click();
+      const participantSaveResponse = await participantSaved;
+      assert.equal(participantSaveResponse.status(), 200, await participantSaveResponse.text());
+
+      await page.locator('[data-action="room-view"][data-view="ai-judges"]').click();
+      const judgePersona = page.locator('form[data-form="seat-persona"][data-seat-type="judge"]');
+      await judgePersona.waitFor();
+      await judgePersona.locator('[name="preset_id"]').selectOption('language_detail');
+      await judgePersona.locator('[name="output_length"]').selectOption('short');
+      await judgePersona.locator('[name="history_rounds"]').fill('0');
+      const judgeSaved = page.waitForResponse(response =>
+        response.url().endsWith('/persona') && response.request().method() === 'PUT');
+      await judgePersona.locator('[type="submit"]').click();
+      const judgeSaveResponse = await judgeSaved;
+      assert.equal(judgeSaveResponse.status(), 200, await judgeSaveResponse.text());
+
+      const generate = page.locator('[data-action="generate-ai-questions"]');
+      await generate.waitFor();
+      const generated = page.waitForResponse(response =>
+        response.url().endsWith('/ai-judges/questions/generate') && response.request().method() === 'POST');
+      await generate.click();
+      const generatedResponse = await generated;
+      assert.equal(generatedResponse.status(), 200, await generatedResponse.text());
+      let frozenRoom = await (await context.request.get(site + base)).json();
+      assert.equal(frozenRoom.personas_frozen, true);
+      assert.equal(frozenRoom.ais[0].persona.preset_id, 'analytical');
+      assert.equal(frozenRoom.judges.find(item => item.kind === 'ai').persona.preset_id, 'language_detail');
+      assert.equal(await judgePersona.locator('[name="preset_id"]').isDisabled(), true);
+
+      await page.locator('[data-action="room-view"][data-view="admin"]').click();
+      const resetButton = page.locator('[data-action="reset-persona-preparation"]');
+      await resetButton.waitFor();
+      assert.equal(await participantPersona.locator('[name="preset_id"]').isDisabled(), true);
+      page.once('dialog', dialog => dialog.accept());
+      const reset = page.waitForResponse(response =>
+        response.url().endsWith('/personas/reset-preparation') && response.request().method() === 'POST');
+      await resetButton.click();
+      const resetResponse = await reset;
+      assert.equal(resetResponse.status(), 200, await resetResponse.text());
+      frozenRoom = await (await context.request.get(site + base)).json();
+      assert.equal(frozenRoom.personas_frozen, false);
+      assert.equal(frozenRoom.rounds[0].questions.length, 0);
+      await participantPersona.locator('[name="preset_id"]').waitFor({ state: 'visible' });
+      assert.equal(await participantPersona.locator('[name="preset_id"]').isDisabled(), false);
+
+      await participantPersona.locator('[name="preset_id"]').selectOption('custom');
+      const customStyle = '用简短自然的口语直接回应，不使用分点列表。';
+      await participantPersona.locator('[name="custom_system_prompt"]').fill(customStyle);
+      const customSaved = page.waitForResponse(response =>
+        response.url().endsWith('/persona') && response.request().method() === 'PUT');
+      await participantPersona.locator('[type="submit"]').click();
+      const customResponse = await customSaved;
+      assert.equal(customResponse.status(), 200, await customResponse.text());
+      const finalRoom = await (await context.request.get(site + base)).json();
+      assert.equal(finalRoom.ais[0].persona.preset_id, 'custom');
+      assert.equal(finalRoom.ais[0].persona.custom_system_prompt, customStyle);
+      await screenshot(page, 'ai-seat-personas-desktop-light.png');
+      await page.setViewportSize({ width: 390, height: 844 });
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+      await screenshot(page, 'ai-seat-personas-mobile-light.png');
+      for (const playerContext of playerContexts) await playerContext.close();
     } else {
       throw new Error('Unknown scenario: ' + scenario);
     }
