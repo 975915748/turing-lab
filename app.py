@@ -1049,6 +1049,36 @@ def combined_question_length_with_addition(db, room_id, round_number, text):
     return len(combined_round_question(rows))
 
 
+def round_deadline_expired(round_row, now=None):
+    deadline=round_row['deadline_at'] if 'deadline_at' in round_row.keys() else None
+    if not deadline:
+        return False
+    current=now or datetime.now(timezone.utc)
+    if isinstance(current,str):
+        current=datetime.fromisoformat(current)
+    return current >= datetime.fromisoformat(deadline)
+
+
+def timed_out_aliases(db, round_id):
+    return [row['alias'] for row in db.execute(
+        'SELECT alias FROM round_timeouts WHERE round_id=? ORDER BY alias',(round_id,)).fetchall()]
+
+
+def start_round_record(db, room, rnd, question):
+    started=datetime.now(timezone.utc)
+    duration=room['round_duration_seconds'] if 'round_duration_seconds' in room.keys() else None
+    deadline=(started+timedelta(seconds=int(duration))).isoformat(timespec='milliseconds') if duration else None
+    started_at=started.isoformat(timespec='milliseconds')
+    db.execute('''UPDATE rounds SET question=?,status='collecting',started_at=?,
+        duration_seconds=?,deadline_at=?,timeout_ended_at=NULL WHERE id=? AND status='draft' ''',
+        (question,started_at,duration,deadline,rnd['id']))
+    if db.execute('SELECT changes()').fetchone()[0]!=1:
+        raise HTTPException(409,'本轮状态已变化，请刷新后重试。')
+    db.execute('UPDATE rooms SET match_started_at=COALESCE(match_started_at,?) WHERE id=?',
+               (started_at,room['id']))
+    return {'started_at':started_at,'duration_seconds':duration,'deadline_at':deadline}
+
+
 def inspect_round_start(db, room):
     rnd=current_round(db,room)
     participant_count=active_participant_count(db,room['id'])
@@ -1344,18 +1374,20 @@ def anonymous_match_packet(db, room_id, through_round=None):
     """Build a full-match judging packet containing aliases and text only."""
     _, _, roster = aliases(db, room_id)
     lines = ['多人图灵测试 · 全场匿名裁判资料',
-             '只包含匿名代号、每轮裁判问题和参赛者原始回答；不包含真实身份或模型来源。']
-    rounds = db.execute('''SELECT number,question FROM rounds WHERE room_id=?
+             '只包含匿名代号、每轮裁判问题、原始回答及结构化超时状态；不包含真实身份或模型来源。']
+    rounds = db.execute('''SELECT id,number,question FROM rounds WHERE room_id=?
         AND (? IS NULL OR number<=?) ORDER BY number''',
         (room_id, through_round, through_round)).fetchall()
     for rnd in rounds:
         lines += ['', f'===== 第 {rnd["number"]} 轮 =====', '', '【裁判问题】', rnd['question']]
         answers = {row['alias']: row['text'] for row in db.execute(
-            '''SELECT alias,text FROM answers WHERE round_id=(
-                   SELECT id FROM rounds WHERE room_id=? AND number=?)''',
-            (room_id, rnd['number']))}
+            'SELECT alias,text FROM answers WHERE round_id=?',(rnd['id'],))}
+        timed_out=set(timed_out_aliases(db,rnd['id']))
         for alias in roster:
-            lines += ['', f'【参与者 {alias}】', answers.get(alias, '（本轮没有有效回答）')]
+            content=answers.get(alias)
+            if content is None:
+                content='（超时未提交）' if alias in timed_out else '（本轮没有有效回答）'
+            lines += ['', f'【参与者 {alias}】', content]
     lines += ['', '—— 全场匿名资料结束 ——']
     return '\n'.join(lines) + '\n'
 
@@ -1371,13 +1403,17 @@ def anonymous_player_history(db, room_id, alias, through_round):
         if answer:
             lines += [f'第 {rnd["number"]} 轮问题：',rnd['question'],
                       f'你在第 {rnd["number"]} 轮的回答：',answer['text'],'']
+        elif alias in timed_out_aliases(db,rnd['id']):
+            lines += [f'第 {rnd["number"]} 轮问题：',rnd['question'],
+                      f'你在第 {rnd["number"]} 轮的状态：','超时未提交','']
     return '\n'.join(lines) if lines else '（此前没有已完成轮次。）'
 
 
 def is_complete(db, rnd, room_id):
     _, _, expected = aliases(db, room_id)
     collected = {r['alias'] for r in db.execute('SELECT alias FROM answers WHERE round_id=?', (rnd['id'],))}
-    original_count = db.execute('SELECT COUNT(*) FROM members WHERE room_id=?', (room_id,)).fetchone()[0]
+    collected.update(timed_out_aliases(db,rnd['id']))
+    original_count = db.execute('SELECT COUNT(*) FROM members WHERE room_id=? AND removed_at IS NULL', (room_id,)).fetchone()[0]
     original_count += db.execute('SELECT COUNT(*) FROM ai_players WHERE room_id=?', (room_id,)).fetchone()[0]
     if original_count >= 2 and set(expected).issubset(collected):
         db.execute('UPDATE rounds SET status=?,revealed_at=? WHERE id=?', ('revealed', utcnow(), rnd['id']))
@@ -1395,13 +1431,19 @@ def judge_packet(db, room, through):
     if rnd['status'] != 'revealed':
         raise HTTPException(409,'本轮尚未统一公开，不能生成快照。')
     entries=db.execute('SELECT alias,text FROM answers WHERE round_id=? ORDER BY alias',(rnd['id'],)).fetchall()
-    if len(entries)<2:
-        raise HTTPException(409,'本轮有效答复不足。')
+    timeouts=set(timed_out_aliases(db,rnd['id']))
+    _,_,roster=aliases(db,room['id'])
+    if len(set(roster)|{row['alias'] for row in entries}|timeouts)<2:
+        raise HTTPException(409,'本轮有效参赛席位不足。')
     lines = ['AI 图灵测试 · 单轮匿名裁判快照', f'范围：仅第 {through} 轮',
-             '请根据本轮匿名答复判断，不包含之前轮次资料。',
+             '请根据本轮匿名答复判断；超时未提交席位会明确标记，不作为回答正文。',
              '', '【本轮裁判问题】', rnd['question']]
-    for a in entries:
-        lines += ['', f'【参与者 {a["alias"]} · 原始回答】', a['text']]
+    answer_map={row['alias']:row['text'] for row in entries}
+    for alias in sorted(set(roster)|set(answer_map)|timeouts):
+        if alias in answer_map:
+            lines += ['', f'【参与者 {alias} · 原始回答】', answer_map[alias]]
+        elif alias in timeouts:
+            lines += ['', f'【参与者 {alias}】', '（超时未提交）']
     lines += ['', '—— 本轮资料结束 ——']
     return '\n'.join(lines) + '\n'
 
