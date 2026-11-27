@@ -2298,6 +2298,8 @@ def create_app(db_path=None):
             room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
             if not room or room['status']!='open' or room['verdict_locked_at']:
                 raise HTTPException(409,'比赛已结束或裁判判断已锁定，不能生成 AI 裁判问题。')
+            if not workflow:
+                freeze_match_personas(db,room,source='independent_question_generation')
             if workflow:
                 actor_status=workflow_actor_valid(db,workflow)
                 if actor_status is not True:
