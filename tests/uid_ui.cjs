@@ -700,6 +700,8 @@ async function logout(page) {
           await player.close();
         }
         const base = '/api/rooms/' + room.room_id;
+        const roomDetails = await adminApi('GET', base);
+        room.match_number = roomDetails.match_number;
         const judge = await adminApi('POST', base + '/ai-judges', { name: prefix + ' 手动裁判' }, room.match_number);
         await adminApi('POST', base + '/ai-judges/' + judge.id + '/questions',
           { text: prefix + ' 的已提交问题。' }, room.match_number);
