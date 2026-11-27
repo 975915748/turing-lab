@@ -455,6 +455,48 @@ def test_batch_idempotency_is_per_seat_and_failed_replay_does_not_retry(operatio
     assert lab['state']['calls'] == 4
 
 
+def test_idempotency_key_is_scoped_to_triggering_account(operation_lab):
+    lab = operation_lab
+    admin, base, profile_id = lab['admin'], lab['base'], lab['profile_id']
+    judge = add_ai_judge(admin, base, '跨账号幂等裁判', profile_id)
+    key = 'same-room-same-target-different-account'
+
+    first = post_with_idempotency_key(admin, base + '/ai-judges/questions/generate', key)
+    assert first['generated'] == 1
+    assert lab['state']['calls'] == 1
+
+    # Remove only the generated question so the second authorized manager has
+    # the same logical target and input; the completed task and its key remain.
+    with db_open(lab['path']) as db:
+        db.execute('DELETE FROM ai_judge_questions WHERE room_id=? AND round_number=1 AND ai_judge_id=?',
+                   (lab['room_id'], judge['id']))
+
+    other = TestClient(lab['app'])
+    post(other, '/api/register', {
+        'username': 'idempotency_other_admin',
+        'display_name': '幂等隔离管理员',
+        'password': 'idempotency-other-admin-password',
+    })
+    with db_open(lab['path']) as db:
+        user = db.execute('SELECT id FROM users WHERE username=?',
+                          ('idempotency_other_admin',)).fetchone()
+        db.execute('UPDATE users SET is_admin=1 WHERE id=?', (user['id'],))
+
+    second = post_with_idempotency_key(other, base + '/ai-judges/questions/generate', key)
+    assert second['generated'] == 1, '另一授权账号使用同一键应创建自己的逻辑操作'
+    assert lab['state']['calls'] == 2, '不同触发账号不能重放另一账号的终态任务'
+
+    with db_open(lab['path']) as db:
+        rows = db.execute("""SELECT trigger_user_id,idempotency_key,state
+            FROM model_operation_tasks
+            WHERE room_id=? AND match_number=1 AND round_number=1
+              AND purpose='judge_question' AND target_type='ai_judge' AND target_key=?
+            ORDER BY id""", (lab['room_id'], str(judge['id']))).fetchall()
+    assert len(rows) == 2
+    assert rows[0]['trigger_user_id'] != rows[1]['trigger_user_id']
+    assert [row['idempotency_key'] for row in rows] == [key, key]
+
+
 def test_room_mutations_reject_stale_round_preconditions(operation_lab):
     lab = operation_lab
     admin, base = lab['admin'], lab['base']
