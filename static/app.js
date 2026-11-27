@@ -676,7 +676,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
    const uid=b.dataset.uid;
    if(confirm(`确定删除账号 ${uid}？该账号将立即退出登录且无法再使用，未完赛参与者将退赛；已有比赛历史署名保留。`)){
     const result=await api(`/api/admin/users/${uid}`,{method:'DELETE',body:{confirm:true}});
-    if(result.signed_out){state.me=null;state.room=null;state.roomId=null;renderAuth();}else await loadAccounts();toast('账号已删除');
+    if(result.signed_out){state.me=null;state.room=null;state.roomId=null;clearPersonalModelState();renderAuth();}else await loadAccounts();toast('账号已删除');
    }
   }
   if(action==='delete-room'){
@@ -789,7 +789,19 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
    }
    return;
   }
-  if(action==='delete-personal-model'){const id=Number(b.dataset.id),draftKey='model:'+id;if(confirm('删除此个人模型配置？所有房间中引用它的 AI 席位会解除模型绑定并转为手动转录；席位、匿名代号和比赛历史都会保留。')){invalidatePersonalModelTest(id);delete state.personalModelExpanded[id];await api('/api/me/models/'+id,{method:'DELETE'});await loadPersonalModels();await loadModelOperationRecords();renderPersonalCenter({skipModelDraftKey:draftKey});toast('个人模型配置已删除，关联席位已解除绑定')}}  if(action==='delete-model'){const id=Number(b.dataset.id);if(confirm('删除此模型配置？关联的 AI 参赛者和 AI 裁判将改为手动转录，比赛记录不会删除。')){await api(`/api/rooms/${state.roomId}/models/${id}`,{method:'DELETE'});await refreshRoom();toast('模型配置已删除')}}
+  if(action==='delete-personal-model'){
+   const id=Number(b.dataset.id),draftKey='model:'+id,epoch=state.personalModelEpoch,uid=state.me?.user?.uid;
+   if(confirm('删除此个人模型配置？所有房间中引用它的 AI 席位会解除模型绑定并转为手动转录；席位、匿名代号和比赛历史都会保留。')){
+    invalidatePersonalModelTest(id);delete state.personalModelExpanded[id];
+    await api('/api/me/models/'+id,{method:'DELETE'});
+    if(state.personalModelEpoch!==epoch||state.me?.user?.uid!==uid)return;
+    await loadPersonalModels();
+    if(state.personalModelEpoch!==epoch||state.me?.user?.uid!==uid)return;
+    await loadModelOperationRecords();
+    if(state.personalModelEpoch!==epoch||state.me?.user?.uid!==uid)return;
+    renderPersonalCenter({skipModelDraftKey:draftKey});toast('个人模型配置已删除，关联席位已解除绑定');
+   }
+  }  if(action==='delete-model'){const id=Number(b.dataset.id);if(confirm('删除此模型配置？关联的 AI 参赛者和 AI 裁判将改为手动转录，比赛记录不会删除。')){await api(`/api/rooms/${state.roomId}/models/${id}`,{method:'DELETE'});await refreshRoom();toast('模型配置已删除')}}
   if(action==='download-log')await downloadLog();
   if(action==='download-full-log')await downloadFullLog();
   if(action==='copy-code'){await navigator.clipboard.writeText(state.room.invite_code);toast('邀请码已复制')}
