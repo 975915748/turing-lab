@@ -2363,6 +2363,10 @@ def create_app(db_path=None):
             for raw in rows:
                 profile=dict(raw)
                 snapshot=match_seat_persona_snapshot(db,room_id,match_number,'judge',profile['judge_id'])
+                if is_match_persona_frozen(db,room_id,match_number) and not snapshot:
+                    results.append({'judge_id':profile['judge_id'],'label':profile['label'],
+                        'status':'skipped','reason':'本场冻结的人设快照缺失；为避免读取可变配置，已停止调用。'})
+                    continue
                 persona=json.loads(snapshot['config_json']) if snapshot else persona_config_from_row(profile,'judge')
                 if snapshot and profile['model_profile_id'] is not None:
                     frozen_profile=load_frozen_model_profile(db,snapshot)
@@ -2490,6 +2494,10 @@ def create_app(db_path=None):
             for raw in rows:
                 profile=dict(raw)
                 snapshot=match_seat_persona_snapshot(db,room_id,match_number,'participant',profile['alias'])
+                if is_match_persona_frozen(db,room_id,match_number) and not snapshot:
+                    results.append({'alias':profile['alias'],'status':'skipped',
+                        'reason':'本场冻结的人设快照缺失；为避免读取可变配置，已停止调用。'})
+                    continue
                 persona=json.loads(snapshot['config_json']) if snapshot else persona_config_from_row(profile,'participant')
                 if snapshot:
                     frozen_profile=load_frozen_model_profile(db,snapshot)
@@ -4593,6 +4601,9 @@ def create_app(db_path=None):
             for raw in rows:
                 profile=dict(raw)
                 snapshot=match_seat_persona_snapshot(db,room_id,match_number,'judge',profile['judge_id'])
+                if is_match_persona_frozen(db,room_id,match_number) and not snapshot:
+                    results.append({'judge_id':profile['judge_id'],'status':'skipped','reason':'本场冻结的人设快照缺失；为避免读取可变配置，已停止调用。'})
+                    continue
                 persona=json.loads(snapshot['config_json']) if snapshot else persona_config_from_row(profile,'judge')
                 if snapshot:
                     frozen_profile=load_frozen_model_profile(db,snapshot)
