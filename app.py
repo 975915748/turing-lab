@@ -2348,7 +2348,11 @@ def create_app(db_path=None):
         async def generate_one(profile):
             judge_id=profile['judge_id']
             persona=profile.get('_persona') or {}
-            seat_history=anonymous_match_packet(db,room_id,round_number-1,persona.get('history_rounds',5)) if not workflow else history
+            if workflow:
+                seat_history=history
+            else:
+                with connection() as history_db:
+                    seat_history=anonymous_match_packet(history_db,room_id,round_number-1,persona.get('history_rounds',5))
             context_revision=hashlib.sha256(
                 (str(round_number)+'|'+','.join(roster)+'|'+seat_history).encode('utf-8')).hexdigest()
             def validate_context(db, judge_id=judge_id, profile=profile):
