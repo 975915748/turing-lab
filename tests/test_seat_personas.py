@@ -197,3 +197,7 @@ def test_persona_api_freezes_and_allows_preparation_reset(tmp_path):
         assert any(item["persona_name"] == "语言细节" for item in personas)
         assert all("seat_label" not in item and "profile_name" not in item
                    and "base_url" not in item and "api_key" not in item for item in personas)
+        exported = viewer.get(base + "/log")
+        assert exported.status_code == 200, exported.text
+        assert "严谨分析者" not in exported.text
+        assert "语言细节" not in exported.text
