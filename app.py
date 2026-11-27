@@ -3452,6 +3452,9 @@ def create_app(db_path=None):
             db.execute('INSERT INTO ai_judge_questions(room_id,round_number,ai_judge_id,text,created_at) VALUES(?,?,?,?,?)',
                        (room_id,rnd['number'],judge_id,msg,utcnow()))
             log_event(db,room_id,rnd['number'],'ai_judge_question','管理员','已转录 AI 裁判问题')
+            queued_workflows=wake_waiting_workflow(db,room_id,room['match_number'],rnd['number'])
+        if queued_workflows:
+            app.state.workflow_worker.wake()
         await app.state.hub.notify(room_id,'ai_judge_question')
         return {'ok':True}
 
@@ -3479,6 +3482,9 @@ def create_app(db_path=None):
                        (room_id,rnd['number'],u['id'],text,utcnow()))
             # 审计日志只记录提交动作，不存入账号信息或答案。
             log_event(db,room_id,rnd['number'],'judge_question_proposed','裁判','已提交本轮问题')
+            queued_workflows=wake_waiting_workflow(db,room_id,room['match_number'],rnd['number'])
+        if queued_workflows:
+            app.state.workflow_worker.wake()
         await app.state.hub.notify(room_id,'judge_question_proposed')
         return {'ok':True}
 
@@ -3724,12 +3730,29 @@ def create_app(db_path=None):
             if len(roster)<2:
                 raise HTTPException(409,'至少要有两名参赛者才能开始。')
             question=norm_text(body.text,6000)
-            start_round_record(db,room,rnd,question)
-            name_lock_user_ids=room_lock_user_ids(db,room_id)
-            log_event(db,room_id,rnd['number'],'judge_question',room['judge'],question)
-        await app.state.hub.notify(room_id,'judge_question')
-        await app.state.hub.notify_accounts(name_lock_user_ids, {'type':'name_lock_updated'})
-        return {'ok':True}
+            workflow=db.execute('''SELECT * FROM round_workflows
+                WHERE room_id=? AND match_number=? AND round_number=?
+                  AND state IN ('queued','generating_questions','waiting_input','blocked','failed')
+                ORDER BY id DESC LIMIT 1''',(room_id,room['match_number'],rnd['number'])).fetchone()
+            if workflow:
+                db.execute('UPDATE rounds SET question=? WHERE id=? AND status=\'draft\'',
+                           (question,rnd['id']))
+                log_event(db,room_id,rnd['number'],'judge_question_proposed',room['judge'],'主持人已录入问题，等待服务端工作流开局')
+                queued_workflows=wake_waiting_workflow(db,room_id,room['match_number'],rnd['number'])
+                name_lock_user_ids=[]
+                queued_for_workflow=True
+            else:
+                start_round_record(db,room,rnd,question)
+                name_lock_user_ids=room_lock_user_ids(db,room_id)
+                log_event(db,room_id,rnd['number'],'judge_question',room['judge'],question)
+                queued_workflows=[]
+                queued_for_workflow=False
+        if queued_workflows:
+            app.state.workflow_worker.wake()
+        await app.state.hub.notify(room_id,'judge_question_proposed' if queued_for_workflow else 'judge_question')
+        if name_lock_user_ids:
+            await app.state.hub.notify_accounts(name_lock_user_ids, {'type':'name_lock_updated'})
+        return {'ok':True,'workflow_pending':queued_for_workflow}
 
     @app.post('/api/rooms/{room_id}/suggestions')
     async def suggest(room_id:int,body:TextData,request:Request):
