@@ -4126,7 +4126,7 @@ def create_app(db_path=None):
                 raise HTTPException(409,'比赛开始后因账号删除补位时，只能添加使用默认人设的手动 AI 席位。')
             ensure_roster_unlocked(db,room,allow_frozen=True)
             invalidated_ai_questions=0
-            if post_start_recovery:
+            if recovery:
                 now=utcnow()
                 stale_reason='参赛名单变化；当前轮旧 AI 裁判问题和准备任务已作废，请重新准备。'
                 db.execute('''UPDATE round_workflows SET state='stale',stage='stale',
@@ -4158,7 +4158,7 @@ def create_app(db_path=None):
                 freeze_match_personas(db,room,source='roster_recovery',
                     participant_roster_revision=participant_roster_revision(db,room_id))
             log_event(db,room_id,room['current_round'],'ai_joined',alias,
-                      '补位 AI 已添加；当前轮旧 AI 裁判问题已作废' if post_start_recovery else 'AI 参赛位已添加')
+                      '补位 AI 已添加；当前轮旧 AI 裁判问题已作废' if recovery else 'AI 参赛位已添加')
         app.state.workflow_worker.wake()
         await app.state.hub.notify(room_id,'ai_joined')
         return {'alias':alias,'automated':body.model_profile_id is not None,

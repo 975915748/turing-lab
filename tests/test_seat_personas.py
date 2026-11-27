@@ -269,18 +269,21 @@ def test_persona_api_freezes_and_allows_preparation_reset(tmp_path):
 
     # A late registration changes the frozen contestant roster. A manually
     # entered AI judge question based on the old roster must not start the round.
+    request(admin, "POST", base + f"/ai-judges/{judge['id']}/questions",
+            {"text": "请描述一次你修正错误判断的经历。"})
     late_player = TestClient(app)
     request(late_player, "POST", "/api/register", {
         "username": "persona_player_late", "display_name": "迟到参赛者",
         "password": "persona-player-password", "code": room["code"],
     })
-    request(admin, "POST", base + f"/ai-judges/{judge['id']}/questions",
-            {"text": "请描述一次你修正错误判断的经历。"})
     request(admin, "POST", base + "/start", expected=409)
 
     reset = request(admin, "POST", base + "/personas/reset-preparation", {"confirm": True})
     assert reset["reset"] is True
     assert admin.get(base).json()["personas_frozen"] is False
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT COUNT(*) FROM ai_judge_questions WHERE room_id=?",
+                          (room["room_id"],)).fetchone()[0] == 0
     request(admin, "PUT", base + f"/ai/{ai['alias']}/persona", participant_config)
 
     request(admin, "POST", base + f"/ai-judges/{judge['id']}/questions",
