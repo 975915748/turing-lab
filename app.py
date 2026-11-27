@@ -91,6 +91,17 @@ def init_db(path):
                 "SELECT name FROM sqlite_master WHERE type='table'")}
             room_sql = old.execute("SELECT sql FROM sqlite_master WHERE name='rooms'").fetchone()
             needs_room_ids = bool(room_sql) and 'AUTOINCREMENT' not in room_sql['sql'].upper()
+            old_room_columns={x['name'] for x in old.execute('PRAGMA table_info(rooms)')} if 'rooms' in old_tables else set()
+            old_round_columns={x['name'] for x in old.execute('PRAGMA table_info(rounds)')} if 'rounds' in old_tables else set()
+            old_task_columns={x['name'] for x in old.execute('PRAGMA table_info(model_operation_tasks)')} if 'model_operation_tasks' in old_tables else set()
+            old_workflow_columns={x['name'] for x in old.execute('PRAGMA table_info(round_workflows)')} if 'round_workflows' in old_tables else set()
+            needs_workflow_schema=(
+                'round_workflows' not in old_tables or 'round_timeouts' not in old_tables or
+                'round_duration_seconds' not in old_room_columns or
+                not {'started_at','duration_seconds','deadline_at','timeout_ended_at'}.issubset(old_round_columns) or
+                not {'workflow_id','workflow_generation'}.issubset(old_task_columns) or
+                ('round_workflows' in old_tables and 'manual_retry_authorized' not in old_workflow_columns)
+            )
             if 'users' in old_tables and (
                 'model_operation_tasks' not in old_tables or
                 ('rooms' in old_tables and 'model_request_limit' not in {
@@ -110,9 +121,11 @@ def init_db(path):
                 ('members' in old_tables and 'removed_at' not in {
                     x['name'] for x in old.execute('PRAGMA table_info(members)')}) or
                 ('answers' in old_tables and 'edited_at' not in {
-                    x['name'] for x in old.execute('PRAGMA table_info(answers)')})):
+                    x['name'] for x in old.execute('PRAGMA table_info(answers)')}) or
+                needs_workflow_schema):
                 stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
-                backup_tag = ('v1_9' if 'model_operation_tasks' not in old_tables or
+                backup_tag = ('v1_10' if needs_workflow_schema else
+                              'v1_9' if 'model_operation_tasks' not in old_tables or
                                   ('rooms' in old_tables and 'model_request_limit' not in {
                                       x['name'] for x in old.execute('PRAGMA table_info(rooms)')}) else
                               'v1_8' if 'model_profiles' in old_tables and 'owner_user_id' not in {
@@ -261,6 +274,7 @@ def init_db(path):
             execution_generation INTEGER NOT NULL DEFAULT 0,
             worker_token TEXT, worker_started_at TEXT,
             allow_unknown_retry INTEGER NOT NULL DEFAULT 0,
+            manual_retry_authorized INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL, finished_at TEXT,
             UNIQUE(room_id,match_number,round_number,idempotency_key));
         CREATE UNIQUE INDEX IF NOT EXISTS idx_round_workflows_active
@@ -320,6 +334,9 @@ def init_db(path):
             db.execute('ALTER TABLE model_operation_tasks ADD COLUMN workflow_id INTEGER REFERENCES round_workflows(id) ON DELETE SET NULL')
         if 'workflow_generation' not in task_columns:
             db.execute('ALTER TABLE model_operation_tasks ADD COLUMN workflow_generation INTEGER')
+        workflow_columns={x['name'] for x in db.execute('PRAGMA table_info(round_workflows)')}
+        if 'manual_retry_authorized' not in workflow_columns:
+            db.execute('ALTER TABLE round_workflows ADD COLUMN manual_retry_authorized INTEGER NOT NULL DEFAULT 0')
         if 'legacy_username' not in {x['name'] for x in db.execute('PRAGMA table_info(users)')}:
             migrate_user_accounts(db)
         if 'owner_id' not in {x['name'] for x in db.execute('PRAGMA table_info(rooms)')}:
