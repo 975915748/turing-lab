@@ -629,19 +629,28 @@ function personaEditor(type,key,p,disabled){
  ];
  const editorKey=personaDraftKey(type,key),draft=state.personaDrafts[editorKey];
  const expanded=!!state.personaEditorOpen[editorKey];
- if(draft)p={...p,...draft};
+ const unappliedDraft=disabled&&draft?draft:null;
+ if(draft&&!disabled)p={...p,...draft};
  const selectedPreset=presets.find(x=>x[0]===p.preset_id)||presets[0];
  const presetLabel=selectedPreset[1]||p.display_name||p.preset_id||'默认风格';
  const customSelected=selectedPreset[0]==='custom';
  const lengths=[['default','沿用模型上限'],['short','短（约 80 字 / 最多 256 Token）'],['medium','中（约 300 字 / 最多 768 Token）'],['long','长（约 800 字 / 最多 2048 Token）']];
  const opts=presets.map(x=>'<option value="'+x[0]+'" data-description="'+esc(x[2])+'" '+(selectedPreset[0]===x[0]?'selected':'')+'>'+x[1]+'</option>').join('');
  const lens=lengths.map(x=>'<option value="'+x[0]+'" '+((p.output_length||'default')===x[0]?'selected':'')+'>'+x[1]+'</option>').join('');
+ const draftPreset=unappliedDraft?(presets.find(x=>x[0]===unappliedDraft.preset_id)||presets[0]):null;
+ const draftLength=unappliedDraft?(lengths.find(x=>x[0]===unappliedDraft.output_length)?.[1]||lengths[0][1]):'';
+ const draftPreview=unappliedDraft?
+  '<div class="notice persona-unsaved-draft"><strong>未保存草稿（未生效）</strong>'+
+  '<div class="hint">人设：'+esc(draftPreset[1])+' · '+esc(draftPreset[2])+'</div>'+
+  '<div class="hint">输出长度：'+esc(draftLength)+' · '+(type==='participant'?'回答':'出题')+'历史轮数：'+esc(unappliedDraft.history_rounds??5)+'</div>'+
+  (unappliedDraft.custom_system_prompt?'<div class="hint">自定义 System Prompt（未生效）</div><div class="question spaced">'+esc(unappliedDraft.custom_system_prompt)+'</div>':'')+
+  '</div>':'';
  return '<details class="persona-editor" data-persona-editor data-key="'+esc(editorKey)+'" '+(expanded?'open':'')+'><summary>人设与回答策略 · '+esc(presetLabel)+' · '+(disabled?'已冻结 / 锁定':'可编辑')+'</summary><form data-form="seat-persona" data-seat-type="'+type+'" data-seat-key="'+esc(key)+'" class="stack spaced">'+
  '<label class="field">人设预设</label><select name="preset_id" '+(disabled?'disabled':'')+'>'+opts+'</select>'+
  '<p class="hint" data-preset-description>'+esc(selectedPreset[2])+'</p>'+
  '<div class="persona-custom-prompt" data-custom-prompt-field '+(customSelected?'':'hidden')+'><label class="field">自定义 System Prompt（最多 8000 字；选择自定义时必填）</label><textarea name="custom_system_prompt" maxlength="8000" '+(customSelected?'required ':'')+(disabled?'disabled':'')+'>'+esc(p.custom_system_prompt||'')+'</textarea></div>'+
  '<div class="grid2"><div><label class="field">输出长度</label><select name="output_length" '+(disabled?'disabled':'')+'>'+lens+'</select></div><div><label class="field">'+(type==='participant'?'回答历史轮数':'出题历史轮数')+'（0～100）</label><input name="history_rounds" type="number" min="0" max="100" required value="'+esc(p.history_rounds??5)+'" '+(disabled?'disabled':'')+'></div></div>'+
- '<p class="tiny muted">短 / 中 / 长的 Token 上限分别为 256 / 768 / 2048，实际不超过绑定模型上限；最终裁判 JSON 始终沿用冻结模型上限。历史轮数只影响回答和出题；正式揭晓后会展示自定义提示词，请勿填写密钥。</p><button class="small" type="submit" '+(disabled?'disabled':'')+'>保存人设</button></form></details>';
+ '<p class="tiny muted">短 / 中 / 长的 Token 上限分别为 256 / 768 / 2048，实际不超过绑定模型上限；最终裁判 JSON 始终沿用冻结模型上限。历史轮数只影响回答和出题；正式揭晓后会展示自定义提示词，请勿填写密钥。</p><button class="small" type="submit" '+(disabled?'disabled':'')+'>保存人设</button></form>'+draftPreview+'</details>';
 }
 function renderAIBindingControls(r){
  if(!r.ais?.length)return '';
@@ -855,7 +864,7 @@ function renderRevealedSeatPersonas(r){
  return `<section class="card"><h2>本场 AI 席位人设</h2><p class="hint">以下内容来自本场冻结快照，不是个人中心当前配置。</p>${r.seat_personas.map(p=>`<div class="answer-card"><strong>${esc(p.seat_key)} · ${esc(p.persona_name)}</strong><div class="hint">${p.seat_type==='participant'?'AI 参赛者':'AI 裁判'} · 输出：${esc(p.output_length)} · ${p.seat_type==='participant'?'回答历史轮数':'出题历史轮数'}：${p.history_rounds}${p.model_name?' · 模型：'+esc(p.model_name)+' · Temperature：'+esc(p.model_temperature)+' · 模型上限：'+esc(p.model_max_tokens)+' · '+(p.seat_type==='participant'?'回答':'出题')+' Token 上限：'+esc(p.effective_output_max_tokens)+(p.seat_type==='judge'?' · 最终判断 JSON 上限：'+esc(p.verdict_max_tokens):'')+' · 超时：'+esc(p.model_timeout_seconds)+' 秒':' · 手动席位'}</div>${p.custom_system_prompt?`<div class="hint">自定义 System Prompt</div><div class="question spaced">${esc(p.custom_system_prompt)}</div>`:p.style_prompt?`<div class="hint">预设风格</div><div class="question spaced">${esc(p.style_prompt)}</div>`:''}</div>`).join('')}</section>`;
 }
 function renderMultiResults(r,roster){
- return `<section class="card"><div class="overline">MATCH ACCURACY / 比赛识别统计</div><h2>多裁判独立判决结果</h2><p class="hint">比赛结束后向人类参与者展示全部裁判判决及评分；各裁判登录时仍只能读取自己的判断。</p>${r.verdicts.map(v=>{const count=roster.filter(p=>v.predictions?.[p.alias]===(p.role==='AI'?'AI':'Human')).length;return `<div class="answer-card"><div class="label-line"><h3>${esc(v.judge)} <span class="tiny muted">${v.kind==='ai'?'AI 裁判':v.kind==='human'?'真人裁判':''}</span></h3><span class="pill ok">${count} / ${roster.length} 正确</span></div><div class="hint">置信度 ${v.confidence}%</div>${roster.map(p=>`<div class="hint">${esc(p.alias)} · ${p.role} · 判断：${v.predictions?.[p.alias]==='Human'?'人类':'AI'} ${v.predictions?.[p.alias]===(p.role==='AI'?'AI':'Human')?'✓':'✗'}</div>`).join('')}<div class="question spaced">${esc(v.evidence)}</div><p class="hint">最弱环节：${esc(v.weakness||'未填写')}</p><p class="hint">可能误判：${esc(v.possible_error||'未填写')}</p></div>`}).join('')}</section>`+renderRevealedSeatPersonas(r);
+ return `<section class="card"><div class="overline">MATCH ACCURACY / 比赛识别统计</div><h2>多裁判独立判决结果</h2><p class="hint">比赛结束后向人类参与者展示全部裁判判决及评分；各裁判登录时仍只能读取自己的判断。</p>${r.verdicts.map(v=>{const count=roster.filter(p=>v.predictions?.[p.alias]===(p.role==='AI'?'AI':'Human')).length;return `<div class="answer-card"><div class="label-line"><h3>${esc(v.judge)} <span class="tiny muted">${v.kind==='ai'?'AI 裁判':v.kind==='human'?'真人裁判':''}</span></h3><span class="pill ok">${count} / ${roster.length} 正确</span></div><div class="hint">置信度 ${v.confidence}%</div>${roster.map(p=>`<div class="hint">${esc(p.alias)} · ${p.role} · 判断：${v.predictions?.[p.alias]==='Human'?'人类':'AI'} ${v.predictions?.[p.alias]===(p.role==='AI'?'AI':'Human')?'✓':'✗'}</div>`).join('')}<div class="question spaced">${esc(v.evidence)}</div><p class="hint">最弱环节：${esc(v.weakness||'未填写')}</p><p class="hint">可能误判：${esc(v.possible_error||'未填写')}</p></div>`}).join('')}</section>`;
 }
 function renderAdminRoomNav(r,finished){
  const views=[['match','比赛现场'],['human-judges','真人裁判管理'],['ai-judges','AI 裁判管理'],['admin','参赛者管理']];
@@ -900,6 +909,7 @@ function renderRoom(){
 ${renderPublicChat(r)}
  ${finished&&r.verdicts?.length?renderMultiResults(r,roster):''}
  ${finished&&!r.verdicts?.length?`<section class="card"><div class="overline">MATCH ACCURACY / 比赛识别统计</div><h2>最终判决与真实身份</h2><div class="score">${scored}/${roster.length}</div><p class="muted">裁判 ${esc(r.judge)} · 置信度 ${r.verdict?.confidence??'?'}%</p>${roster.map(p=>`<div class="answer-card"><strong>${p.alias} · ${esc(p.label)}</strong><div>真实身份：${p.role} / 裁判判断：${r.verdict?.predictions?.[p.alias]==='Human'?'人类':'AI'} ${r.verdict?.predictions?.[p.alias]===(p.role==='AI'?'AI':'Human')?'✓':'✗'}</div></div>`).join('')}<h3 class="spaced">判断依据</h3><div class="question">${esc(r.verdict?.evidence)}</div><p class="hint spaced">最弱环节：${esc(r.verdict?.weakness||'未填写')}</p><p class="hint">可能误判：${esc(r.verdict?.possible_error||'未填写')}</p></section>`:''}
+ ${renderRevealedSeatPersonas(r)}
  </div></div><div class="right-panel">${canManage?renderAdminRoomNav(r,finished):`<section class="card flat"><div class="overline">PARTICIPANT</div><h2>等待主持人推进比赛</h2><p class="hint">你的每次提交都会发送到服务器；全员提交完成后自动揭晓。若网络断开，请等待自动重连或手动刷新。</p></section>`}</div></div>`;
  updateTypingBadges();
  updateRoundCountdown();
