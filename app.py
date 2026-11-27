@@ -2228,6 +2228,263 @@ def create_app(db_path=None):
                 'interrupted':sum(x['status']=='interrupted' for x in results),
                 'failed':[x for x in results if x['status']=='failed'],'results':results}
 
+    def workflow_input_revision(db, room_id, round_number):
+        rows=round_question_rows(db,room_id,round_number)
+        payload={'questions':[dict(row) for row in rows],
+                 'history':anonymous_match_packet(db,room_id,round_number-1)}
+        return hashlib.sha256(json.dumps(payload,ensure_ascii=False,sort_keys=True,
+            separators=(',',':')).encode('utf-8')).hexdigest()
+
+    def workflow_view(row):
+        state=row['state']
+        return {
+            'id':row['id'],'mode':row['mode'],'state':state,'stage':row['stage'],
+            'waiting_reason':row['waiting_reason'],'error_message':row['error_message'],
+            'created_at':row['created_at'],'updated_at':row['updated_at'],
+            'finished_at':row['finished_at'],
+            'can_cancel':state in ('queued','generating_questions','starting_round',
+                                   'generating_answers','waiting_input','blocked','failed'),
+            'can_resume':state in ('waiting_input','blocked','failed'),
+            'requires_unknown_confirmation':bool(row['allow_unknown_retry']) is False and
+                bool(row['waiting_reason'] and '结果未知' in row['waiting_reason']),
+        }
+
+    def create_round_workflow(db, room, user, rnd, *, mode, include_ai_questions, idempotency_key):
+        key=str(idempotency_key or '').strip()
+        if not key or len(key)>128:
+            raise HTTPException(422,'必须提供 1～128 字符的 Idempotency-Key。')
+        match_number=int(room['match_number'])
+        round_number=int(rnd['number'])
+        existing=db.execute('''SELECT * FROM round_workflows
+            WHERE room_id=? AND match_number=? AND round_number=? AND idempotency_key=?''',
+            (room['id'],match_number,round_number,key)).fetchone()
+        if existing:
+            return int(existing['id']),False,dict(existing)
+        active=db.execute('''SELECT * FROM round_workflows
+            WHERE room_id=? AND match_number=? AND round_number=?
+              AND state IN ('queued','generating_questions','starting_round','generating_answers',
+                            'waiting_input','blocked','failed')
+            ORDER BY id DESC LIMIT 1''',(room['id'],match_number,round_number)).fetchone()
+        if active:
+            if (mode=='start' and active['mode']=='prepare_only' and
+                    active['state'] in ('queued','waiting_input') and
+                    (active['state']=='queued' or (active['waiting_reason'] or '').startswith('等待人工裁判问题'))):
+                db.execute('''UPDATE round_workflows SET mode='start',
+                    include_ai_questions=MAX(include_ai_questions,?),state='queued',stage='queued',
+                    waiting_reason=NULL,error_message=NULL,finished_at=NULL,updated_at=?
+                    WHERE id=?''',(1 if include_ai_questions else 0,operation_timestamp(),active['id']))
+                active=db.execute('SELECT * FROM round_workflows WHERE id=?',(active['id'],)).fetchone()
+            return int(active['id']),False,dict(active)
+        now=operation_timestamp()
+        roster_revision=workflow_roster_revision(db,room['id'])
+        input_revision=workflow_input_revision(db,room['id'],round_number)
+        cur=db.execute('''INSERT INTO round_workflows(
+            room_id,match_number,round_number,mode,requester_user_id,requester_uid,
+            idempotency_key,include_ai_questions,roster_revision,input_revision,
+            state,stage,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,'queued','queued',?,?)''',
+            (room['id'],match_number,round_number,mode,user['id'],user_uid(user['id']),
+             key,1 if include_ai_questions else 0,roster_revision,input_revision,now,now))
+        row=db.execute('SELECT * FROM round_workflows WHERE id=?',(cur.lastrowid,)).fetchone()
+        return int(cur.lastrowid),True,dict(row)
+
+    def update_workflow_state(workflow, state, *, waiting_reason=None, error=None, keep_worker=False):
+        now=operation_timestamp()
+        terminal=state in ('waiting_input','blocked','failed','completed','cancelled','stale')
+        with connection(immediate=True) as db:
+            db.execute('''UPDATE round_workflows SET state=?,stage=?,waiting_reason=?,error_message=?,
+                worker_token=CASE WHEN ? THEN worker_token ELSE NULL END,
+                finished_at=CASE WHEN ? THEN ? ELSE NULL END,updated_at=?
+                WHERE id=? AND execution_generation=? AND worker_token=?''',
+                (state,state,waiting_reason,error,1 if keep_worker else 0,
+                 1 if terminal else 0,now,now,workflow['id'],
+                 workflow['execution_generation'],workflow['worker_token']))
+            changed=db.execute('SELECT changes()').fetchone()[0]
+        return bool(changed)
+
+    def claim_next_workflow():
+        while True:
+            with connection(immediate=True) as db:
+                row=db.execute("""SELECT * FROM round_workflows WHERE state='queued'
+                    ORDER BY id LIMIT 1""").fetchone()
+                if not row:
+                    return None
+                room=db.execute('SELECT * FROM rooms WHERE id=?',(row['room_id'],)).fetchone()
+                invalid=(not room or room['status']!='open' or
+                         room['match_number']!=row['match_number'] or
+                         room['current_round']!=row['round_number'])
+                roster_changed=bool(room and workflow_roster_revision(db,row['room_id'])!=row['roster_revision'])
+                if invalid or roster_changed:
+                    now=operation_timestamp()
+                    reason=('房间、场次或轮次已变化；旧工作流已作废。' if invalid else
+                            '参赛名单、匿名代号或 AI 席位配置已变化；请取消准备并重新入队。')
+                    db.execute("""UPDATE round_workflows SET state='stale',stage='stale',
+                        worker_token=NULL,waiting_reason=NULL,error_message=?,finished_at=?,updated_at=?
+                        WHERE id=? AND state='queued'""",(reason,now,now,row['id']))
+                    continue
+                generation=int(row['execution_generation'])+1
+                token=secrets.token_urlsafe(24)
+                now=operation_timestamp()
+                db.execute("""UPDATE round_workflows SET state='generating_questions',
+                    stage='generating_questions',execution_generation=?,worker_token=?,
+                    worker_started_at=?,waiting_reason=NULL,error_message=NULL,updated_at=?
+                    WHERE id=? AND state='queued'""",
+                    (generation,token,now,now,row['id']))
+                db.execute('''UPDATE model_operation_tasks SET workflow_generation=?
+                    WHERE workflow_id=? AND state='queued' AND request_started_at IS NULL''',
+                    (generation,row['id']))
+                claimed=db.execute('SELECT * FROM round_workflows WHERE id=?',(row['id'],)).fetchone()
+                return dict(claimed)
+
+    def wake_waiting_workflow(db, room_id, match_number, round_number):
+        rows=db.execute('''SELECT * FROM round_workflows
+            WHERE room_id=? AND match_number=? AND round_number=?
+              AND state='waiting_input' ORDER BY id DESC''',
+            (room_id,match_number,round_number)).fetchall()
+        queued=[]
+        for row in rows:
+            if not (row['waiting_reason'] or '').startswith('等待人工裁判问题'):
+                continue
+            if workflow_roster_revision(db,room_id)!=row['roster_revision']:
+                now=operation_timestamp()
+                db.execute("""UPDATE round_workflows SET state='stale',stage='stale',
+                    waiting_reason=NULL,error_message=?,finished_at=?,updated_at=? WHERE id=?""",
+                    ('参赛名单或匿名代号已变化；旧工作流已作废。',now,now,row['id']))
+                continue
+            questions=round_question_rows(db,room_id,round_number)
+            if not questions:
+                continue
+            now=operation_timestamp()
+            db.execute("""UPDATE round_workflows SET state='queued',stage='queued',
+                input_revision=?,waiting_reason=NULL,error_message=NULL,updated_at=?
+                WHERE id=? AND state='waiting_input'""",
+                (workflow_input_revision(db,room_id,round_number),now,row['id']))
+            queued.append(int(row['id']))
+        return queued
+
+    async def process_round_workflow(workflow):
+        workflow_id=workflow['id']
+        room_id=workflow['room_id']
+        try:
+            with connection() as db:
+                current=db.execute('SELECT * FROM round_workflows WHERE id=?',(workflow_id,)).fetchone()
+                if not current:
+                    return
+                workflow=dict(current)
+                actor_status=workflow_actor_valid(db,workflow)
+                if actor_status is not True:
+                    update_workflow_state(workflow,'stale',error=str(actor_status))
+                    await app.state.hub.notify(room_id,'round_workflow_updated')
+                    return
+                room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
+                rnd=current_round(db,room,workflow['round_number'])
+            if workflow['mode']=='prepare_only':
+                result=await generate_ai_judge_questions_shared(
+                    room_id,actor_id=workflow['requester_user_id'],workflow=workflow)
+                if result.get('interrupted') or any(x.get('status')=='requesting' for x in result.get('results',[])):
+                    update_workflow_state(workflow,'waiting_input',
+                        waiting_reason='模型请求结果未知或仍在处理中；请核对比赛内容后再由房主恢复。')
+                else:
+                    with connection() as db:
+                        current_room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
+                        current_round_row=current_round(db,current_room,workflow['round_number'])
+                        has_questions=bool(round_question_rows(db,room_id,workflow['round_number']))
+                    if result.get('blocked') and not has_questions:
+                        update_workflow_state(workflow,'blocked',error='AI 裁判问题生成被本场请求额度阻止。')
+                    elif result.get('failed') and not has_questions:
+                        update_workflow_state(workflow,'failed',error='AI 裁判问题生成失败；请检查席位状态后恢复。')
+                    elif not has_questions:
+                        update_workflow_state(workflow,'waiting_input',
+                            waiting_reason='等待人工裁判问题提交后继续。')
+                    else:
+                        update_workflow_state(workflow,'completed')
+                await app.state.hub.notify(room_id,'round_workflow_updated')
+                return
+
+            if workflow['include_ai_questions'] and rnd['status']=='draft':
+                await generate_ai_judge_questions_shared(
+                    room_id,actor_id=workflow['requester_user_id'],workflow=workflow)
+            with connection() as db:
+                current=db.execute('SELECT * FROM round_workflows WHERE id=?',(workflow_id,)).fetchone()
+                if not current or current['execution_generation']!=workflow['execution_generation'] or current['worker_token']!=workflow['worker_token']:
+                    return
+                actor_status=workflow_actor_valid(db,workflow)
+                if actor_status is not True:
+                    update_workflow_state(workflow,'stale',error=str(actor_status))
+                    await app.state.hub.notify(room_id,'round_workflow_updated')
+                    return
+                room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
+                rnd=current_round(db,room,workflow['round_number'])
+                round_status=rnd['status']
+                validation=inspect_round_start(db,room) if round_status=='draft' else None
+                if round_status=='draft' and validation['reason']:
+                    if not validation['questions']:
+                        update_workflow_state(workflow,'waiting_input',
+                            waiting_reason='等待人工裁判问题提交后继续。')
+                    elif validation['participant_count']<2:
+                        update_workflow_state(workflow,'stale',error='在场参赛者不足两人，工作流已停止。')
+                    else:
+                        update_workflow_state(workflow,'blocked',error=validation['reason'])
+                    await app.state.hub.notify(room_id,'round_workflow_updated')
+                    return
+                if round_status not in ('draft','collecting','revealed'):
+                    update_workflow_state(workflow,'stale',error='轮次状态已变化，工作流已作废。')
+                    await app.state.hub.notify(room_id,'round_workflow_updated')
+                    return
+            if round_status=='draft':
+                update_workflow_state(workflow,'starting_round',keep_worker=True)
+                with connection(immediate=True) as db:
+                    current=db.execute('SELECT * FROM round_workflows WHERE id=?',(workflow_id,)).fetchone()
+                    if (not current or current['execution_generation']!=workflow['execution_generation'] or
+                            current['worker_token']!=workflow['worker_token']):
+                        return
+                    room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
+                    actor_status=workflow_actor_valid(db,workflow)
+                    if actor_status is not True:
+                        update_workflow_state(workflow,'stale',error=str(actor_status))
+                        return
+                    rnd=current_round(db,room,workflow['round_number'])
+                    validation=inspect_round_start(db,room)
+                    if validation['reason']:
+                        update_workflow_state(workflow,'waiting_input',
+                            waiting_reason='等待人工裁判问题提交后继续。' if not validation['questions'] else None,
+                            error=validation['reason'] if validation['questions'] else None)
+                        return
+                    start_round_record(db,room,rnd,validation['question'])
+                    name_lock_user_ids=room_lock_user_ids(db,room_id)
+                    log_event(db,room_id,rnd['number'],'judge_question','独立裁判组','主持人已开启统一作答')
+                await app.state.hub.notify(room_id,'judge_question')
+                await app.state.hub.notify_accounts(name_lock_user_ids, {'type':'name_lock_updated'})
+            elif round_status=='revealed':
+                update_workflow_state(workflow,'completed')
+                await app.state.hub.notify(room_id,'round_workflow_updated')
+                return
+            update_workflow_state(workflow,'generating_answers',keep_worker=True)
+            answer_result=await generate_ai_answers_shared(
+                room_id,actor_id=workflow['requester_user_id'],workflow=workflow)
+            if answer_result.get('interrupted') or any(x.get('status')=='requesting' for x in answer_result.get('results',[])):
+                update_workflow_state(workflow,'waiting_input',
+                    waiting_reason='模型请求结果未知或仍在处理中；请核对比赛内容后再由房主恢复。')
+            elif answer_result.get('timed_out'):
+                update_workflow_state(workflow,'waiting_input',
+                    waiting_reason='答题期限已到；请房主结束本轮，工作流不会自动结束或开启下一轮。')
+            elif answer_result.get('blocked'):
+                update_workflow_state(workflow,'blocked',error='AI 回答生成被本场请求额度阻止。')
+            elif answer_result.get('failed'):
+                update_workflow_state(workflow,'failed',error='部分 AI 参赛席回答生成失败；可在席位任务中检查并恢复。')
+            else:
+                update_workflow_state(workflow,'completed')
+            await app.state.hub.notify(room_id,'round_workflow_updated')
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            update_workflow_state(workflow,'failed',error=operation_error_message(exc))
+            await app.state.hub.notify(room_id,'round_workflow_updated')
+
+    async def fail_round_workflow(workflow, error):
+        update_workflow_state(workflow,'failed',error=operation_error_message(error))
+        await app.state.hub.notify(workflow['room_id'],'round_workflow_updated')
+
     def caller(request, db, mutate=False):
         if mutate:
             require_origin(request.headers)
