@@ -2372,99 +2372,120 @@ def create_app(db_path=None):
                     return
                 workflow=dict(current)
                 actor_status=workflow_actor_valid(db,workflow)
-                if actor_status is not True:
-                    update_workflow_state(workflow,'stale',error=str(actor_status))
-                    await app.state.hub.notify(room_id,'round_workflow_updated')
-                    return
                 room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
-                rnd=current_round(db,room,workflow['round_number'])
-            if workflow['mode']=='prepare_only':
-                result=await generate_ai_judge_questions_shared(
-                    room_id,actor_id=workflow['requester_user_id'],workflow=workflow)
-                if result.get('interrupted') or any(x.get('status')=='requesting' for x in result.get('results',[])):
-                    update_workflow_state(workflow,'waiting_input',
-                        waiting_reason='模型请求结果未知或仍在处理中；请核对比赛内容后再由房主恢复。')
-                else:
-                    with connection() as db:
-                        current_room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
-                        current_round_row=current_round(db,current_room,workflow['round_number'])
-                        has_questions=bool(round_question_rows(db,room_id,workflow['round_number']))
-                    if result.get('blocked') and not has_questions:
-                        update_workflow_state(workflow,'blocked',error='AI 裁判问题生成被本场请求额度阻止。')
-                    elif result.get('failed') and not has_questions:
-                        update_workflow_state(workflow,'failed',error='AI 裁判问题生成失败；请检查席位状态后恢复。')
-                    elif not has_questions:
-                        update_workflow_state(workflow,'waiting_input',
-                            waiting_reason='等待人工裁判问题提交后继续。')
-                    else:
-                        update_workflow_state(workflow,'completed')
+                rnd=current_round(db,room,workflow['round_number']) if room else None
+            if actor_status is not True:
+                update_workflow_state(workflow,'stale',error=str(actor_status))
                 await app.state.hub.notify(room_id,'round_workflow_updated')
                 return
 
+            if workflow['mode']=='prepare_only':
+                result=await generate_ai_judge_questions_shared(
+                    room_id,actor_id=workflow['requester_user_id'],workflow=workflow)
+                if result.get('interrupted') or any(x.get('status') in ('interrupted','requesting')
+                                                    for x in result.get('results',[])):
+                    update_workflow_state(workflow,'waiting_input',
+                        waiting_reason='模型请求结果未知；请核对比赛内容后，由房主明确确认是否重试。')
+                else:
+                    with connection() as db:
+                        has_questions=bool(round_question_rows(db,room_id,workflow['round_number']))
+                    if has_questions:
+                        update_workflow_state(workflow,'completed')
+                    elif result.get('blocked'):
+                        update_workflow_state(workflow,'blocked',error='AI 裁判问题生成被本场请求额度阻止。')
+                    elif result.get('failed'):
+                        update_workflow_state(workflow,'failed',error='AI 裁判问题生成失败；请检查席位状态后恢复。')
+                    else:
+                        update_workflow_state(workflow,'waiting_input',
+                            waiting_reason='等待人工裁判问题提交后继续。')
+                await app.state.hub.notify(room_id,'round_workflow_updated')
+                return
+
+            question_result={'results':[],'failed':[],'blocked':0,'interrupted':0}
             if workflow['include_ai_questions'] and rnd['status']=='draft':
-                await generate_ai_judge_questions_shared(
+                question_result=await generate_ai_judge_questions_shared(
                     room_id,actor_id=workflow['requester_user_id'],workflow=workflow)
             with connection() as db:
                 current=db.execute('SELECT * FROM round_workflows WHERE id=?',(workflow_id,)).fetchone()
-                if not current or current['execution_generation']!=workflow['execution_generation'] or current['worker_token']!=workflow['worker_token']:
+                if (not current or current['execution_generation']!=workflow['execution_generation'] or
+                        current['worker_token']!=workflow['worker_token']):
                     return
                 actor_status=workflow_actor_valid(db,workflow)
-                if actor_status is not True:
-                    update_workflow_state(workflow,'stale',error=str(actor_status))
-                    await app.state.hub.notify(room_id,'round_workflow_updated')
-                    return
                 room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
-                rnd=current_round(db,room,workflow['round_number'])
-                round_status=rnd['status']
-                validation=inspect_round_start(db,room) if round_status=='draft' else None
-                if round_status=='draft' and validation['reason']:
-                    if not validation['questions']:
-                        update_workflow_state(workflow,'waiting_input',
-                            waiting_reason='等待人工裁判问题提交后继续。')
-                    elif validation['participant_count']<2:
-                        update_workflow_state(workflow,'stale',error='在场参赛者不足两人，工作流已停止。')
-                    else:
-                        update_workflow_state(workflow,'blocked',error=validation['reason'])
-                    await app.state.hub.notify(room_id,'round_workflow_updated')
-                    return
-                if round_status not in ('draft','collecting','revealed'):
-                    update_workflow_state(workflow,'stale',error='轮次状态已变化，工作流已作废。')
-                    await app.state.hub.notify(room_id,'round_workflow_updated')
-                    return
-            if round_status=='draft':
+                rnd=current_round(db,room,workflow['round_number']) if room else None
+                question_rows=round_question_rows(db,room_id,workflow['round_number'])
+                validation=inspect_round_start(db,room) if room and rnd['status']=='draft' else None
+            if actor_status is not True:
+                update_workflow_state(workflow,'stale',error=str(actor_status))
+                await app.state.hub.notify(room_id,'round_workflow_updated')
+                return
+            if (question_result.get('interrupted') or
+                    any(x.get('status') in ('interrupted','requesting') for x in question_result.get('results',[]))) and not question_rows:
+                update_workflow_state(workflow,'waiting_input',
+                    waiting_reason='模型请求结果未知；请核对比赛内容后，由房主明确确认是否重试。')
+                await app.state.hub.notify(room_id,'round_workflow_updated')
+                return
+            if rnd['status']=='draft' and validation['reason']:
+                if not validation['questions']:
+                    update_workflow_state(workflow,'waiting_input',
+                        waiting_reason='等待人工裁判问题提交后继续。')
+                elif validation['participant_count']<2:
+                    update_workflow_state(workflow,'stale',error='在场参赛者不足两人，工作流已停止。')
+                else:
+                    update_workflow_state(workflow,'blocked',error=validation['reason'])
+                await app.state.hub.notify(room_id,'round_workflow_updated')
+                return
+            if rnd['status'] not in ('draft','collecting','revealed'):
+                update_workflow_state(workflow,'stale',error='轮次状态已变化，工作流已作废。')
+                await app.state.hub.notify(room_id,'round_workflow_updated')
+                return
+            if rnd['status']=='revealed':
+                update_workflow_state(workflow,'completed')
+                await app.state.hub.notify(room_id,'round_workflow_updated')
+                return
+
+            if rnd['status']=='draft':
                 update_workflow_state(workflow,'starting_round',keep_worker=True)
+                start_error=None
+                name_lock_user_ids=[]
                 with connection(immediate=True) as db:
                     current=db.execute('SELECT * FROM round_workflows WHERE id=?',(workflow_id,)).fetchone()
                     if (not current or current['execution_generation']!=workflow['execution_generation'] or
                             current['worker_token']!=workflow['worker_token']):
                         return
-                    room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
                     actor_status=workflow_actor_valid(db,workflow)
                     if actor_status is not True:
-                        update_workflow_state(workflow,'stale',error=str(actor_status))
-                        return
-                    rnd=current_round(db,room,workflow['round_number'])
-                    validation=inspect_round_start(db,room)
-                    if validation['reason']:
+                        start_error=str(actor_status)
+                    else:
+                        room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
+                        rnd=current_round(db,room,workflow['round_number'])
+                        validation=inspect_round_start(db,room)
+                        if validation['reason']:
+                            start_error=validation['reason']
+                        else:
+                            start_round_record(db,room,rnd,validation['question'])
+                            name_lock_user_ids=room_lock_user_ids(db,room_id)
+                            log_event(db,room_id,rnd['number'],'judge_question','独立裁判组','主持人已开启统一作答')
+                if start_error:
+                    with connection() as db:
+                        has_questions=bool(round_question_rows(db,room_id,workflow['round_number']))
+                    if not has_questions:
                         update_workflow_state(workflow,'waiting_input',
-                            waiting_reason='等待人工裁判问题提交后继续。' if not validation['questions'] else None,
-                            error=validation['reason'] if validation['questions'] else None)
-                        return
-                    start_round_record(db,room,rnd,validation['question'])
-                    name_lock_user_ids=room_lock_user_ids(db,room_id)
-                    log_event(db,room_id,rnd['number'],'judge_question','独立裁判组','主持人已开启统一作答')
+                            waiting_reason='等待人工裁判问题提交后继续。')
+                    else:
+                        update_workflow_state(workflow,'blocked',error=start_error)
+                    await app.state.hub.notify(room_id,'round_workflow_updated')
+                    return
                 await app.state.hub.notify(room_id,'judge_question')
                 await app.state.hub.notify_accounts(name_lock_user_ids, {'type':'name_lock_updated'})
-            elif round_status=='revealed':
-                update_workflow_state(workflow,'completed')
-                await app.state.hub.notify(room_id,'round_workflow_updated')
-                return
+
             update_workflow_state(workflow,'generating_answers',keep_worker=True)
             answer_result=await generate_ai_answers_shared(
                 room_id,actor_id=workflow['requester_user_id'],workflow=workflow)
-            if answer_result.get('interrupted') or any(x.get('status')=='requesting' for x in answer_result.get('results',[])):
+            if (answer_result.get('interrupted') or
+                    any(x.get('status') in ('interrupted','requesting') for x in answer_result.get('results',[]))):
                 update_workflow_state(workflow,'waiting_input',
-                    waiting_reason='模型请求结果未知或仍在处理中；请核对比赛内容后再由房主恢复。')
+                    waiting_reason='模型请求结果未知；请核对比赛内容后，由房主明确确认是否重试。')
             elif answer_result.get('timed_out'):
                 update_workflow_state(workflow,'waiting_input',
                     waiting_reason='答题期限已到；请房主结束本轮，工作流不会自动结束或开启下一轮。')
