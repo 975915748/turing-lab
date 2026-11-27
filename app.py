@@ -4686,24 +4686,24 @@ def create_app(db_path=None):
                     profile=frozen_profile
                 profile['_persona']=persona
                 profiles.append(profile)
-            retry_of=getattr(request.state,'model_operation_retry_of',None)
-            queued_profiles=[]
-            for profile in profiles:
-                with connection(immediate=True) as task_db:
-                    operation_id,created,active_state=create_model_operation_task(
-                        task_db,purpose='judge_verdict',target_type='ai_judge',
-                        target_key=profile['judge_id'],target_label=profile['label'],
-                        profile=profile,trigger_user_id=actor_id,room_id=room_id,
-                        match_number=match_number,round_number=room['current_round'],
-                        context_revision=evidence_revision,retry_of=retry_of,
-                        idempotency_key=request.headers.get('Idempotency-Key'))
-                if created:
-                    profile['_operation_id']=operation_id
-                    queued_profiles.append(profile)
-                else:
-                    results.append({'judge_id':profile['judge_id'],'status':active_state,
-                                    'reason':'该席位已有进行中的模型任务。'})
-            profiles=queued_profiles
+        retry_of=getattr(request.state,'model_operation_retry_of',None)
+        queued_profiles=[]
+        for profile in profiles:
+            with connection(immediate=True) as task_db:
+                operation_id,created,active_state=create_model_operation_task(
+                    task_db,purpose='judge_verdict',target_type='ai_judge',
+                    target_key=profile['judge_id'],target_label=profile['label'],
+                    profile=profile,trigger_user_id=actor_id,room_id=room_id,
+                    match_number=match_number,round_number=room['current_round'],
+                    context_revision=evidence_revision,retry_of=retry_of,
+                    idempotency_key=request.headers.get('Idempotency-Key'))
+            if created:
+                profile['_operation_id']=operation_id
+                queued_profiles.append(profile)
+            else:
+                results.append({'judge_id':profile['judge_id'],'status':active_state,
+                                'reason':'该席位已有进行中的模型任务。'})
+        profiles=queued_profiles
         if profiles:
             await app.state.hub.notify(room_id,'model_operation_updated')
         if not profiles:

@@ -274,11 +274,6 @@ def test_persona_api_freezes_and_allows_preparation_reset(tmp_path):
     assert judge_view["is_judge"] is True
     assert judge_view["personas_revealed"] is False
     assert not judge_view.get("seat_personas")
-    pre_reveal_log = player_a.get(base + "/rounds/1/log")
-    assert pre_reveal_log.status_code == 200
-    assert "严谨分析者" not in pre_reveal_log.text
-    assert "语言细节" not in pre_reveal_log.text
-
     # Room WebSocket notifications contain only event metadata, never seat persona data.
     with player_a.websocket_connect(f"/ws/rooms/{room['room_id']}") as socket:
         connected = socket.receive_json()
@@ -321,6 +316,15 @@ def test_persona_api_freezes_and_allows_preparation_reset(tmp_path):
     info = admin.get(base).json()
     assert info["personas_frozen"] is True
     assert info["match_started"] is True
+    # The round log is available after its answers are revealed, while the
+    # overall match has not yet reached formal identity/persona reveal.
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE rounds SET status='revealed' WHERE room_id=? AND number=1",
+                   (room["room_id"],))
+    pre_reveal_log = player_a.get(base + "/rounds/1/log")
+    assert pre_reveal_log.status_code == 200
+    assert "严谨分析者" not in pre_reveal_log.text
+    assert "语言细节" not in pre_reveal_log.text
     request(admin, "PUT", base + f"/ai-judges/{judge['id']}/persona", judge_config, 409)
     request(admin, "POST", base + "/personas/reset-preparation", {"confirm": True}, 409)
 
