@@ -617,7 +617,7 @@ function personaEditor(type,key,p,disabled){
 }
 function renderAIBindingControls(r){
  if(!r.ais?.length)return '';
- const disabled=r.status!=='open'||r.verdict_locked||(r.judges||[]).some(j=>j.locked);
+ const disabled=r.status!=='open'||r.verdict_locked||r.personas_frozen||(r.judges||[]).some(j=>j.locked);
  return '<div class="divider"></div><h3>AI 参赛席模型绑定</h3><p class="hint">更换或解除绑定不会删除 AI 席位及其匿名代号、历史回答。你只能选择自己拥有的配置；其他账号授权的现有绑定可以保留或解除。</p>'+
  r.ais.map(a=>'<form class="binding-row" data-form="bind-ai-player-model" data-alias="'+esc(a.alias)+'"><div><strong>'+esc(a.alias)+' · '+esc(a.name)+'</strong><div class="tiny muted">当前：'+esc(bindingLabel(a))+'</div></div><select name="model_profile_id" '+(disabled?'disabled':'')+'>'+modelBindingOptions(a)+'</select><button class="small" type="submit" '+(disabled?'disabled':'')+'>更新绑定</button></form>'+personaEditor('participant',a.alias,a.persona,disabled)).join('');
 }
