@@ -2343,7 +2343,7 @@ def create_app(db_path=None):
     async def generate_ai_judge_questions_shared(room_id, actor_id, session_hash=None,
                                                   target_judge_id=None, retry_of=None,
                                                   workflow=None, idempotency_key=None):
-        with connection() as db:
+        with connection(immediate=True) as db:
             room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
             if not room or room['status']!='open' or room['verdict_locked_at']:
                 raise HTTPException(409,'比赛已结束或裁判判断已锁定，不能生成 AI 裁判问题。')
@@ -2479,7 +2479,7 @@ def create_app(db_path=None):
     async def generate_ai_answers_shared(room_id, actor_id, session_hash=None,
                                          target_alias=None, retry_of=None,
                                          workflow=None, idempotency_key=None):
-        with connection() as db:
+        with connection(immediate=True) as db:
             room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
             if not room or room['status']!='open':
                 raise HTTPException(409,'比赛已结束。')
