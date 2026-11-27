@@ -3421,6 +3421,13 @@ def create_app(db_path=None):
             room,_=require_room_manager(db,room_id,u)
             if room['status']!='open' or room['verdict_locked_at']:
                 raise HTTPException(409,'比赛已结束或裁判判断已锁定，不能生成 AI 裁判问题。')
+            active=db.execute("""SELECT 1 FROM round_workflows
+                WHERE room_id=? AND match_number=? AND round_number=?
+                  AND state IN ('queued','generating_questions','starting_round','generating_answers',
+                                'waiting_input','blocked','failed') LIMIT 1""",
+                (room_id,room['match_number'],room['current_round'])).fetchone()
+            if active:
+                raise HTTPException(409,'本轮由服务端工作流管理；请在参赛者管理中查看、恢复或取消工作流。')
         session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
         return await generate_ai_judge_questions_shared(
             room_id,actor_id=u['id'],session_hash=session_hash,
@@ -3666,6 +3673,13 @@ def create_app(db_path=None):
         with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
+            active=db.execute("""SELECT 1 FROM round_workflows
+                WHERE room_id=? AND match_number=? AND round_number=?
+                  AND state IN ('queued','generating_questions','starting_round','generating_answers',
+                                'waiting_input','blocked','failed') LIMIT 1""",
+                (room_id,room['match_number'],room['current_round'])).fetchone()
+            if active:
+                raise HTTPException(409,'本轮已有服务端工作流；请在参赛者管理中查看其状态。')
             validation=inspect_round_start(db,room)
             if validation['reason']:
                 raise HTTPException(409,validation['reason'])
@@ -3822,6 +3836,13 @@ def create_app(db_path=None):
             room,_=require_room_manager(db,room_id,u)
             if room['status']!='open':
                 raise HTTPException(409,'比赛已结束。')
+            active=db.execute("""SELECT 1 FROM round_workflows
+                WHERE room_id=? AND match_number=? AND round_number=?
+                  AND state IN ('queued','generating_questions','starting_round','generating_answers',
+                                'waiting_input','blocked','failed') LIMIT 1""",
+                (room_id,room['match_number'],room['current_round'])).fetchone()
+            if active:
+                raise HTTPException(409,'本轮由服务端工作流管理；请在参赛者管理中恢复或取消工作流。')
         session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
         return await generate_ai_answers_shared(
             room_id,actor_id=u['id'],session_hash=session_hash,
