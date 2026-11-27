@@ -668,6 +668,164 @@ async function logout(page) {
       assert.equal(matchText.includes('点击轮次可查看历史记录。'), false);
       assert.equal(await page.locator('.roster-person').count(), 1, '精简说明不能删除参赛者身份卡片');
       await screenshot(page, 'copy-cleanup-match-desktop-light.png');
+    } else if (scenario === 'room-race') {
+      await page.getByRole('button', { name: '使用旧登录名', exact: true }).click();
+      await page.locator('[name="username"]').fill('browser_admin');
+      await page.locator('[name="password"]').fill('browser-password');
+      await clickSubmit(page, 'login');
+      await uidIs(page, 'TL00000001');
+      const me = await (await context.request.get(site + '/api/me')).json();
+      const csrf = me.user.csrf;
+      const adminApi = async (method, url, data, matchNumber) => {
+        const headers = method === 'GET' ? {} : { 'X-CSRF-Token': csrf };
+        if (matchNumber !== undefined) headers['X-Match-Number'] = String(matchNumber);
+        const response = await context.request.fetch(site + url, { method, headers, data });
+        const text = await response.text();
+        assert(response.ok(), method + ' ' + url + ': ' + text);
+        return text ? JSON.parse(text) : {};
+      };
+      const createReadyRoom = async (title, prefix) => {
+        const room = await adminApi('POST', '/api/rooms', { title });
+        for (const suffix of ['a', 'b']) {
+          const player = await browser.newContext();
+          const joined = await player.request.post(site + '/api/register', {
+            data: {
+              username: prefix + '_player_' + suffix,
+              display_name: prefix + ' 玩家 ' + suffix,
+              password: 'room-race-player-password',
+              code: room.code,
+            },
+          });
+          assert.equal(joined.status(), 200, await joined.text());
+          await player.close();
+        }
+        const base = '/api/rooms/' + room.room_id;
+        const judge = await adminApi('POST', base + '/ai-judges', { name: prefix + ' 手动裁判' }, room.match_number);
+        await adminApi('POST', base + '/ai-judges/' + judge.id + '/questions',
+          { text: prefix + ' 的已提交问题。' }, room.match_number);
+        return room;
+      };
+      const roomA = await createReadyRoom('异步开局目标 A', 'race_a');
+      const roomB = await createReadyRoom('异步开局目标 B', 'race_b');
+      const writes = [];
+      page.on('request', request => {
+        if (request.method() === 'POST') writes.push(new URL(request.url()).pathname);
+      });
+      await page.goto(site + '/#room=' + roomA.room_id);
+      await page.getByRole('heading', { name: '异步开局目标 A', exact: true }).waitFor();
+      await page.locator('[data-action="room-view"][data-view="admin"]').click();
+
+      let releaseQuestion;
+      let questionStarted;
+      const questionGate = new Promise(resolve => { releaseQuestion = resolve; });
+      const questionRequestStarted = new Promise(resolve => { questionStarted = resolve; });
+      const questionPattern = '**/api/rooms/' + roomA.room_id + '/ai-judges/questions/generate';
+      await page.route(questionPattern, async route => {
+        const response = await route.fetch();
+        const body = await response.body();
+        questionStarted();
+        await questionGate;
+        await route.fulfill({ response, body });
+      });
+      await page.locator('[data-action="start-round"]').click();
+      await questionRequestStarted;
+      await page.locator('[data-action="back"]').click();
+      await page.locator('[data-action="open"][data-id="' + roomB.room_id + '"]').click();
+      await page.getByRole('heading', { name: '异步开局目标 B', exact: true }).waitFor();
+      releaseQuestion();
+      await page.waitForTimeout(500);
+      assert.equal(writes.includes('/api/rooms/' + roomB.room_id + '/start'), false,
+        'A 的迟到出题响应不能继续开启当前页面上的 B 房间');
+      assert.equal(writes.includes('/api/rooms/' + roomB.room_id + '/ai/answers/generate'), false,
+        'A 的迟到出题响应不能为 B 房间触发模型回答');
+      await page.unroute(questionPattern);
+
+      // A delayed room refresh must not overwrite a room opened after that request began.
+      let releaseRefresh;
+      let refreshStarted;
+      const refreshGate = new Promise(resolve => { releaseRefresh = resolve; });
+      const refreshRequestStarted = new Promise(resolve => { refreshStarted = resolve; });
+      const refreshPattern = '**/api/rooms/' + roomB.room_id;
+      await page.route(refreshPattern, async route => {
+        if (route.request().method() !== 'GET') return route.continue();
+        const response = await route.fetch();
+        const body = await response.body();
+        refreshStarted();
+        await refreshGate;
+        await route.fulfill({ response, body });
+      });
+      await page.locator('[data-action="sync"]').click();
+      await refreshRequestStarted;
+      await page.locator('[data-action="back"]').click();
+      await page.locator('[data-action="open"][data-id="' + roomA.room_id + '"]').click();
+      await page.getByRole('heading', { name: '异步开局目标 A', exact: true }).waitFor();
+      releaseRefresh();
+      await page.waitForTimeout(300);
+      assert.equal(await page.evaluate(() => state.room?.id), roomA.room_id,
+        'B 的迟到 GET 响应不能覆盖重新打开的 A 房间');
+      await page.unroute(refreshPattern);
+    } else if (scenario === 'model-account-race') {
+      await page.getByRole('button', { name: '使用旧登录名', exact: true }).click();
+      await page.locator('[name="username"]').fill('browser_admin');
+      await page.locator('[name="password"]').fill('browser-password');
+      await clickSubmit(page, 'login');
+      await uidIs(page, 'TL00000001');
+
+      const other = await browser.newContext();
+      const registered = await other.request.post(site + '/api/register', {
+        data: { username: 'model_race_account_b', display_name: '账号 B', password: 'model-race-password' },
+      });
+      assert.equal(registered.status(), 200, await registered.text());
+      const otherMe = await (await other.request.get(site + '/api/me')).json();
+      const otherProfile = await other.request.post(site + '/api/me/models', {
+        headers: { 'X-CSRF-Token': otherMe.user.csrf },
+        data: {
+          name: 'B 专属模型',
+          base_url: 'https://api.example.com/v1',
+          model: 'account-b-model',
+          api_key: 'sk-account-b-only',
+          temperature: 0.4,
+          max_tokens: 512,
+          timeout_seconds: 30,
+        },
+      });
+      assert.equal(otherProfile.status(), 200, await otherProfile.text());
+      const profileB = await otherProfile.json();
+      await other.close();
+
+      let releaseOldList;
+      let oldListStarted;
+      const oldListGate = new Promise(resolve => { releaseOldList = resolve; });
+      const oldListRequestStarted = new Promise(resolve => { oldListStarted = resolve; });
+      let holdFirstList = true;
+      await page.route('**/api/me/models', async route => {
+        if (route.request().method() !== 'GET' || !holdFirstList) return route.continue();
+        holdFirstList = false;
+        const response = await route.fetch();
+        const body = await response.body();
+        oldListStarted();
+        await oldListGate;
+        await route.fulfill({ response, body });
+      });
+      await page.locator('[data-action="personal-center"]').first().click();
+      await oldListRequestStarted;
+
+      await logout(page);
+      await page.locator('[name="uid"]').fill(otherMe.user.uid);
+      await page.locator('[name="password"]').fill('model-race-password');
+      await clickSubmit(page, 'login');
+      await uidIs(page, otherMe.user.uid);
+      await page.locator('[data-action="personal-center"]').first().click();
+      await page.getByText('B 专属模型', { exact: true }).waitFor();
+      const beforeRelease = await page.evaluate(() => state.personalModels.map(profile => profile.id));
+      assert.deepEqual(beforeRelease, [profileB.id]);
+
+      releaseOldList();
+      await page.waitForTimeout(300);
+      const afterRelease = await page.evaluate(() => state.personalModels.map(profile => profile.id));
+      assert.deepEqual(afterRelease, [profileB.id],
+        'A 的迟到模型列表不能覆盖 B 的个人配置');
+      await page.unroute('**/api/me/models');
     } else {
       throw new Error('Unknown scenario: ' + scenario);
     }
