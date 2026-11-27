@@ -101,10 +101,12 @@ def init_db(path):
             old_workflow_columns={x['name'] for x in old.execute('PRAGMA table_info(round_workflows)')} if 'round_workflows' in old_tables else set()
             old_player_columns={x['name'] for x in old.execute('PRAGMA table_info(ai_players)')} if 'ai_players' in old_tables else set()
             old_judge_columns={x['name'] for x in old.execute('PRAGMA table_info(ai_judges)')} if 'ai_judges' in old_tables else set()
+            old_freeze_columns={x['name'] for x in old.execute('PRAGMA table_info(match_persona_freezes)')} if 'match_persona_freezes' in old_tables else set()
             persona_columns={'persona_preset_id','persona_preset_version','persona_custom_prompt',
                              'persona_output_length','persona_history_rounds','persona_revision'}
             needs_persona_schema=(
                 'match_persona_freezes' not in old_tables or 'match_seat_persona_snapshots' not in old_tables or
+                'participant_roster_revision' not in old_freeze_columns or
                 not persona_columns.issubset(old_player_columns) or
                 not persona_columns.issubset(old_judge_columns) or
                 not {'persona_snapshot_id','credential_version_hash','credential_version_changed'}.issubset(old_task_columns)
@@ -139,7 +141,7 @@ def init_db(path):
                     x['name'] for x in old.execute('PRAGMA table_info(answers)')}) or
                 needs_workflow_schema):
                 stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
-                backup_tag = ('v1_11' if needs_persona_schema else
+                backup_tag = ('v1_12' if needs_persona_schema else
                               'v1_10' if needs_workflow_schema else
                               'v1_9' if 'model_operation_tasks' not in old_tables or
                                   ('rooms' in old_tables and 'model_request_limit' not in {
@@ -341,6 +343,7 @@ def init_db(path):
             match_number INTEGER NOT NULL,
             frozen_at TEXT NOT NULL,
             source TEXT NOT NULL,
+            participant_roster_revision TEXT,
             PRIMARY KEY(room_id,match_number));
         CREATE TABLE IF NOT EXISTS match_seat_persona_snapshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -388,6 +391,9 @@ def init_db(path):
                                    ('deadline_at','TEXT'),('timeout_ended_at','TEXT')):
             if column not in round_columns:
                 db.execute(f'ALTER TABLE rounds ADD COLUMN {column} {definition}')
+        freeze_columns={x['name'] for x in db.execute('PRAGMA table_info(match_persona_freezes)')}
+        if 'participant_roster_revision' not in freeze_columns:
+            db.execute('ALTER TABLE match_persona_freezes ADD COLUMN participant_roster_revision TEXT')
         task_columns={x['name'] for x in db.execute('PRAGMA table_info(model_operation_tasks)')}
         if 'workflow_id' not in task_columns:
             db.execute('ALTER TABLE model_operation_tasks ADD COLUMN workflow_id INTEGER REFERENCES round_workflows(id) ON DELETE SET NULL')
@@ -1238,8 +1244,22 @@ def timed_out_aliases(db, round_id):
         'SELECT alias FROM round_timeouts WHERE round_id=? ORDER BY alias',(round_id,)).fetchall()]
 
 
+def ensure_persona_participant_roster_unchanged(db,room):
+    # The first-round preparation snapshot must not be reused after the actual
+    # contestant roster changes. Later voluntary departures follow match rules.
+    if room['match_started_at']:
+        return
+    frozen=db.execute('''SELECT participant_roster_revision FROM match_persona_freezes
+        WHERE room_id=? AND match_number=?''',(room['id'],room['match_number'])).fetchone()
+    expected=frozen['participant_roster_revision'] if frozen else None
+    if expected and expected!=participant_roster_revision(db,room['id']):
+        raise HTTPException(409,'首轮准备期间参赛名单或匿名代号已变化；请取消准备并重新入队。')
+
+
 def start_round_record(db, room, rnd, question):
-    freeze_match_personas(db,room,source='round_start')
+    ensure_persona_participant_roster_unchanged(db,room)
+    freeze_match_personas(db,room,source='round_start',
+        participant_roster_revision=participant_roster_revision(db,room['id']))
     started=datetime.now(timezone.utc)
     duration=room['round_duration_seconds'] if 'round_duration_seconds' in room.keys() else None
     deadline=(started+timedelta(seconds=int(duration))).isoformat(timespec='milliseconds') if duration else None
@@ -2324,8 +2344,10 @@ def create_app(db_path=None):
             room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
             if not room or room['status']!='open' or room['verdict_locked_at']:
                 raise HTTPException(409,'比赛已结束或裁判判断已锁定，不能生成 AI 裁判问题。')
+            ensure_persona_participant_roster_unchanged(db,room)
             if not is_match_persona_frozen(db,room_id,room['match_number']):
-                freeze_match_personas(db,room,source='question_generation')
+                freeze_match_personas(db,room,source='question_generation',
+                    participant_roster_revision=participant_roster_revision(db,room_id))
             if workflow:
                 actor_status=workflow_actor_valid(db,workflow)
                 if actor_status is not True:
@@ -2459,7 +2481,8 @@ def create_app(db_path=None):
             if not room or room['status']!='open':
                 raise HTTPException(409,'比赛已结束。')
             if not is_match_persona_frozen(db,room_id,room['match_number']):
-                freeze_match_personas(db,room,source='answer_generation')
+                freeze_match_personas(db,room,source='answer_generation',
+                    participant_roster_revision=participant_roster_revision(db,room_id))
             if workflow:
                 actor_status=workflow_actor_valid(db,workflow)
                 if actor_status is not True:
@@ -2626,7 +2649,9 @@ def create_app(db_path=None):
             (room['id'],match_number,round_number)).fetchone()[0]
         if active_tasks:
             raise HTTPException(409,'本轮已有独立模型任务正在处理；请等待其结束后再创建服务端工作流。')
-        freeze_match_personas(db,room,source='workflow')
+        ensure_persona_participant_roster_unchanged(db,room)
+        freeze_match_personas(db,room,source='workflow',
+            participant_roster_revision=participant_roster_revision(db,room['id']))
         now=operation_timestamp()
         roster_revision=workflow_roster_revision(db,room['id'])
         input_revision=workflow_input_revision(db,room['id'],round_number)

@@ -80,14 +80,16 @@ def output_token_limit(persona,model_max_tokens,*,final_verdict=False):
  return model_limit if cap is None else min(model_limit,int(cap))
 def is_match_persona_frozen(db,room_id,match_number):
  return bool(db.execute("SELECT 1 FROM match_persona_freezes WHERE room_id=? AND match_number=?",(room_id,match_number)).fetchone())
-def freeze_match_personas(db,room,*,source="workflow"):
+def freeze_match_personas(db,room,*,source="workflow",participant_roster_revision=None):
  room_id=int(room["id"]); match_number=int(room["match_number"])
  if is_match_persona_frozen(db,room_id,match_number): return False
  frozen_at=room["match_started_at"]
  if not frozen_at:
   from datetime import datetime,timezone
   frozen_at=datetime.now(timezone.utc).isoformat(timespec="milliseconds")
- db.execute("INSERT INTO match_persona_freezes(room_id,match_number,frozen_at,source) VALUES(?,?,?,?)",(room_id,match_number,frozen_at,source))
+ db.execute("""INSERT INTO match_persona_freezes(
+    room_id,match_number,frozen_at,source,participant_roster_revision) VALUES(?,?,?,?,?)""",
+    (room_id,match_number,frozen_at,source,participant_roster_revision))
  for seat_type,key_column,label_column,table in (("participant","alias","name","ai_players"),("judge","id","label","ai_judges")):
   for row in db.execute(f"SELECT * FROM {table} WHERE room_id=? ORDER BY {key_column}",(room_id,)).fetchall():
    config=persona_config_from_row(row,seat_type); profile_id=row["model_profile_id"] if "model_profile_id" in row.keys() else None; model=None
