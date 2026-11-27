@@ -989,10 +989,14 @@ async function logout(page) {
       const externalRevealed = await (await context.request.get(site + externalBase)).json();
       assert.equal(externalRevealed.judges.length, 0, '该场必须走外部裁判手动转录模式');
       assert.equal(externalRevealed.personas_revealed, true);
-      assert.equal((externalRevealed.verdicts || []).length, 0,
-        '外部裁判模式使用房主手动转录的单份最终判决');
+      assert.equal((externalRevealed.verdicts || []).length, 1,
+        '外部裁判模式应保留房主手动转录的单份 legacy 判决');
+      assert.equal(externalRevealed.verdicts[0].legacy, true,
+        '外部裁判模式的手动判决应标记为 legacy');
 
       await page.goto(site + '#room=' + externalRoom.room_id);
+      // The owner deliberately remains on the participant-management tab.
+      await page.locator('[data-action="room-view"][data-view="admin"]').click();
       await page.getByRole('heading', { name: '本场 AI 席位人设', exact: true }).waitFor();
       const externalResultText = await page.locator('#app').innerText();
       assert(externalResultText.includes('严谨分析者'));
