@@ -55,7 +55,7 @@ def test_match_persona_snapshot_is_immutable_and_revealed_without_secrets():
     db.executescript("""
         CREATE TABLE match_persona_freezes(
             room_id INTEGER, match_number INTEGER, frozen_at TEXT, source TEXT,
-            PRIMARY KEY(room_id,match_number));
+            participant_roster_revision TEXT, PRIMARY KEY(room_id,match_number));
         CREATE TABLE match_seat_persona_snapshots(
             id INTEGER PRIMARY KEY, room_id INTEGER, match_number INTEGER,
             seat_type TEXT, seat_key TEXT, seat_label TEXT, config_json TEXT,
@@ -78,8 +78,9 @@ def test_match_persona_snapshot_is_immutable_and_revealed_without_secrets():
                "'https://provider.example/v1',0.3,1024,30)")
     db.execute("INSERT INTO ai_players VALUES(1,'A','Bot A',11,'analytical',1,'','short',0,1)")
     room = {"id": 1, "match_number": 3, "match_started_at": None}
-    assert freeze_match_personas(db, room) is True
-    assert freeze_match_personas(db, room) is False
+    assert freeze_match_personas(db, room, participant_roster_revision="roster-v1") is True
+    assert freeze_match_personas(db, room, participant_roster_revision="roster-v2") is False
+    assert db.execute("SELECT participant_roster_revision FROM match_persona_freezes").fetchone()[0] == "roster-v1"
     db.execute("UPDATE ai_players SET persona_preset_id='casual' WHERE room_id=1 AND alias='A'")
     db.execute("UPDATE model_profiles SET model='changed-model' WHERE id=11")
     rows = revealed_persona_rows(db, 1, 3)
@@ -146,6 +147,17 @@ def test_persona_api_freezes_and_allows_preparation_reset(tmp_path):
     request(admin, "POST", base + "/ai-judges/questions/generate")
     assert admin.get(base).json()["personas_frozen"] is True
     request(admin, "PUT", base + f"/ai/{ai['alias']}/persona", participant_config, 409)
+
+    # A late registration changes the frozen contestant roster. A manually
+    # entered AI judge question based on the old roster must not start the round.
+    late_player = TestClient(app)
+    request(late_player, "POST", "/api/register", {
+        "username": "persona_player_late", "display_name": "迟到参赛者",
+        "password": "persona-player-password", "code": room["code"],
+    })
+    request(admin, "POST", base + f"/ai-judges/{judge['id']}/questions",
+            {"text": "请描述一次你修正错误判断的经历。"})
+    request(admin, "POST", base + "/start", expected=409)
 
     reset = request(admin, "POST", base + "/personas/reset-preparation", {"confirm": True})
     assert reset["reset"] is True

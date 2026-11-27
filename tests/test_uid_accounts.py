@@ -219,12 +219,12 @@ def test_legacy_migration_preserves_all_records_backup_and_passwords(tmp_path):
             assert row.pop('records_deleted') == 0
         assert after == before
         assert db.execute('PRAGMA foreign_key_check').fetchall() == []
-    backups = list(tmp_path.glob('legacy.pre-v1_11-*.sqlite3'))
+    backups = list(tmp_path.glob('legacy.pre-v1_12-*.sqlite3'))
     assert len(backups) == 1
     with db_open(backups[0]) as db:
         assert snapshot(db) == before
     create_app(path)
-    assert len(list(tmp_path.glob('legacy.pre-v1_11-*.sqlite3'))) == 1
+    assert len(list(tmp_path.glob('legacy.pre-v1_12-*.sqlite3'))) == 1
     assert seed_admin(path, 'legacy_admin', '不覆盖', 'new-password') is False
     # All original identities retain their IDs; old username login is explicit.
     for old_name, uid in (('legacy_admin', 'TL00000007'), ('legacy_player', 'TL00000023'), ('TL00000023', 'TL00000030')):
