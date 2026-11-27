@@ -1877,6 +1877,22 @@ def create_app(db_path=None):
                                     profile, trigger_user_id, room_id=None, match_number=None,
                                     round_number=None, context_revision=None, retry_of=None,
                                     idempotency_key=None, workflow_id=None, workflow_generation=None):
+        normalized_key=(str(idempotency_key)[:128] if idempotency_key else None)
+        if normalized_key:
+            if room_id is None:
+                existing=db.execute("""SELECT id,state FROM model_operation_tasks
+                    WHERE purpose='connection_test' AND profile_owner_user_id=? AND profile_id=?
+                      AND target_type=? AND target_key=? AND idempotency_key=?
+                    ORDER BY id DESC LIMIT 1""",
+                    (profile['owner_user_id'],profile['id'],target_type,str(target_key),normalized_key)).fetchone()
+            else:
+                existing=db.execute('''SELECT id,state FROM model_operation_tasks
+                    WHERE room_id=? AND match_number=? AND round_number=? AND purpose=?
+                      AND target_type=? AND target_key=? AND idempotency_key=?
+                    ORDER BY id DESC LIMIT 1''',
+                    (room_id,match_number,round_number,purpose,target_type,str(target_key),normalized_key)).fetchone()
+            if existing:
+                return int(existing['id']),False,existing['state']
         if room_id is None:
             active=db.execute("""SELECT id,state FROM model_operation_tasks
                 WHERE purpose='connection_test' AND profile_owner_user_id=? AND profile_id=?
@@ -1902,7 +1918,7 @@ def create_app(db_path=None):
             (room_id,match_number,round_number,purpose,target_type,str(target_key),target_label,
              profile['id'],profile['owner_user_id'],trigger_user_id,profile_name,model_name,
              model_profile_snapshot_hash(profile),context_revision,retry_of,workflow_id,
-             workflow_generation,(idempotency_key or secrets.token_urlsafe(18))[:128],now,now))
+             workflow_generation,normalized_key or secrets.token_urlsafe(18),now,now))
         return int(cur.lastrowid),True,'queued'
 
     def finish_model_operation_in_db(db, operation_id, state, *, error=None, result_applied=False):
@@ -1969,13 +1985,16 @@ def create_app(db_path=None):
         workflow_id=workflow['id'] if workflow else None
         workflow_generation=workflow['execution_generation'] if workflow else None
         previous=None
+        attempts=[]
         attempt_count=0
+        request_attempt_count=0
         if workflow:
             with connection() as db:
                 attempts=db.execute('''SELECT * FROM model_operation_tasks
                     WHERE workflow_id=? AND purpose=? AND target_type=? AND target_key=?
                     ORDER BY id''',(workflow_id,purpose,target_type,str(target_key))).fetchall()
             attempt_count=len(attempts)
+            request_attempt_count=sum(1 for item in attempts if item['request_started_at'] is not None)
             previous=attempts[-1] if attempts else None
             if previous:
                 if previous['state']=='completed' and previous['result_applied']:
@@ -1983,29 +2002,33 @@ def create_app(db_path=None):
                 if previous['state']=='interrupted' and not workflow['allow_unknown_retry']:
                     return {'status':'interrupted','operation_id':previous['id'],
                             'error':'服务重启时模型请求结果未知；核对比赛内容后，由房主明确确认是否重试。'}
-                if previous['state']=='blocked' and not workflow['allow_unknown_retry']:
-                    return {'status':'blocked','operation_id':previous['id'],
-                            'error':previous['error_message'] or '模型请求被本场额度阻止。'}
-                if previous['state']=='failed' and not retryable_model_error(previous['error_message'] or '') and not workflow['allow_unknown_retry']:
+                if previous['state']=='blocked':
+                    with connection() as db:
+                        current_room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
+                        limit=current_room['model_request_limit'] if current_room else None
+                        quota_still_blocked=(limit is not None and
+                            model_request_count(db,room_id,match_number)>=limit)
+                    if quota_still_blocked:
+                        return {'status':'blocked','operation_id':previous['id'],
+                                'error':previous['error_message'] or '模型请求被本场额度阻止；提高额度后可恢复。'}
+                if (previous['state']=='failed' and
+                        not retryable_model_error(previous['error_message'] or '') and
+                        not workflow['manual_retry_authorized']):
                     return {'status':'failed','operation_id':previous['id'],
-                            'error':previous['error_message'] or '模型调用失败。'}
+                            'error':previous['error_message'] or '模型调用失败；修复原因后可由房主手动恢复。'}
                 if previous['state']=='stale':
                     return {'status':'skipped','operation_id':previous['id'],
                             'reason':previous['error_message'] or '旧模型任务已作废。'}
                 if previous['state']=='requesting':
                     return {'status':'requesting','operation_id':previous['id'],
                             'reason':'该席位已有请求正在处理。'}
-        auto_limit=3
-        if workflow and attempt_count>=auto_limit and not workflow['allow_unknown_retry']:
-            return {'status':'failed','operation_id':previous['id'] if previous else None,
-                    'error':'该席位已达到自动重试次数上限，请检查原因后手动恢复。'}
+            if request_attempt_count>=3:
+                return {'status':'failed','operation_id':previous['id'] if previous else None,
+                        'error':'该席位已达到最多 3 次实际模型请求上限；自动与人工重试共用此上限。'}
+        max_attempts=max(1,3-request_attempt_count) if workflow else 1
         attempt_no=max(1,attempt_count+1)
-        max_attempts=(auto_limit if workflow else 1)
-        if workflow and workflow['allow_unknown_retry']:
-            max_attempts=max(1,auto_limit-attempt_count)
         parent_id=(previous['id'] if previous and previous['state'] in ('failed','interrupted','blocked')
                    else retry_of)
-        results=[]
         for attempt in range(max_attempts):
             if workflow:
                 with connection() as db:
@@ -2030,9 +2053,15 @@ def create_app(db_path=None):
                     context_revision=context_revision,retry_of=parent_id,
                     idempotency_key=attempt_key,workflow_id=workflow_id,
                     workflow_generation=workflow_generation)
+            if not created and active_state=='completed':
+                with connection() as db:
+                    row=db.execute('SELECT result_applied FROM model_operation_tasks WHERE id=?',
+                                   (operation_id,)).fetchone()
+                if row and row['result_applied']:
+                    return {'status':'generated','operation_id':operation_id,'already_applied':True}
             if not created and active_state!='queued':
                 return {'status':active_state,'operation_id':operation_id,
-                        'reason':'该席位已有进行中的模型任务。'}
+                        'reason':'该席位已有相同幂等键或进行中的模型任务。'}
             try:
                 key=decrypt_api_key(profile['api_key_encrypted'])
                 def preflight():
@@ -2089,7 +2118,7 @@ def create_app(db_path=None):
                 await finish_and_notify_model_operation(operation_id,'failed',error=exc)
                 return {'status':'failed','operation_id':operation_id,
                         'error':'模型调用失败或返回内容无效，请检查配置或稍后重试。'}
-        return {'status':'failed','operation_id':parent_id,'error':'模型自动重试已达到上限。'}
+        return {'status':'failed','operation_id':parent_id,'error':'该席位已达到最多 3 次实际模型请求上限。'}
 
     async def generate_ai_judge_questions_shared(room_id, actor_id, session_hash=None,
                                                   target_judge_id=None, retry_of=None,
@@ -3739,10 +3768,11 @@ def create_app(db_path=None):
                 raise HTTPException(409,'参赛名单或 AI 席位配置已变化；请取消旧准备并重新入队。')
             now=operation_timestamp()
             db.execute("""UPDATE round_workflows SET state='queued',stage='queued',
-                allow_unknown_retry=CASE WHEN ? OR ? THEN 1 ELSE allow_unknown_retry END,
+                allow_unknown_retry=CASE WHEN ? THEN 1 ELSE allow_unknown_retry END,
+                manual_retry_authorized=CASE WHEN ? THEN 1 ELSE manual_retry_authorized END,
                 waiting_reason=NULL,error_message=NULL,worker_token=NULL,finished_at=NULL,updated_at=?
-                WHERE id=?""",(1 if body.confirm_unknown_attempts else 0,
-                                  1 if row['state'] in ('blocked','failed') else 0,
+                WHERE id=?""",(1 if interrupted and body.confirm_unknown_attempts else 0,
+                                  1 if row['state']=='failed' else 0,
                                   now,workflow_id))
             updated=db.execute('SELECT * FROM round_workflows WHERE id=?',(workflow_id,)).fetchone()
         app.state.workflow_worker.wake()
