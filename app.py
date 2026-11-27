@@ -3787,7 +3787,6 @@ def create_app(db_path=None):
 
     @app.post('/api/rooms/{room_id}/start')
     async def start_round(room_id:int,request:Request):
-        queued_workflow_id=None
         with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
@@ -3801,12 +3800,23 @@ def create_app(db_path=None):
                 ORDER BY id DESC LIMIT 1""",
                 (room_id,room['match_number'],rnd['number'])).fetchone()
             if active:
-                workflow_id,_,workflow=create_round_workflow(
-                    db,room,u,rnd,mode='start',include_ai_questions=True,
-                    idempotency_key=f"compat-start:{room['match_number']}:{rnd['number']}")
-                if workflow['mode']!='start' or workflow['state'] in ('blocked','failed','waiting_input'):
-                    raise HTTPException(409,'本轮服务端工作流正在等待处理；请在参赛者管理中查看原因。')
-                queued_workflow_id=workflow_id
+                if active['mode']!='prepare_only' or active['state'] not in ('queued','waiting_input','blocked','failed'):
+                    raise HTTPException(409,'本轮服务端工作流正在执行；请等待其完成或由房主取消。')
+                active_tasks=db.execute("""SELECT 1 FROM model_operation_tasks
+                    WHERE workflow_id=? AND state IN ('queued','requesting') LIMIT 1""",
+                    (active['id'],)).fetchone()
+                if active_tasks:
+                    raise HTTPException(409,'AI 裁判问题仍在生成，请等待模型任务结束后再开始。')
+                validation=inspect_round_start(db,room)
+                if validation['reason']:
+                    raise HTTPException(409,validation['reason'])
+                now=operation_timestamp()
+                db.execute("""UPDATE round_workflows SET state='cancelled',stage='cancelled',
+                    execution_generation=execution_generation+1,worker_token=NULL,
+                    waiting_reason=NULL,error_message=?,finished_at=?,updated_at=?
+                    WHERE id=? AND state IN ('queued','waiting_input','blocked','failed')""",
+                    ('房主通过兼容开局接口直接开始本轮；未完成的自动准备已停止。',
+                     now,now,active['id']))
             else:
                 active_questions=db.execute("""SELECT 1 FROM model_operation_tasks
                     WHERE room_id=? AND match_number=? AND round_number=? AND purpose='judge_question'
@@ -3817,13 +3827,9 @@ def create_app(db_path=None):
                 validation=inspect_round_start(db,room)
                 if validation['reason']:
                     raise HTTPException(409,validation['reason'])
-                start_round_record(db,room,rnd,validation['question'])
-                name_lock_user_ids=room_lock_user_ids(db,room_id)
-                log_event(db,room_id,rnd['number'],'judge_question','独立裁判组','主持人已开启统一作答')
-        if queued_workflow_id is not None:
-            app.state.workflow_worker.wake()
-            await app.state.hub.notify(room_id,'round_workflow_updated')
-            return {'ok':True,'workflow_id':queued_workflow_id}
+            start_round_record(db,room,rnd,validation['question'])
+            name_lock_user_ids=room_lock_user_ids(db,room_id)
+            log_event(db,room_id,rnd['number'],'judge_question','独立裁判组','主持人已开启统一作答')
         await app.state.hub.notify(room_id,'judge_question')
         await app.state.hub.notify_accounts(name_lock_user_ids, {'type':'name_lock_updated'})
         return {'ok':True}
