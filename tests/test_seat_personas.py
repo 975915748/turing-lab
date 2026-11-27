@@ -274,6 +274,22 @@ def test_persona_api_freezes_and_allows_preparation_reset(tmp_path):
     assert judge_view["is_judge"] is True
     assert judge_view["personas_revealed"] is False
     assert not judge_view.get("seat_personas")
+    pre_reveal_log = player_a.get(base + "/log")
+    assert pre_reveal_log.status_code == 200
+    assert "严谨分析者" not in pre_reveal_log.text
+    assert "语言细节" not in pre_reveal_log.text
+
+    # Room WebSocket notifications contain only event metadata, never seat persona data.
+    with player_a.websocket_connect(f"/ws/rooms/{room['room_id']}") as socket:
+        connected = socket.receive_json()
+        assert connected == {"type": "connected", "room_id": room["room_id"]}
+        request(admin, "PUT", base + f"/ai-judges/{judge['id']}/persona", judge_config)
+        notification = socket.receive_json()
+        assert notification["type"] == "room_updated"
+        assert notification["reason"] == "seat_persona_changed"
+        assert "seat_personas" not in notification
+        assert "custom_system_prompt" not in notification
+        assert "语言细节" not in json.dumps(notification, ensure_ascii=False)
 
     # A preparation attempt freezes both seat configs even if the AI judge is manual.
     request(admin, "POST", base + "/ai-judges/questions/generate")
