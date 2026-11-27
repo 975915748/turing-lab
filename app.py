@@ -3837,6 +3837,12 @@ def create_app(db_path=None):
             rnd=current_round(db,room)
             if rnd['status']!='collecting':
                 raise HTTPException(409,'本轮不能录入回答。')
+            active=db.execute("""SELECT 1 FROM round_workflows
+                WHERE room_id=? AND match_number=? AND round_number=?
+                  AND state IN ('queued','generating_questions','starting_round','generating_answers')
+                LIMIT 1""",(room_id,room['match_number'],rnd['number'])).fetchone()
+            if active:
+                raise HTTPException(409,'服务端正在生成本轮 AI 回答，请等待工作流结束或由房主取消。')
             if round_deadline_expired(rnd):
                 raise HTTPException(409,'本轮答题时间已到，等待房主结束本轮。')
             if db.execute('SELECT 1 FROM answers WHERE round_id=? AND alias=?',(rnd['id'],alias)).fetchone():
