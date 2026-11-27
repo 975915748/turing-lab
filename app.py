@@ -4123,7 +4123,9 @@ def create_app(db_path=None):
             db.execute('INSERT INTO ai_players(room_id,alias,name,model_profile_id) VALUES(?,?,?,?)',
                        (room_id,alias,name,body.model_profile_id))
             if frozen:
-                freeze_new_manual_participant_seat(db,room,alias,name)
+                freeze_new_manual_participant_seat(
+                    db,room,alias,name,
+                    participant_roster_revision=participant_roster_revision(db,room_id))
             log_event(db,room_id,1,'ai_joined',alias,'AI 参赛位已添加')
         await app.state.hub.notify(room_id,'ai_joined')
         return {'alias':alias,'automated':body.model_profile_id is not None}

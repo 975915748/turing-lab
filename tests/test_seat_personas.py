@@ -94,6 +94,55 @@ def test_match_persona_snapshot_is_immutable_and_revealed_without_secrets():
     assert "base_url" not in rows[0] and "profile_name" not in rows[0] and "api_key" not in rows[0]
 
 
+def test_prestart_deleted_roster_recovery_updates_frozen_revision(tmp_path):
+    path = tmp_path / "persona-recovery.sqlite3"
+    seed_admin(path, "persona_admin", "人设管理员", "persona-admin-password")
+    app = create_app(path)
+    admin, player_a, player_b = (TestClient(app) for _ in range(3))
+
+    def request(client, method, url, data=None, expected=200):
+        me = client.get("/api/me")
+        headers = {"X-CSRF-Token": me.json()["user"]["csrf"]} if me.status_code == 200 else {}
+        response = client.request(method, url, json=data or {}, headers=headers)
+        assert response.status_code == expected, (url, response.status_code, response.text)
+        return response.json() if response.content else {}
+
+    request(admin, "POST", "/api/login",
+            {"username": "persona_admin", "password": "persona-admin-password"})
+    room = request(admin, "POST", "/api/rooms", {"title": "冻结后的账号删除补位"})
+    base = f"/api/rooms/{room['room_id']}"
+    players = (player_a, player_b)
+    for index, client in enumerate(players):
+        request(client, "POST", "/api/register", {
+            "username": f"persona_recovery_player_{index}",
+            "display_name": f"参赛者 {index}",
+            "password": "persona-player-password",
+            "code": room["code"],
+        })
+    request(admin, "POST", base + "/ai", {"name": "保留 AI"})
+    judge = request(admin, "POST", base + "/ai-judges", {"name": "手动 AI 裁判"})
+
+    # Preparation freezes the original two-human/one-AI roster.
+    request(admin, "POST", base + "/ai-judges/questions/generate")
+    request(admin, "POST", base + f"/ai-judges/{judge['id']}/questions",
+            {"text": "请描述一次你修正错误判断的经历。"})
+
+    for client in players:
+        uid = client.get("/api/me").json()["user"]["uid"]
+        request(admin, "DELETE", "/api/admin/users/" + uid, {"confirm": True})
+    assert admin.get(base).json()["roster_recovery"] is True
+
+    # The only permitted post-freeze replacement is a manual AI seat. Its
+    # frozen roster revision must advance with the recovery snapshot.
+    request(admin, "POST", base + "/ai", {"name": "账号删除补位 AI"})
+    request(admin, "POST", base + "/start")
+    info = admin.get(base).json()
+    assert info["match_started"] is True
+    assert info["personas_frozen"] is True
+    assert len(info["ais"]) == 2
+    assert len(info["seat_personas"]) == 0  # details remain hidden until formal reveal
+
+
 def test_persona_api_freezes_and_allows_preparation_reset(tmp_path):
     path = tmp_path / "personas.sqlite3"
     seed_admin(path, "persona_admin", "人设管理员", "persona-admin-password")

@@ -108,7 +108,7 @@ def freeze_match_personas(db,room,*,source="workflow",participant_roster_revisio
       config_json,model_json,config_hash,frozen_at) VALUES(?,?,?,?,?,?,?,?,?)""",
       (room_id,match_number,seat_type,str(row[key_column]),row[label_column],cj,mj,digest,frozen_at))
  return True
-def freeze_new_manual_participant_seat(db,room,alias,name):
+def freeze_new_manual_participant_seat(db,room,alias,name,*,participant_roster_revision=None):
  """Freeze a manual recovery seat added after the match snapshot already exists."""
  room_id=int(room["id"]); match_number=int(room["match_number"])
  freeze=db.execute("SELECT frozen_at FROM match_persona_freezes WHERE room_id=? AND match_number=?",
@@ -121,6 +121,10 @@ def freeze_new_manual_participant_seat(db,room,alias,name):
      seat_label,config_json,model_json,config_hash,frozen_at)
      VALUES(?,?,'participant',?,?,?,NULL,?,?)""",
      (room_id,match_number,str(alias),str(name),cj,digest,freeze["frozen_at"]))
+ if participant_roster_revision is not None:
+  db.execute("""UPDATE match_persona_freezes SET participant_roster_revision=?
+      WHERE room_id=? AND match_number=?""",
+      (participant_roster_revision,room_id,match_number))
  return True
 
 
