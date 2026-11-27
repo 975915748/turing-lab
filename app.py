@@ -4444,7 +4444,15 @@ def create_app(db_path=None):
             actor_id=u['id']
             session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
             results=[]
-            profiles=[dict(row) for row in rows]
+            profiles=[]
+            for raw in rows:
+                profile=dict(raw)
+                snapshot=match_seat_persona_snapshot(db,room_id,match_number,'judge',profile['judge_id'])
+                persona=json.loads(snapshot['config_json']) if snapshot else persona_config_from_row(profile,'judge')
+                if snapshot:
+                    profile=load_frozen_model_profile(db,snapshot) or dict(raw)
+                profile['_persona']=persona
+                profiles.append(profile)
             retry_of=getattr(request.state,'model_operation_retry_of',None)
             queued_profiles=[]
             for profile in profiles:
@@ -4494,12 +4502,14 @@ def create_app(db_path=None):
                             return False
                         current_packet=anonymous_match_packet(db,room_id)
                         return hashlib.sha256(current_packet.encode('utf-8')).hexdigest()==evidence_revision
+                persona=profile.get('_persona') or {}
+                platform_prompt=('你是多人图灵测试的独立裁判。你必须只根据匿名代号及参赛者回答，判断每个代号实际是人类还是 AI。'
+                    '不能访问或猜测真实身份、模型来源、账号资料。对所有代号都必须给出判断。'
+                    '严格返回 JSON 对象，不要使用 Markdown 代码块或附加说明。结构：'
+                    '{"predictions":{"A":"Human"},"evidence":"判断依据","confidence":0,"weakness":"最不确定之处","possible_error":"可能误判原因"}。'
+                    'predictions 的值只能是 Human 或 AI，confidence 必须为 0 到 100 的整数。')
                 result=await model_call(profile,[
-                    {'role':'system','content':('你是多人图灵测试的独立裁判。你必须只根据匿名代号及参赛者回答，判断每个代号实际是人类还是 AI。'
-                     '不能访问或猜测真实身份、模型来源、账号资料。对所有代号都必须给出判断。'
-                     '严格返回 JSON 对象，不要使用 Markdown 代码块或附加说明。结构：'
-                     '{"predictions":{"A":"Human"},"evidence":"判断依据","confidence":0,"weakness":"最不确定之处","possible_error":"可能误判原因"}。'
-                     'predictions 的值只能是 Human 或 AI，confidence 必须为 0 到 100 的整数。')},
+                    {'role':'system','content':compose_system_prompt(platform_prompt,persona,task='judge_verdict',final_verdict=True)},
                     {'role':'user','content':packet}],key,preflight,
                     operation_id=operation_id)
                 payload=parse_json_object(result['text'])
