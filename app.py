@@ -3538,6 +3538,105 @@ def create_app(db_path=None):
         await app.state.hub.notify(room_id,'round_timeout')
         return {'ok':True,'timed_out':timed_out,'revealed':True}
 
+    @app.post('/api/rooms/{room_id}/round-workflows',status_code=202)
+    async def enqueue_round_workflow(room_id:int,body:RoundWorkflowData,request:Request):
+        key=request.headers.get('Idempotency-Key','').strip()
+        if not key or len(key)>128:
+            raise HTTPException(422,'必须提供 1～128 字符的 Idempotency-Key。')
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            check_match_number(room,body.match_number)
+            rnd=current_round(db,room)
+            if body.round_number!=rnd['number']:
+                raise HTTPException(409,'当前轮次已变化，请刷新后重新提交。')
+            existing=db.execute('''SELECT * FROM round_workflows
+                WHERE room_id=? AND match_number=? AND round_number=? AND idempotency_key=?''',
+                (room_id,room['match_number'],rnd['number'],key)).fetchone()
+            if not existing and rnd['status']!='draft':
+                raise HTTPException(409,'只有 draft 轮次可以创建新的开局工作流。')
+            workflow_id,created,row=create_round_workflow(
+                db,room,u,rnd,mode=body.mode,
+                include_ai_questions=body.include_ai_questions,idempotency_key=key)
+            row=db.execute('SELECT * FROM round_workflows WHERE id=?',(workflow_id,)).fetchone()
+            view=workflow_view(row)
+        app.state.workflow_worker.wake()
+        await app.state.hub.notify(room_id,'round_workflow_updated')
+        return {'ok':True,'created':created,'workflow':view}
+
+    @app.get('/api/rooms/{room_id}/round-workflows/{workflow_id}')
+    def get_round_workflow(room_id:int,workflow_id:int,request:Request):
+        with connection() as db:
+            u=caller(request,db)
+            room,_=require_room_manager(db,room_id,u)
+            row=db.execute('SELECT * FROM round_workflows WHERE id=? AND room_id=?',
+                           (workflow_id,room_id)).fetchone()
+            if not row:
+                raise HTTPException(404,'比赛工作流不存在。')
+            tasks=db.execute('SELECT * FROM model_operation_tasks WHERE workflow_id=? ORDER BY id',
+                             (workflow_id,)).fetchall()
+            return {'workflow':workflow_view(row),
+                    'seat_tasks':[model_operation_view(task) for task in tasks],
+                    'server_now':utcnow()}
+
+    @app.post('/api/rooms/{room_id}/round-workflows/{workflow_id}/cancel')
+    async def cancel_round_workflow(room_id:int,workflow_id:int,body:ConfirmData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            row=db.execute('SELECT * FROM round_workflows WHERE id=? AND room_id=?',
+                           (workflow_id,room_id)).fetchone()
+            if not row:
+                raise HTTPException(404,'比赛工作流不存在。')
+            if row['state'] in ('completed','cancelled','stale'):
+                return {'ok':True,'workflow':workflow_view(row)}
+            now=operation_timestamp()
+            db.execute("""UPDATE round_workflows SET state='cancelled',stage='cancelled',
+                execution_generation=execution_generation+1,worker_token=NULL,
+                waiting_reason=NULL,error_message='房主已取消本次准备。',finished_at=?,updated_at=?
+                WHERE id=?""",(now,now,workflow_id))
+            db.execute("""UPDATE model_operation_tasks SET state='stale',finished_at=?,updated_at=?,
+                error_message='比赛工作流已取消；迟到结果不得写入。',result_applied=0
+                WHERE workflow_id=? AND state IN ('queued','requesting')""",
+                (now,now,workflow_id))
+            updated=db.execute('SELECT * FROM round_workflows WHERE id=?',(workflow_id,)).fetchone()
+        app.state.workflow_worker.wake()
+        await app.state.hub.notify(room_id,'round_workflow_updated')
+        return {'ok':True,'workflow':workflow_view(updated)}
+
+    @app.post('/api/rooms/{room_id}/round-workflows/{workflow_id}/resume')
+    async def resume_round_workflow(room_id:int,workflow_id:int,body:WorkflowResumeData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            row=db.execute('SELECT * FROM round_workflows WHERE id=? AND room_id=?',
+                           (workflow_id,room_id)).fetchone()
+            if not row:
+                raise HTTPException(404,'比赛工作流不存在。')
+            if row['state'] not in ('waiting_input','blocked','failed'):
+                raise HTTPException(409,'当前工作流状态不能手动恢复。')
+            check_match_number(room,row['match_number'])
+            if room['status']!='open' or room['current_round']!=row['round_number']:
+                raise HTTPException(409,'房间或轮次已变化，旧工作流不能恢复。')
+            interrupted=db.execute("""SELECT COUNT(*) FROM model_operation_tasks
+                WHERE workflow_id=? AND state='interrupted' AND request_started_at IS NOT NULL""",
+                (workflow_id,)).fetchone()[0]
+            if interrupted and not body.confirm_unknown_attempts:
+                raise HTTPException(409,'存在结果未知的模型请求。请先核对比赛内容，并明确确认再次请求可能产生费用。')
+            if workflow_roster_revision(db,room_id)!=row['roster_revision']:
+                raise HTTPException(409,'参赛名单或 AI 席位配置已变化；请取消旧准备并重新入队。')
+            now=operation_timestamp()
+            db.execute("""UPDATE round_workflows SET state='queued',stage='queued',
+                allow_unknown_retry=CASE WHEN ? OR ? THEN 1 ELSE allow_unknown_retry END,
+                waiting_reason=NULL,error_message=NULL,worker_token=NULL,finished_at=NULL,updated_at=?
+                WHERE id=?""",(1 if body.confirm_unknown_attempts else 0,
+                                  1 if row['state'] in ('blocked','failed') else 0,
+                                  now,workflow_id))
+            updated=db.execute('SELECT * FROM round_workflows WHERE id=?',(workflow_id,)).fetchone()
+        app.state.workflow_worker.wake()
+        await app.state.hub.notify(room_id,'round_workflow_updated')
+        return {'ok':True,'workflow':workflow_view(updated)}
+
     @app.post('/api/rooms/{room_id}/start')
     async def start_round(room_id:int,request:Request):
         with connection(immediate=True) as db:
