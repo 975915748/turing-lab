@@ -756,7 +756,7 @@ function renderModelOperationPanel(r){
  const tasks=r.model_operations||[],history=r.model_operation_history||[];
  const historyKey=String(r.id)+':'+String(r.match_number);
  const renderTask=(t,allowRetry)=>{
-  const retryable=allowRetry&&['failed','interrupted','blocked'].includes(t.state);
+  const retryable=allowRetry&&!t.workflow_id&&['failed','interrupted','blocked'].includes(t.state);
   const request=t.request_succeeded===true?'请求成功':t.request_succeeded===false?'请求失败':t.request_started_at?'请求结果待确认':'尚未开始请求';
   const applied=t.result_applied?'已写入比赛':t.request_succeeded===true?'结果未应用':'未写入比赛';
   const usage=t.usage_known?'Token：'+operationTokens(t.total_tokens):'Token：未返回';
