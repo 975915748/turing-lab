@@ -4609,6 +4609,13 @@ def create_app(db_path=None):
             if not profile_row or model_profile_credential_status(dict(profile_row))!='ok':
                 raise HTTPException(409,'原模型配置已删除或不可用，请先修复配置并重新绑定。')
             profile=dict(profile_row)
+            if task['persona_snapshot_id'] is not None:
+                snapshot=db.execute('SELECT * FROM match_seat_persona_snapshots WHERE id=? AND room_id=? AND match_number=?',
+                    (task['persona_snapshot_id'],room_id,task['match_number'])).fetchone()
+                frozen_profile=load_frozen_model_profile(db,snapshot) if snapshot else None
+                if not frozen_profile:
+                    raise HTTPException(409,'本场冻结模型配置或其凭据所有权已失效，不能重试。')
+                profile=frozen_profile
             if model_profile_snapshot_hash(profile)!=task['profile_snapshot_hash']:
                 raise HTTPException(409,'原模型配置已发生变化，请确认新配置后从当前阶段重新发起。')
             purpose=task['purpose']
@@ -4627,7 +4634,8 @@ def create_app(db_path=None):
                               (room_id,task['round_number'],int(target_key))).fetchone():
                     raise HTTPException(409,'该 AI 裁判已提交问题，无需重试。')
                 roster=aliases(db,room_id)[2]
-                history=anonymous_match_packet(db,room_id,task['round_number']-1)
+                persona=json.loads(db.execute('SELECT config_json FROM match_seat_persona_snapshots WHERE id=?',(task['persona_snapshot_id'],)).fetchone()['config_json']) if task['persona_snapshot_id'] is not None else {}
+                history=anonymous_match_packet(db,room_id,task['round_number']-1,persona.get('history_rounds',5))
                 revision=hashlib.sha256(
                     (str(task['round_number'])+'|'+','.join(roster)+'|'+history).encode('utf-8')).hexdigest()
                 if revision!=task['context_revision']:
@@ -4645,7 +4653,8 @@ def create_app(db_path=None):
                 if db.execute('SELECT 1 FROM answers WHERE round_id=? AND alias=?',
                               (rnd['id'],target_key)).fetchone():
                     raise HTTPException(409,'该 AI 参赛席已提交回答，无需重试。')
-                history=anonymous_player_history(db,room_id,target_key,task['round_number']-1)
+                persona=json.loads(db.execute('SELECT config_json FROM match_seat_persona_snapshots WHERE id=?',(task['persona_snapshot_id'],)).fetchone()['config_json']) if task['persona_snapshot_id'] is not None else {}
+                history=anonymous_player_history(db,room_id,target_key,task['round_number']-1,persona.get('history_rounds',5))
                 revision=hashlib.sha256((rnd['question']+'\0'+history).encode('utf-8')).hexdigest()
                 if revision!=task['context_revision']:
                     raise HTTPException(409,'回答所依据的问题或历史资料已变化，不能重试旧任务。')
