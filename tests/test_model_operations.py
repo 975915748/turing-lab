@@ -795,6 +795,7 @@ def test_batch_idempotency_is_per_seat_and_failed_replay_does_not_retry(operatio
     assert replay['results'][0]['replayed'] is True
     assert lab['state']['calls'] == 2, '失败任务的相同键重放不能再次请求模型'
 
+    post(admin, base + '/personas/reset-preparation', {'confirm': True})
     updated = dict(lab['profile_body'])
     updated['temperature'] = 0.5
     updated['api_key'] = ''
@@ -807,8 +808,8 @@ def test_batch_idempotency_is_per_seat_and_failed_replay_does_not_retry(operatio
     assert lab['state']['calls'] == 2
 
     retried = post_with_idempotency_key(admin, base + '/ai-judges/questions/generate', 'judge-batch-new-attempt')
-    assert retried['generated'] == 1
-    assert lab['state']['calls'] == 3
+    assert retried['generated'] == 2
+    assert lab['state']['calls'] == 4
 
     # The same key in another room is a separate logical operation.
     second_room = post(admin, '/api/rooms', {'title': '另一房间幂等隔离'})
@@ -825,7 +826,7 @@ def test_batch_idempotency_is_per_seat_and_failed_replay_does_not_retry(operatio
     isolated = post_with_idempotency_key(
         admin, second_base + '/ai-judges/questions/generate', 'judge-batch-once')
     assert isolated['generated'] == 1
-    assert lab['state']['calls'] == 4
+    assert lab['state']['calls'] == 5
 
 
 def test_batch_question_idempotency_conflict_rolls_back_all_queued_seats(operation_lab):
@@ -851,6 +852,7 @@ def test_batch_question_idempotency_conflict_rolls_back_all_queued_seats(operati
         (str(judge_b['id']), 'failed')
     ]
 
+    post(admin, base + '/personas/reset-preparation', {'confirm': True})
     put(admin, f"{base}/ai-judges/{judge_a['id']}/model", {
         'model_profile_id': profile_id,
     })
@@ -874,7 +876,7 @@ def test_batch_question_idempotency_conflict_rolls_back_all_queued_seats(operati
         idempotency_count = db.execute("""SELECT COUNT(*) FROM model_operation_idempotency
             WHERE idempotency_key=?""", (key,)).fetchone()[0]
     assert [(row['target_key'], row['state']) for row in rows] == [
-        (str(judge_b['id']), 'failed')
+        (str(judge_b['id']), 'stale')
     ]
     assert idempotency_count == 1
 
@@ -893,7 +895,7 @@ def test_batch_question_idempotency_conflict_rolls_back_all_queued_seats(operati
         by_target.setdefault(row['target_key'], []).append(row['state'])
     assert by_target == {
         str(judge_a['id']): ['completed'],
-        str(judge_b['id']): ['failed', 'completed'],
+        str(judge_b['id']): ['stale', 'completed'],
     }
 
 

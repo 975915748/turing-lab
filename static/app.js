@@ -81,7 +81,7 @@ async function refreshRoom(expectedContext=null){
  const roomId=expectedContext?.roomId??state.roomId;
  if(!roomId||location.hash.startsWith('#profile'))return false;
  const context=expectedContext||captureRoomOperationContext(),requestVersion=++state.roomRefreshVersion;
- const current=()=>!state.exitingRoom&&state.roomId===roomId&&state.room?.id===roomId&&state.room?.match_number===context.matchNumber&&state.roomContextEpoch===context.epoch&&
+ const current=()=>!state.exitingRoom&&state.roomId===roomId&&state.room?.id===roomId&&state.roomContextEpoch===context.epoch&&
   state.me?.user?.uid===context.uid&&state.me?.user?.csrf===context.csrf&&state.roomRefreshVersion===requestVersion;
  try{
   const r=await api(`/api/rooms/${roomId}`);
@@ -1259,7 +1259,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
     const result=await api(`/api/rooms/${context.roomId}/next`,{method:'POST',matchNumber:context.matchNumber,roundNumber:context.roundNumber});
     if(!isCurrentRoomContext(context,false))return;
     const refreshed=await refreshRoom(context);
-    if(!refreshed||!isCurrentRoomContext(context,false)||state.room.current_round!==context.roundNumber+1)return;
+    if(!isCurrentRoomContext(context,false))return;
     toast('第 '+result.number+' 轮已创建；服务端正在准备问题，准备完成后仍需单独开始答题。');
    }
   }
@@ -1267,7 +1267,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
    const context=captureRoomOperationContext(),shouldGenerate=b.dataset.generateQuestions==='true';roomErrorGuard=()=>isCurrentRoomContext(context);
    if(!isCurrentRoomContext(context))throw new Error('房间状态已变化，请刷新后重试。');
    const readiness=state.room?.readiness;
-   if(!readiness||(shouldGenerate?!readiness.can_generate_and_start:!readiness.can_start)){
+   if(!readiness||!(readiness.can_start||readiness.can_generate_and_start)){
     const reasons=(readiness?.blockers||[]).filter(Boolean);throw new Error(reasons.join('；')||'本轮尚未满足开局条件，请刷新后重试。');
    }
    const prompt=shouldGenerate?'提交一次服务端开局任务？服务器会先生成可用 AI 裁判问题，再检查条件、开启作答并自动生成 AI 回答。':'提交一次服务端开局任务？服务器会按当前已提交问题检查条件、开启作答并自动生成 AI 回答。';
@@ -1280,7 +1280,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
        body:{match_number:context.matchNumber,round_number:context.roundNumber,include_ai_questions:shouldGenerate,mode:'start'}
       });
      if(!isCurrentRoomContext(context))return;
-     const refreshed=await refreshRoom(context);if(!refreshed||!isCurrentRoomContext(context))return;
+     await refreshRoom(context);if(!isCurrentRoomContext(context))return;
      toast('服务端开局任务已提交：'+workflowStateText(result.workflow?.state));
     }finally{if(b.isConnected){b.disabled=false;b.textContent=originalText}}
    }
