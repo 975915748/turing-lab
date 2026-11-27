@@ -42,7 +42,7 @@ def site(tmp_path):
         sock.close()
 
 
-@pytest.mark.parametrize('scenario', ['register', 'judges'])
+@pytest.mark.parametrize('scenario', ['register', 'judges', 'room-race'])
 def test_uid_browser(site, scenario):
     root = Path(__file__).resolve().parents[1]
     result = subprocess.run(['node', str(root / 'tests' / 'uid_ui.cjs'), site, scenario],
@@ -130,6 +130,12 @@ def test_ai_question_entrypoints_browser(model_site):
 def test_model_operations_browser(model_site):
     root = Path(__file__).resolve().parents[1]
     result = subprocess.run(['node', str(root / 'tests' / 'model_operations_ui.cjs'), model_site],
+        cwd=root, capture_output=True, text=True, encoding='utf-8', timeout=150)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+def test_model_list_account_switch_race_browser(model_site):
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(['node', str(root / 'tests' / 'uid_ui.cjs'), model_site, 'model-account-race'],
         cwd=root, capture_output=True, text=True, encoding='utf-8', timeout=150)
     assert result.returncode == 0, result.stdout + result.stderr
 
