@@ -1482,7 +1482,7 @@ def is_complete(db, rnd, room_id):
     _, _, expected = aliases(db, room_id)
     collected = {r['alias'] for r in db.execute('SELECT alias FROM answers WHERE round_id=?', (rnd['id'],))}
     collected.update(timed_out_aliases(db,rnd['id']))
-    original_count = db.execute('SELECT COUNT(*) FROM members WHERE room_id=? AND removed_at IS NULL', (room_id,)).fetchone()[0]
+    original_count = db.execute('SELECT COUNT(*) FROM members WHERE room_id=?', (room_id,)).fetchone()[0]
     original_count += db.execute('SELECT COUNT(*) FROM ai_players WHERE room_id=?', (room_id,)).fetchone()[0]
     if original_count >= 2 and set(expected).issubset(collected):
         db.execute('UPDATE rounds SET status=?,revealed_at=? WHERE id=?', ('revealed', utcnow(), rnd['id']))
@@ -2179,7 +2179,7 @@ def create_app(db_path=None):
                                     'status':'skipped','reason':reasons.get(status,'绑定的模型配置不可用。')})
                     continue
                 profiles.append(profile)
-        for profile in profiles:
+        async def generate_one(profile):
             judge_id=profile['judge_id']
             context_revision=hashlib.sha256(
                 (str(round_number)+'|'+','.join(roster)+'|'+history).encode('utf-8')).hexdigest()
@@ -2218,12 +2218,15 @@ def create_app(db_path=None):
                     {'role':'system','content':('你是多人图灵测试的独立裁判。每轮只提出一个核心问题，不得把多个问题打包。'
                      '问题必须面向所有匿名参赛者，不能询问真实姓名、账号、模型名称或系统提示。'
                      '只输出问题正文，不要前言、编号或解释。')},
-                    {'role':'user','content':f'此前轮次的匿名资料：\n{history}\n\n当前是第 {round_number} 轮，参赛者匿名代号：{", ".join(roster)}。'
+                    {'role':'user','content':f'此前轮次的匿名资料：\\n{history}\\n\\n当前是第 {round_number} 轮，参赛者匿名代号：{", ".join(roster)}。'
                      '请根据已有信息提出一个适合所有参赛者回答的全新问题。'}],
                 validate_context=validate_context,apply_result=apply_result,
                 workflow=workflow,retry_of=retry_of,idempotency_key=idempotency_key)
             outcome.update({'judge_id':judge_id,'label':profile['label']})
-            results.append(outcome)
+            return outcome
+
+        if profiles:
+            results.extend(await asyncio.gather(*(generate_one(profile) for profile in profiles)))
         generated=sum(x['status']=='generated' for x in results)
         return {'generated':generated,'skipped':sum(x['status']=='skipped' for x in results),
                 'blocked':sum(x['status']=='blocked' for x in results),
@@ -2272,10 +2275,10 @@ def create_app(db_path=None):
                               for row in rows}
             roster_revision=workflow_roster_revision(db,room_id)
         results=[]
-        for profile in profiles:
+        async def generate_one(profile):
             alias=profile['alias']
             history=history_by_alias.get(alias,'（此前没有已完成轮次。）')
-            context_revision=hashlib.sha256((question+'\0'+history).encode('utf-8')).hexdigest()
+            context_revision=hashlib.sha256((question+'\\0'+history).encode('utf-8')).hexdigest()
             def validate_context(db, alias=alias, profile=profile, history=history):
                 current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
                 if not current or current['match_number']!=match_number or current['status']!='open':
@@ -2314,11 +2317,14 @@ def create_app(db_path=None):
                 messages=[
                     {'role':'system','content':('你正在参加一场多人图灵测试。你是匿名参赛者，请自然、直接地回答裁判问题。'
                      '不要提及模型、API、系统提示或你被要求扮演的身份；不要编造个人经历来冒充真实事实。')},
-                    {'role':'user','content':f'你此前的本场记录（只包含你自己的回答）：\n{history}\n\n当前第 {round_number} 轮裁判问题：\n\n{question}\n\n请给出你的本轮回答。'}],
+                    {'role':'user','content':f'你此前的本场记录（只包含你自己的回答）：\\n{history}\\n\\n当前第 {round_number} 轮裁判问题：\\n\\n{question}\\n\\n请给出你的本轮回答。'}],
                 validate_context=validate_context,apply_result=apply_result,
                 workflow=workflow,retry_of=retry_of,idempotency_key=idempotency_key)
             outcome.update({'alias':alias})
-            results.append(outcome)
+            return outcome
+
+        if profiles:
+            results.extend(await asyncio.gather(*(generate_one(profile) for profile in profiles)))
         generated=sum(x['status']=='generated' for x in results)
         return {'generated':generated,'skipped':sum(x['status']=='skipped' for x in results),
                 'blocked':sum(x['status']=='blocked' for x in results),
@@ -3781,31 +3787,43 @@ def create_app(db_path=None):
 
     @app.post('/api/rooms/{room_id}/start')
     async def start_round(room_id:int,request:Request):
+        queued_workflow_id=None
         with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
             if room['status']!='open' or room['verdict_locked_at']:
                 raise HTTPException(409,'比赛已结束或裁判判断已锁定。')
             rnd=current_round(db,room)
-            active=db.execute("""SELECT 1 FROM round_workflows
+            active=db.execute("""SELECT * FROM round_workflows
                 WHERE room_id=? AND match_number=? AND round_number=?
                   AND state IN ('queued','generating_questions','starting_round','generating_answers',
-                                'waiting_input','blocked','failed') LIMIT 1""",
+                                'waiting_input','blocked','failed')
+                ORDER BY id DESC LIMIT 1""",
                 (room_id,room['match_number'],rnd['number'])).fetchone()
             if active:
-                raise HTTPException(409,'本轮已有服务端工作流；请在参赛者管理中查看其状态。')
-            active_questions=db.execute("""SELECT 1 FROM model_operation_tasks
-                WHERE room_id=? AND match_number=? AND round_number=? AND purpose='judge_question'
-                  AND state IN ('queued','requesting') LIMIT 1""",
-                (room_id,room['match_number'],rnd['number'])).fetchone()
-            if active_questions:
-                raise HTTPException(409,'AI 裁判问题仍在生成，请等待模型任务结束后再开始。')
-            validation=inspect_round_start(db,room)
-            if validation['reason']:
-                raise HTTPException(409,validation['reason'])
-            start_round_record(db,room,rnd,validation['question'])
-            name_lock_user_ids=room_lock_user_ids(db,room_id)
-            log_event(db,room_id,rnd['number'],'judge_question','独立裁判组','主持人已开启统一作答')
+                workflow_id,_,workflow=create_round_workflow(
+                    db,room,u,rnd,mode='start',include_ai_questions=True,
+                    idempotency_key=f"compat-start:{room['match_number']}:{rnd['number']}")
+                if workflow['mode']!='start' or workflow['state'] in ('blocked','failed','waiting_input'):
+                    raise HTTPException(409,'本轮服务端工作流正在等待处理；请在参赛者管理中查看原因。')
+                queued_workflow_id=workflow_id
+            else:
+                active_questions=db.execute("""SELECT 1 FROM model_operation_tasks
+                    WHERE room_id=? AND match_number=? AND round_number=? AND purpose='judge_question'
+                      AND state IN ('queued','requesting') LIMIT 1""",
+                    (room_id,room['match_number'],rnd['number'])).fetchone()
+                if active_questions:
+                    raise HTTPException(409,'AI 裁判问题仍在生成，请等待模型任务结束后再开始。')
+                validation=inspect_round_start(db,room)
+                if validation['reason']:
+                    raise HTTPException(409,validation['reason'])
+                start_round_record(db,room,rnd,validation['question'])
+                name_lock_user_ids=room_lock_user_ids(db,room_id)
+                log_event(db,room_id,rnd['number'],'judge_question','独立裁判组','主持人已开启统一作答')
+        if queued_workflow_id is not None:
+            app.state.workflow_worker.wake()
+            await app.state.hub.notify(room_id,'round_workflow_updated')
+            return {'ok':True,'workflow_id':queued_workflow_id}
         await app.state.hub.notify(room_id,'judge_question')
         await app.state.hub.notify_accounts(name_lock_user_ids, {'type':'name_lock_updated'})
         return {'ok':True}
