@@ -955,8 +955,6 @@ async function logout(page) {
         headers, data: { text: '请描述一次你修正错误判断的经历。' },
       });
       assert.equal(externalQuestion.status(), 200, await externalQuestion.text());
-      const externalStart = await context.request.post(site + externalBase + '/start', { headers });
-      assert.equal(externalStart.status(), 200, await externalStart.text());
       const externalLive = await (await context.request.get(site + externalBase)).json();
       assert.equal(externalLive.personas_frozen, true);
       for (let i = 0; i < externalPlayerContexts.length; i++) {
