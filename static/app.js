@@ -1222,11 +1222,22 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
    toast('消息已发送');return;
   }
   if(type==='seat-persona'){
+   const requestRoomId=id,requestMatch=state.room?.match_number,requestUid=state.me?.user?.uid,
+    requestCsrf=state.me?.user?.csrf,requestEpoch=state.personalModelEpoch;
+   const seatType=form.dataset.seatType,seatKey=form.dataset.seatKey;
+   const draftKey=personaDraftKey(seatType,seatKey,requestRoomId,requestMatch);
    const payload={preset_id:data.preset_id,custom_system_prompt:data.custom_system_prompt||'',output_length:data.output_length,history_rounds:Number(data.history_rounds)};
-   if(!Number.isSafeInteger(payload.history_rounds)||payload.history_rounds<0||payload.history_rounds>100)throw new Error('出题历史轮数必须为 0～100 的整数');
-   if(form.dataset.seatType==='participant')await api('/api/rooms/'+id+'/ai/'+encodeURIComponent(form.dataset.seatKey)+'/persona',{method:'PUT',body:payload});
-   else await api('/api/rooms/'+id+'/ai-judges/'+Number(form.dataset.seatKey)+'/persona',{method:'PUT',body:payload});
-   await refreshRoom();toast('席位人设已保存');return;
+   if(!Number.isSafeInteger(payload.history_rounds)||payload.history_rounds<0||payload.history_rounds>100)throw new Error('历史上下文轮数必须为 0～100 的整数');
+   if(seatType==='participant')await api('/api/rooms/'+requestRoomId+'/ai/'+encodeURIComponent(seatKey)+'/persona',{method:'PUT',body:payload});
+   else await api('/api/rooms/'+requestRoomId+'/ai-judges/'+Number(seatKey)+'/persona',{method:'PUT',body:payload});
+   if(state.roomId!==requestRoomId||state.room?.match_number!==requestMatch||
+      state.me?.user?.uid!==requestUid||state.me?.user?.csrf!==requestCsrf||
+      state.personalModelEpoch!==requestEpoch)return;
+   delete state.personaDrafts[draftKey];
+   await refreshRoom();
+   if(state.roomId!==requestRoomId||state.room?.match_number!==requestMatch||
+      state.me?.user?.uid!==requestUid||state.personalModelEpoch!==requestEpoch)return;
+   toast('席位人设已保存');return;
   }
   if(type==='bind-ai-player-model'||type==='bind-ai-judge-model'){
    const keep=data.model_profile_id==='__unchanged__';
