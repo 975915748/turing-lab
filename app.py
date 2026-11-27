@@ -29,7 +29,8 @@ from social import register_social_routes, ensure_app_schema, cleanup_deleted_ac
 from match_orchestration import PersistentWorkflowWorker
 from seat_personas import (compose_system_prompt, freeze_match_personas, is_match_persona_frozen,
                             normalize_persona_config, output_token_limit, persona_catalog,
-                            persona_config_from_row, revealed_persona_rows)
+                            persona_config_from_row, revealed_persona_rows,
+                            freeze_new_manual_participant_seat)
 
 ROOT = Path(__file__).resolve().parent
 DATABASE = ROOT / 'data' / 'game.sqlite3'
@@ -4116,15 +4117,28 @@ def create_app(db_path=None):
             room,_=require_room_manager(db,room_id,u)
             if room['status']!='open' or room['verdict_locked_at']:
                 raise HTTPException(409,'比赛已结束或裁判判断已锁定，不能添加 AI 参赛位。')
-            if is_match_persona_frozen(db,room_id,room['match_number']):
-                raise HTTPException(409,'本场准备已冻结；如需补位或修改 AI 席位，请先取消准备并重置配置。')
-            ensure_roster_unlocked(db,room)
+            recovery=needs_roster_recovery(db,room)
+            frozen=is_match_persona_frozen(db,room_id,room['match_number'])
+            post_start_recovery=bool(room['match_started_at']) and recovery
+            if frozen and not post_start_recovery:
+                raise HTTPException(409,'首轮准备已冻结；如需补位或修改 AI 席位，请先取消准备并重置配置。')
+            if post_start_recovery and body.model_profile_id is not None:
+                raise HTTPException(409,'比赛开始后因账号删除补位时，只能添加使用默认人设的手动 AI 席位。')
+            ensure_roster_unlocked(db,room,allow_frozen=True)
             alias=new_alias(db,room_id)
             if body.model_profile_id is not None:
                 require_owned_model_profile(db,body.model_profile_id,u['id'])
             name=norm_text(body.name,60)
             db.execute('INSERT INTO ai_players(room_id,alias,name,model_profile_id) VALUES(?,?,?,?)',
                        (room_id,alias,name,body.model_profile_id))
+            if frozen:
+                freeze_new_manual_participant_seat(
+                    db,room,alias,name,
+                    participant_roster_revision=participant_roster_revision(db,room_id))
+            elif room['match_started_at']:
+                # Legacy in-progress matches may predate persona snapshots.
+                freeze_match_personas(db,room,source='roster_recovery',
+                    participant_roster_revision=participant_roster_revision(db,room_id))
             log_event(db,room_id,1,'ai_joined',alias,'AI 参赛位已添加')
         await app.state.hub.notify(room_id,'ai_joined')
         return {'alias':alias,'automated':body.model_profile_id is not None}
