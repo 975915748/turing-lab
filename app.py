@@ -4259,9 +4259,13 @@ def create_app(db_path=None):
                     execution_generation=execution_generation+1,worker_token=NULL,waiting_reason=NULL,
                     error_message='房主取消准备并编辑席位配置。',finished_at=?,updated_at=?
                     WHERE id=?""",(now,now,row['id']))
+            # Completed AI questions are deleted below too. Invalidate their task
+            # records so the ledger does not claim an applied result and cannot retry
+            # against a snapshot that this reset removes.
             db.execute("""UPDATE model_operation_tasks SET state='stale',finished_at=?,updated_at=?,
-                error_message='准备已取消；旧模型结果不得写入。',result_applied=0
-                WHERE room_id=? AND match_number=? AND state IN ('queued','requesting')""",
+                error_message='准备已取消；旧模型结果不得写入或重试。',result_applied=0
+                WHERE room_id=? AND match_number=? AND round_number=1
+                  AND purpose='judge_question' AND state NOT IN ('stale','cancelled')""",
                 (now,now,room_id,room['match_number']))
             # AI judge questions are regenerated from the new snapshot; human judge questions remain.
             db.execute('DELETE FROM ai_judge_questions WHERE room_id=? AND round_number=1',(room_id,))

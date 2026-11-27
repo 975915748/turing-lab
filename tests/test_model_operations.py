@@ -518,6 +518,41 @@ def test_cancel_preparation_discards_inflight_persona_question_result(operation_
             (lab['room_id'],)).fetchone() is None
 
 
+def test_cancel_preparation_invalidates_completed_persona_question_task(operation_lab):
+    lab = operation_lab
+    admin, base = lab['admin'], lab['base']
+    judge = add_ai_judge(admin, base, '取消准备后不可重试的裁判', lab['profile_id'])
+
+    generated = post(admin, base + '/ai-judges/questions/generate')
+    assert generated['generated'] == 1
+    assert lab['state']['calls'] == 1
+    room = admin.get(base).json()
+    assert len(room['rounds'][0]['questions']) == 1
+    task = next(item for item in room['model_operations'] if item['purpose'] == 'judge_question')
+    assert task['state'] == 'completed'
+    assert task['result_applied'] is True
+
+    reset = post(admin, base + '/personas/reset-preparation', {'confirm': True})
+    assert reset['reset'] is True
+    room = admin.get(base).json()
+    assert room['personas_frozen'] is False
+    assert room['rounds'][0]['questions'] == []
+    with db_open(lab['path']) as db:
+        invalidated = db.execute(
+            'SELECT state,result_applied FROM model_operation_tasks WHERE id=?',
+            (task['id'],),
+        ).fetchone()
+    assert invalidated['state'] == 'stale'
+    assert invalidated['result_applied'] == 0
+    assert lab['state']['calls'] == 1
+
+    response = admin.post(base + f"/model-operations/{task['id']}/retry",
+                          headers={'X-CSRF-Token': admin.get('/api/me').json()['user']['csrf']})
+    assert response.status_code == 409
+    assert response.json()['detail'] == '只有失败、中断或额度阻止的任务可以重试。'
+    assert lab['state']['calls'] == 1
+
+
 def test_same_model_seats_use_distinct_frozen_persona_prompts(operation_lab):
     lab = operation_lab
     admin, p1, p2, base, profile_id = (
