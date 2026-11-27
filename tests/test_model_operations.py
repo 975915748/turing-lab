@@ -408,3 +408,23 @@ def test_batch_idempotency_is_per_seat_and_failed_replay_does_not_retry(operatio
     retried = post_with_idempotency_key(admin, base + '/ai-judges/questions/generate', 'judge-batch-new-attempt')
     assert retried['generated'] == 1
     assert lab['state']['calls'] == 3
+
+
+def test_room_mutations_reject_stale_round_preconditions(operation_lab):
+    lab = operation_lab
+    admin, base = lab['admin'], lab['base']
+    room = admin.get(base).json()
+    headers = {
+        'X-CSRF-Token': admin.get('/api/me').json()['user']['csrf'],
+        'X-Match-Number': str(room['match_number']),
+        'X-Round-Number': str(room['current_round'] + 1),
+    }
+    start = admin.post(base + '/start', headers=headers)
+    assert start.status_code == 409
+    assert '轮次已变化' in start.json()['detail']
+    next_round = admin.post(base + '/next', headers=headers)
+    assert next_round.status_code == 409
+    assert '轮次已变化' in next_round.json()['detail']
+    after = admin.get(base).json()
+    assert after['current_round'] == room['current_round']
+    assert after['rounds'][0]['status'] == 'draft'
