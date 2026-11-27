@@ -1400,6 +1400,24 @@ def public_room(db, room, user, mine):
             'model_request_count':model_request_count(db,room['id'],room['match_number']),
             'model_request_limit':room['model_request_limit'],
         })
+        workflow_row=db.execute('''SELECT * FROM round_workflows
+            WHERE room_id=? AND match_number=? AND round_number=?
+            ORDER BY id DESC LIMIT 1''',(room['id'],room['match_number'],room['current_round'])).fetchone()
+        if workflow_row:
+            workflow_state=workflow_row['state']
+            result['round_workflow']={
+                'id':workflow_row['id'],'mode':workflow_row['mode'],
+                'state':workflow_state,'stage':workflow_row['stage'],
+                'waiting_reason':workflow_row['waiting_reason'],
+                'error_message':workflow_row['error_message'],
+                'can_cancel':workflow_state in ('queued','generating_questions','starting_round',
+                    'generating_answers','waiting_input','blocked','failed'),
+                'can_resume':workflow_state in ('waiting_input','blocked','failed'),
+                'requires_unknown_confirmation':bool(
+                    workflow_row['waiting_reason'] and '结果未知' in workflow_row['waiting_reason']),
+            }
+        else:
+            result['round_workflow']=None
     return result
 
 
