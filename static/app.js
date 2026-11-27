@@ -859,8 +859,8 @@ ${renderPublicChat(r)}
    if(next){next.focus();if(editingPos!==null)next.setSelectionRange(editingPos,editingPos)}
  }
 }
-async setInterval(updateRoundCountdown,1000);
-function downloadLog(){const id=state.roomId,n=state.selectedRound;const file=await api(`/api/rooms/${id}/rounds/${n}/log`,{raw:true});const href=URL.createObjectURL(file);const a=document.createElement('a');a.href=href;a.download=`room-${id}-round-${n}.md`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(href),1500)}
+setInterval(updateRoundCountdown,1000);
+async function downloadLog(){const id=state.roomId,n=state.selectedRound;const file=await api(`/api/rooms/${id}/rounds/${n}/log`,{raw:true});const href=URL.createObjectURL(file);const a=document.createElement('a');a.href=href;a.download=`room-${id}-round-${n}.md`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(href),1500)}
 async function downloadFullLog(){const id=state.roomId;const file=await api(`/api/rooms/${id}/log`,{raw:true});const href=URL.createObjectURL(file);const a=document.createElement('a');a.href=href;a.download=`room-${id}-full-log.md`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(href),1500)}
 app.addEventListener('toggle',e=>{
  if(e.target.matches('details[data-packet-panel]'))state.packetPanels[e.target.dataset.key]=e.target.open;
