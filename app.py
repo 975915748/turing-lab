@@ -1194,7 +1194,8 @@ def match_readiness(db, room):
 
 def model_operation_view(row):
     return {
-        'id':row['id'],'purpose':row['purpose'],'target_type':row['target_type'],
+        'id':row['id'],'workflow_id':row['workflow_id'] if 'workflow_id' in row.keys() else None,
+        'purpose':row['purpose'],'target_type':row['target_type'],
         'target_key':row['target_key'],'target_label':row['target_label'],
         'profile_name':row['profile_name'],'model_name':row['model_name'],
         'state':row['state'],'retry_of':row['retry_of'],
@@ -1688,6 +1689,15 @@ def create_app(db_path=None):
                     if not task or task['state']!='queued':
                         outcome='stale'
                         outcome_reason='模型任务已不再处于排队状态。'
+                    elif task['workflow_id'] is not None:
+                        workflow=db.execute('SELECT state,execution_generation FROM round_workflows WHERE id=?',
+                                             (task['workflow_id'],)).fetchone()
+                        if (not workflow or workflow['execution_generation']!=task['workflow_generation'] or
+                                workflow['state'] not in ('generating_questions','starting_round','generating_answers')):
+                            outcome='stale'
+                            outcome_reason='比赛工作流执行代次已变化；旧模型任务未发送。'
+                        else:
+                            room_id=task['room_id']
                     else:
                         room_id=task['room_id']
                         if preflight is not None:
