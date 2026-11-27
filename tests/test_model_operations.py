@@ -51,6 +51,7 @@ def operation_lab(tmp_path, monkeypatch):
                 'model': profile.get('model'),
                 'max_tokens': profile.get('max_tokens'),
                 'temperature': profile.get('temperature'),
+                'api_key': api_key,
                 'system': messages[0]['content'] if messages else '',
             })
             fail = state['fail_next'] > 0
@@ -267,6 +268,38 @@ def test_failed_attempt_is_preserved_when_single_seat_retry_succeeds(operation_l
     assert new_attempt['result_applied'] is True
     assert room['model_request_count'] == 2
     assert len(room['rounds'][0]['questions']) == 1
+
+
+def test_frozen_model_retry_uses_rotated_api_key_and_records_credential_version(operation_lab):
+    lab = operation_lab
+    admin, base, profile_id = lab['admin'], lab['base'], lab['profile_id']
+    judge = add_ai_judge(admin, base, '凭据轮换恢复裁判', profile_id)
+    lab['state']['fail_next'] = 1
+
+    first = post(admin, base + '/ai-judges/questions/generate')
+    assert len(first['failed']) == 1
+    room = admin.get(base).json()
+    failed = next(task for task in room['model_operations'] if task['state'] == 'failed')
+    assert failed['target_key'] == str(judge['id'])
+    assert lab['state']['requests'][-1]['api_key'] == lab['profile_body']['api_key']
+
+    rotated_key = 'sk-ops-rotated-provider-key'
+    updated_profile = dict(lab['profile_body'], api_key=rotated_key)
+    put(admin, f'/api/me/models/{profile_id}', updated_profile)
+    retried = post(admin, f"{base}/model-operations/{failed['id']}/retry")
+    assert retried['generated'] == 1
+    assert lab['state']['requests'][-1]['api_key'] == rotated_key
+
+    room = admin.get(base).json()
+    retry_task = next(task for task in room['model_operations'] if task['retry_of'] == failed['id'])
+    assert retry_task['state'] == 'completed'
+    assert retry_task['result_applied'] is True
+    assert retry_task['credential_version_changed'] is True
+    assert room['model_request_count'] == 2
+    records = admin.get('/api/me/model-operations').json()
+    assert any(item['id'] == retry_task['id'] and item['credential_version_changed']
+               for item in records['records'])
+    assert rotated_key not in json.dumps(records, ensure_ascii=False)
 
 
 def test_other_manager_trigger_is_recorded_under_configuration_owner(operation_lab):
