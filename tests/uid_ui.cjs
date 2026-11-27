@@ -807,7 +807,7 @@ async function logout(page) {
       assert.equal(await participantPersona.locator('[name="preset_id"]').isDisabled(), false);
 
       await participantPersona.locator('[name="preset_id"]').selectOption('custom');
-      const customStyle = '用简短自然的口语直接回应，不使用分点列表。';
+      const customStyle = '用简短自然的口语直接回应，不使用分点列表。<img src=x onerror=alert(1)>';
       await participantPersona.locator('[name="custom_system_prompt"]').fill(customStyle);
       const customSaved = page.waitForResponse(response =>
         response.url().endsWith('/persona') && response.request().method() === 'PUT');
@@ -854,7 +854,15 @@ async function logout(page) {
 
       await judgePage.reload();
       await judgePage.getByRole('heading', { name: '本场 AI 席位人设', exact: true }).waitFor();
-      assert((await judgePage.locator('#app').innerText()).includes(customStyle));
+      const revealedJudgeText = await judgePage.locator('#app').innerText();
+      assert(revealedJudgeText.includes(customStyle));
+      assert(revealedJudgeText.includes(profile.model), '正式揭晓后应展示冻结的模型名称');
+      assert(revealedJudgeText.includes('回答历史轮数：12'));
+      assert(revealedJudgeText.includes('出题历史轮数：0'));
+      assert.equal(revealedJudgeText.includes('api.example.com'), false);
+      assert.equal(revealedJudgeText.includes('sk-browser-'), false);
+      assert.equal(await judgePage.locator('#app img').count(), 0,
+        '自定义 System Prompt 必须作为文本展示，不能执行 HTML');
       await judgePage.close();
       await judgeContext.close();
 
