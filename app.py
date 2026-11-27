@@ -4272,6 +4272,8 @@ def create_app(db_path=None):
                             (operation_id,room_id)).fetchone()
             if not task:
                 raise HTTPException(404,'模型任务不存在或已随比赛记录清理。')
+            if task['workflow_id'] is not None:
+                raise HTTPException(409,'此席位属于服务端工作流，请恢复整个工作流以遵守统一重试预算和执行代次。')
             if task['state'] not in ('failed','interrupted','blocked'):
                 raise HTTPException(409,'只有失败、中断或额度阻止的任务可以重试。')
             if task['match_number']!=room['match_number'] or task['round_number']!=room['current_round']:
