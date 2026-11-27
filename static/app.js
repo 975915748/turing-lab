@@ -642,7 +642,7 @@ function judgeAdminPanel(r){
  const manualAwaiting=awaiting.filter(j=>!usable(j));
  const autoAwaiting=awaiting.filter(j=>usable(j));
  const aliases=[...r.humans,...r.ais].map(x=>x.alias).sort();
- const canEdit=r.status==='open'&&!r.verdict_locked&&!judges.some(j=>j.locked);
+ const canEdit=r.status==='open'&&!r.verdict_locked&&!r.personas_frozen&&!judges.some(j=>j.locked);
  let html='<section class="card compact"><div class="label-line"><h2>AI 裁判管理</h2><span class="pill">'+judges.length+' 位 AI 裁判</span></div>'+
  '<p class="hint">AI 裁判可绑定你自己的个人模型配置自动出题和判断，也可手动转录。绑定后，本房间房主和全站管理员可通过比赛操作触发该配置的模型调用，服务商可能按实际调用量计费。绑定他人配置时，只能看到当前席位的必要摘要，不能读取或编辑对方的个人配置。</p>';
  if(judges.length){
