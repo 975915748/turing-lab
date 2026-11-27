@@ -3018,6 +3018,68 @@ def create_app(db_path=None):
         return {'ok':True,'limit':body.limit,'attempted':attempts,
                 'remaining':None if body.limit is None else max(0,body.limit-attempts)}
 
+    @app.put('/api/rooms/{room_id}/round-timer')
+    async def update_round_timer(room_id:int,body:RoundTimerData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            if room['status']!='open' or room['verdict_locked_at']:
+                raise HTTPException(409,'比赛已结束，不能修改回合限时。')
+            rnd=current_round(db,room)
+            db.execute('UPDATE rooms SET round_duration_seconds=? WHERE id=?',
+                       (body.seconds,room_id))
+            applies_to='current_round' if rnd['status']=='draft' else 'future_rounds'
+        await app.state.hub.notify(room_id,'round_timer_changed')
+        return {'ok':True,'seconds':body.seconds,'applies_to':applies_to}
+
+    @app.post('/api/rooms/{room_id}/rounds/{number}/finish-timeout')
+    async def finish_round_timeout(room_id:int,number:int,body:MatchActionData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            check_match_number(room,body.match_number)
+            if number!=room['current_round']:
+                raise HTTPException(409,'只能结束当前轮次。')
+            rnd=current_round(db,room,number)
+            if rnd['timeout_ended_at']:
+                return {'ok':True,'already_finished':True,'timed_out':timed_out_aliases(db,rnd['id'])}
+            if rnd['status']!='collecting':
+                raise HTTPException(409,'当前轮次不在收集回答阶段，不能执行超时结束。')
+            if not rnd['deadline_at']:
+                raise HTTPException(409,'本轮未启用限时，不能提前结束。')
+            if not round_deadline_expired(rnd):
+                raise HTTPException(409,'答题时间尚未结束。')
+            _,_,roster=aliases(db,room_id)
+            submitted={row['alias'] for row in db.execute(
+                'SELECT alias FROM answers WHERE round_id=?',(rnd['id'],)).fetchall()}
+            missing=sorted(set(roster)-submitted)
+            ended_at=datetime.now(timezone.utc).isoformat(timespec='milliseconds')
+            for alias in missing:
+                db.execute('INSERT OR IGNORE INTO round_timeouts(round_id,alias,timed_out_at) VALUES(?,?,?)',
+                           (rnd['id'],alias,ended_at))
+            db.execute('''UPDATE rounds SET status='revealed',revealed_at=?,timeout_ended_at=?
+                WHERE id=? AND status='collecting' ''',(ended_at,ended_at,rnd['id']))
+            db.execute('''UPDATE model_operation_tasks SET state='stale',finished_at=?,updated_at=?,
+                error_message=?,result_applied=0
+                WHERE room_id=? AND match_number=? AND round_number=? AND purpose='ai_answer'
+                  AND state IN ('queued','requesting')''',
+                (ended_at,ended_at,'本轮已由房主超时结束；迟到的 AI 回答不得写入。',
+                 room_id,room['match_number'],number))
+            db.execute('''UPDATE round_workflows SET state='stale',stage='stale',
+                execution_generation=execution_generation+1,worker_token=NULL,
+                waiting_reason=NULL,error_message=?,finished_at=?,updated_at=?
+                WHERE room_id=? AND match_number=? AND round_number=?
+                  AND state IN ('queued','generating_questions','starting_round','generating_answers',
+                                'waiting_input','blocked','failed')''',
+                ('本轮已超时结束，旧工作流已作废。',ended_at,ended_at,
+                 room_id,room['match_number'],number))
+            log_event(db,room_id,number,'round_timeout','管理员',
+                      f'房主结束本轮；{len(missing)} 个参赛席超时未提交。')
+            timed_out=timed_out_aliases(db,rnd['id'])
+        app.state.hub.typing.pop(room_id,None)
+        await app.state.hub.notify(room_id,'round_timeout')
+        return {'ok':True,'timed_out':timed_out,'revealed':True}
+
     @app.post('/api/rooms/{room_id}/start')
     async def start_round(room_id:int,request:Request):
         with connection(immediate=True) as db:
