@@ -104,7 +104,7 @@ def freeze_new_manual_participant_seat(db,room,alias,name):
  if not freeze: return False
  config=normalize_persona_config("participant")
  cj=json.dumps(config,ensure_ascii=False,sort_keys=True,separators=(",",":"))
- digest=hashlib.sha256((cj+"\\0").encode("utf-8")).hexdigest()
+ digest=hashlib.sha256((cj+"\0").encode("utf-8")).hexdigest()
  db.execute("""INSERT INTO match_seat_persona_snapshots(room_id,match_number,seat_type,seat_key,
      seat_label,config_json,model_json,config_hash,frozen_at)
      VALUES(?,?,'participant',?,?,?,NULL,?,?)""",
