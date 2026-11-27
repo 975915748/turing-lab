@@ -151,6 +151,7 @@ def init_db(path):
             current_round INTEGER NOT NULL DEFAULT 1,
             verdict_json TEXT, verdict_locked_at TEXT, revealed_at TEXT,
             model_request_limit INTEGER,
+            round_duration_seconds INTEGER,
             created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS members (
             room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
@@ -165,7 +166,12 @@ def init_db(path):
             id INTEGER PRIMARY KEY, room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
             number INTEGER NOT NULL, question TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'draft', created_at TEXT NOT NULL,
-            revealed_at TEXT, UNIQUE(room_id,number));
+            revealed_at TEXT, started_at TEXT, duration_seconds INTEGER,
+            deadline_at TEXT, timeout_ended_at TEXT, UNIQUE(room_id,number));
+        CREATE TABLE IF NOT EXISTS round_timeouts (
+            round_id INTEGER NOT NULL REFERENCES rounds(id) ON DELETE CASCADE,
+            alias TEXT NOT NULL, timed_out_at TEXT NOT NULL,
+            PRIMARY KEY(round_id,alias));
         CREATE TABLE IF NOT EXISTS answers (
             id INTEGER PRIMARY KEY, round_id INTEGER NOT NULL REFERENCES rounds(id) ON DELETE CASCADE,
             alias TEXT NOT NULL, text TEXT NOT NULL, submitted_at TEXT NOT NULL,
@@ -236,6 +242,31 @@ def init_db(path):
             through_round INTEGER NOT NULL, version INTEGER NOT NULL, content TEXT NOT NULL,
             sha256 TEXT NOT NULL, created_at TEXT NOT NULL, sent_at TEXT,
             UNIQUE(room_id,through_round,version));
+        CREATE TABLE IF NOT EXISTS round_workflows (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            match_number INTEGER NOT NULL, round_number INTEGER NOT NULL,
+            mode TEXT NOT NULL CHECK(mode IN ('start','prepare_only')),
+            requester_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            requester_uid TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            include_ai_questions INTEGER NOT NULL DEFAULT 1,
+            roster_revision TEXT NOT NULL, input_revision TEXT,
+            state TEXT NOT NULL CHECK(state IN
+                ('queued','generating_questions','starting_round','generating_answers',
+                 'waiting_input','blocked','failed','completed','cancelled','stale')),
+            stage TEXT NOT NULL DEFAULT 'queued', waiting_reason TEXT, error_message TEXT,
+            execution_generation INTEGER NOT NULL DEFAULT 0,
+            worker_token TEXT, worker_started_at TEXT,
+            allow_unknown_retry INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL, finished_at TEXT,
+            UNIQUE(room_id,match_number,round_number,idempotency_key));
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_round_workflows_active
+            ON round_workflows(room_id,match_number,round_number)
+            WHERE state IN ('queued','generating_questions','starting_round','generating_answers',
+                            'waiting_input','blocked','failed');
+        CREATE INDEX IF NOT EXISTS idx_round_workflows_room
+            ON round_workflows(room_id,match_number,round_number,id DESC);
         CREATE TABLE IF NOT EXISTS model_operation_tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             room_id INTEGER REFERENCES rooms(id) ON DELETE CASCADE,
@@ -248,6 +279,8 @@ def init_db(path):
             state TEXT NOT NULL CHECK(state IN
                 ('queued','requesting','completed','failed','blocked','stale','interrupted')),
             retry_of INTEGER REFERENCES model_operation_tasks(id) ON DELETE SET NULL,
+            workflow_id INTEGER REFERENCES round_workflows(id) ON DELETE SET NULL,
+            workflow_generation INTEGER,
             idempotency_key TEXT,
             queued_at TEXT NOT NULL, request_started_at TEXT, request_finished_at TEXT,
             finished_at TEXT, queue_ms INTEGER, duration_ms INTEGER,
@@ -275,6 +308,16 @@ def init_db(path):
             db.execute('ALTER TABLE members ADD COLUMN removed_at TEXT')
         if 'edited_at' not in {x['name'] for x in db.execute('PRAGMA table_info(answers)')}:
             db.execute('ALTER TABLE answers ADD COLUMN edited_at TEXT')
+        round_columns={x['name'] for x in db.execute('PRAGMA table_info(rounds)')}
+        for column, definition in (('started_at','TEXT'),('duration_seconds','INTEGER'),
+                                   ('deadline_at','TEXT'),('timeout_ended_at','TEXT')):
+            if column not in round_columns:
+                db.execute(f'ALTER TABLE rounds ADD COLUMN {column} {definition}')
+        task_columns={x['name'] for x in db.execute('PRAGMA table_info(model_operation_tasks)')}
+        if 'workflow_id' not in task_columns:
+            db.execute('ALTER TABLE model_operation_tasks ADD COLUMN workflow_id INTEGER REFERENCES round_workflows(id) ON DELETE SET NULL')
+        if 'workflow_generation' not in task_columns:
+            db.execute('ALTER TABLE model_operation_tasks ADD COLUMN workflow_generation INTEGER')
         if 'legacy_username' not in {x['name'] for x in db.execute('PRAGMA table_info(users)')}:
             migrate_user_accounts(db)
         if 'owner_id' not in {x['name'] for x in db.execute('PRAGMA table_info(rooms)')}:
@@ -286,6 +329,8 @@ def init_db(path):
             db.execute('ALTER TABLE rooms ADD COLUMN records_deleted INTEGER NOT NULL DEFAULT 0')
         if 'model_request_limit' not in {x['name'] for x in db.execute('PRAGMA table_info(rooms)')}:
             db.execute('ALTER TABLE rooms ADD COLUMN model_request_limit INTEGER')
+        if 'round_duration_seconds' not in {x['name'] for x in db.execute('PRAGMA table_info(rooms)')}:
+            db.execute('ALTER TABLE rooms ADD COLUMN round_duration_seconds INTEGER')
         if 'deleted_at' not in {x['name'] for x in db.execute('PRAGMA table_info(users)')}:
             db.execute('ALTER TABLE users ADD COLUMN deleted_at TEXT')
         room_sql = db.execute("SELECT sql FROM sqlite_master WHERE name='rooms'").fetchone()['sql']
@@ -298,6 +343,10 @@ def init_db(path):
         unfinished=db.execute("""SELECT * FROM model_operation_tasks
             WHERE state IN ('queued','requesting') ORDER BY id""").fetchall()
         for task in unfinished:
+            # A workflow-owned queued task has not reached the provider and is safe
+            # to resume. A requesting task is ambiguous and must never be replayed.
+            if task['workflow_id'] is not None and task['state']=='queued' and not task['request_started_at']:
+                continue
             next_state='interrupted'
             message='服务重启，无法确认请求是否完成；请先核对比赛内容再重试。'
             if task['room_id'] is not None:
@@ -324,6 +373,32 @@ def init_db(path):
             db.execute('''UPDATE model_operation_tasks SET state=?,finished_at=?,updated_at=?,
                 error_message=? WHERE id=? AND state IN ('queued','requesting')''',
                 (next_state,interrupted_at,interrupted_at,message,task['id']))
+        # Recover durable workflows only after individual model attempts have been
+        # classified. Unknown provider outcomes pause for explicit manager review.
+        workflows=db.execute("""SELECT * FROM round_workflows
+            WHERE state IN ('queued','generating_questions','starting_round','generating_answers')
+            ORDER BY id""").fetchall()
+        for workflow in workflows:
+            room=db.execute('SELECT * FROM rooms WHERE id=?',(workflow['room_id'],)).fetchone()
+            stale=(not room or room['status']!='open' or room['match_number']!=workflow['match_number']
+                   or room['current_round']!=workflow['round_number'])
+            if stale:
+                db.execute("""UPDATE round_workflows SET state='stale',stage='stale',
+                    waiting_reason=NULL,error_message=?,worker_token=NULL,finished_at=?,updated_at=?
+                    WHERE id=?""",('服务重启时发现房间、场次或轮次已变化；旧工作流已作废。',
+                                     interrupted_at,interrupted_at,workflow['id']))
+                continue
+            unknown=db.execute("""SELECT id FROM model_operation_tasks
+                WHERE workflow_id=? AND state='interrupted' ORDER BY id""",(workflow['id'],)).fetchall()
+            if unknown:
+                db.execute("""UPDATE round_workflows SET state='waiting_input',stage='waiting_input',
+                    waiting_reason=?,error_message=NULL,worker_token=NULL,finished_at=NULL,updated_at=?
+                    WHERE id=?""",('服务重启时有模型请求结果未知。请核对比赛内容后，由房主明确确认是否重试；再次请求可能产生费用。',
+                                     interrupted_at,workflow['id']))
+            else:
+                db.execute("""UPDATE round_workflows SET state='queued',stage='queued',
+                    worker_token=NULL,worker_started_at=NULL,updated_at=? WHERE id=?""",
+                    (interrupted_at,workflow['id']))
         ensure_app_schema(db, utcnow())
 
 
