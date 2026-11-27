@@ -325,6 +325,7 @@ def test_round_timer_deadline_and_host_timeout_finish(workflow_app, monkeypatch)
         assert second_round['started_at'] and second_round['deadline_at']
         mutate(players[0], base + '/answers', {'text': '第二轮回答 A'})
         mutate(players[1], base + '/answers', {'text': '第二轮回答 B'})
+        mutate(admin, base + f'/ai/{ai["alias"]}/answer', {'text': '第二轮 AI 回答'})
         assert admin.get(base).json()['rounds'][1]['status'] == 'revealed'
         normal_finish = mutate(admin, base + '/rounds/2/finish-timeout',
                                {'match_number': 1, 'confirm': True})
