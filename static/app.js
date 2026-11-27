@@ -14,11 +14,12 @@ function applyPrefs(){let theme=localStorage.getItem('turing_theme')||'light';do
 $('#themeBtn').addEventListener('click',()=>{localStorage.setItem('turing_theme',document.body.dataset.theme==='light'?'dark':'light');applyPrefs()});
 $('#fontSize').addEventListener('input',e=>{localStorage.setItem('turing_font',e.target.value);applyPrefs()});
 $('#logoutBtn').addEventListener('click',async()=>{try{await api('/api/logout',{method:'POST'});}catch(e){toast(e.message)} state.me=null;state.room=null;state.roomId=null;state.personalModels=[];clearPersonalModelState();state.chat=[];state.chatDraft='';state.drafts={};state.personalReturn=null;state.tab='login';state.legacyLogin=false;stopWs();history.replaceState(null,'',location.pathname);await init()});
-async function api(path,{method='GET',body,raw=false,matchNumber,idempotencyKey}={}){
+async function api(path,{method='GET',body,raw=false,matchNumber,roundNumber,idempotencyKey}={}){
  const opts={method,headers:{}};
  if(body!==undefined){opts.headers['Content-Type']='application/json';opts.body=JSON.stringify(body)}
  if(method!=='GET'&&state.me?.user?.csrf)opts.headers['X-CSRF-Token']=state.me.user.csrf;
  if(method!=='GET'&&matchNumber!==undefined)opts.headers['X-Match-Number']=String(matchNumber);
+ if(method!=='GET'&&roundNumber!==undefined)opts.headers['X-Round-Number']=String(roundNumber);
  else if(method!=='GET'&&state.room&&path.startsWith(`/api/rooms/${state.room.id}/`))opts.headers['X-Match-Number']=String(state.room.match_number);
  if(method!=='GET'&&idempotencyKey)opts.headers['Idempotency-Key']=idempotencyKey;
  let response;
@@ -712,7 +713,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
    b.disabled=true;b.textContent='模型正在出题…';
    const base=`/api/rooms/${context.roomId}`;
    const result=await idempotentApi(`room:${context.roomId}:match:${context.matchNumber}:round:${context.roundNumber}:judge_question`,
-    base+'/ai-judges/questions/generate',{method:'POST',matchNumber:context.matchNumber});
+    base+'/ai-judges/questions/generate',{method:'POST',matchNumber:context.matchNumber,roundNumber:context.roundNumber});
    if(!isCurrentRoomContext(context))return;
    await refreshRoom(context);if(!isCurrentRoomContext(context))return;toast(aiQuestionFeedback(result));
   }
@@ -721,7 +722,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
    b.disabled=true;b.textContent='模型正在回答…';
    const base=`/api/rooms/${context.roomId}`;
    const result=await idempotentApi(`room:${context.roomId}:match:${context.matchNumber}:round:${context.roundNumber}:ai_answer`,
-    base+'/ai/answers/generate',{method:'POST',matchNumber:context.matchNumber});
+    base+'/ai/answers/generate',{method:'POST',matchNumber:context.matchNumber,roundNumber:context.roundNumber});
    if(!isCurrentRoomContext(context))return;
    await refreshRoom(context);if(!isCurrentRoomContext(context))return;
    const detail=result.failed?.length?'；失败：'+result.failed.map(x=>x.alias+' '+x.error).join('；'):'';
@@ -732,7 +733,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
    b.disabled=true;b.textContent='模型正在判断…';
    const base=`/api/rooms/${context.roomId}`;
    const result=await idempotentApi(`room:${context.roomId}:match:${context.matchNumber}:judge_verdict`,
-    base+'/ai-judges/verdicts/generate',{method:'POST',matchNumber:context.matchNumber});
+    base+'/ai-judges/verdicts/generate',{method:'POST',matchNumber:context.matchNumber,roundNumber:context.roundNumber});
    if(!isCurrentRoomContext(context,false))return;
    await refreshRoom(context);if(!isCurrentRoomContext(context,false))return;
    const detail=result.failed?.length?'；失败：'+result.failed.map(x=>x.error).join('；'):'';
@@ -817,12 +818,12 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
    if(!isCurrentRoomContext(context))throw new Error('房间状态已变化，请刷新后重试。');
    if(confirm('确定开启下一轮？')){
     const base=`/api/rooms/${context.roomId}`;
-    await api(base+'/next',{method:'POST',matchNumber:context.matchNumber});
+    await api(base+'/next',{method:'POST',matchNumber:context.matchNumber,roundNumber:context.roundNumber});
     if(!isCurrentRoomContext(context,false))return;
     const refreshed=await refreshRoom(context);
     if(!refreshed||!isCurrentRoomContext(context,false)||state.room.current_round!==context.roundNumber+1)return;
     const q=await idempotentApi(`room:${context.roomId}:match:${context.matchNumber}:round:${context.roundNumber+1}:judge_question`,
-     base+'/ai-judges/questions/generate',{method:'POST',matchNumber:context.matchNumber});
+     base+'/ai-judges/questions/generate',{method:'POST',matchNumber:context.matchNumber,roundNumber:context.roundNumber+1});
     if(!isCurrentRoomContext(context,false)||state.room.current_round!==context.roundNumber+1)return;
     await refreshRoom(context);
     if(!isCurrentRoomContext(context,false)||state.room.current_round!==context.roundNumber+1)return;
@@ -840,7 +841,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
     const base=`/api/rooms/${roomId}`,originalText=b.textContent;b.disabled=true;b.textContent='正在准备模型…';
     try{
      const q=await idempotentApi(`room:${roomId}:match:${matchNumber}:round:${roundNumber}:judge_question`,
-      base+'/ai-judges/questions/generate',{method:'POST',matchNumber});
+      base+'/ai-judges/questions/generate',{method:'POST',matchNumber,roundNumber});
      if(!isCurrentRoomContext(context))return;
      const refreshed=await refreshRoom(context);
      if(!refreshed||!isCurrentRoomContext(context))return;
@@ -849,12 +850,12 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
      if(questionFailures.length){const failureDetails=[questionFailures.length?'失败：'+questionFailures.join('；'):'',questionSkips.length?'跳过：'+questionSkips.join('；'):''].filter(Boolean).join('；');throw new Error('AI 裁判出题未完成：'+failureDetails)}
      const refreshedRound=state.room?.rounds?.find(x=>x.number===roundNumber);
      if(!(refreshedRound?.questions?.length)){throw new Error(questionSkips.length?'AI 裁判未能出题：'+questionSkips.join('；'):(q.message||'当前没有可用于开局的裁判问题，请先录入问题或绑定可用模型配置。'))}
-     await api(base+'/start',{method:'POST',matchNumber});
+     await api(base+'/start',{method:'POST',matchNumber,roundNumber});
      if(!isCurrentRoomContext(context))return;
      const started=await refreshRoom(context);
      if(!started||!isCurrentRoomContext(context))return;
      const a=await idempotentApi(`room:${roomId}:match:${matchNumber}:round:${roundNumber}:ai_answer`,
-      base+'/ai/answers/generate',{method:'POST',matchNumber});
+      base+'/ai/answers/generate',{method:'POST',matchNumber,roundNumber});
      if(!isCurrentRoomContext(context))return;
      await refreshRoom(context);
      if(!isCurrentRoomContext(context))return;
