@@ -261,6 +261,16 @@ def init_db(path):
         CREATE UNIQUE INDEX IF NOT EXISTS idx_model_operations_active_profile_test
             ON model_operation_tasks(profile_owner_user_id,profile_id)
             WHERE purpose='connection_test' AND state IN ('queued','requesting');
+        CREATE TABLE IF NOT EXISTS model_operation_idempotency (
+            scope_key TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            request_fingerprint TEXT NOT NULL,
+            operation_id INTEGER NOT NULL REFERENCES model_operation_tasks(id) ON DELETE CASCADE,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(scope_key,idempotency_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_model_operation_idempotency_operation
+            ON model_operation_idempotency(operation_id);
         ''')
         if 'model_profile_id' not in {x['name'] for x in db.execute('PRAGMA table_info(ai_players)')}:
             db.execute('ALTER TABLE ai_players ADD COLUMN model_profile_id INTEGER REFERENCES model_profiles(id) ON DELETE SET NULL')
@@ -1551,19 +1561,53 @@ def create_app(db_path=None):
                                     profile, trigger_user_id, room_id=None, match_number=None,
                                     round_number=None, context_revision=None, retry_of=None,
                                     idempotency_key=None):
-        if room_id is None:
-            active=db.execute("""SELECT id,state FROM model_operation_tasks
-                WHERE purpose='connection_test' AND profile_owner_user_id=? AND profile_id=?
+        supplied_key=(idempotency_key or '').strip()[:128] or None
+        profile_hash=model_profile_snapshot_hash(profile)
+        scope_key=json.dumps([
+            int(trigger_user_id),purpose,target_type,str(target_key),
+            int(room_id) if room_id is not None else None,
+            int(match_number) if match_number is not None else None,
+            int(round_number) if round_number is not None else None,
+        ],ensure_ascii=False,separators=(',',':'))
+        fingerprint_payload=[
+            int(profile['id']),profile_hash,context_revision,
+            int(retry_of) if retry_of is not None else None,
+        ]
+        request_fingerprint=hashlib.sha256(json.dumps(
+            fingerprint_payload,ensure_ascii=False,separators=(',',':')).encode('utf-8')).hexdigest()
+        if supplied_key:
+            previous=db.execute("""SELECT i.request_fingerprint,t.id,t.state
+                FROM model_operation_idempotency i
+                JOIN model_operation_tasks t ON t.id=i.operation_id
+                WHERE i.scope_key=? AND i.idempotency_key=?""",
+                (scope_key,supplied_key)).fetchone()
+            if previous:
+                if previous['request_fingerprint']!=request_fingerprint:
+                    raise HTTPException(409,'同一 Idempotency-Key 已用于不同的模型请求输入；请为新的尝试生成新键。')
+                return int(previous['id']),False,previous['state'],True
+        if purpose=='connection_test':
+            active=db.execute("""SELECT id,state,profile_id,profile_snapshot_hash,context_revision,retry_of
+                FROM model_operation_tasks WHERE purpose='connection_test'
+                  AND profile_owner_user_id=? AND profile_id=?
                   AND state IN ('queued','requesting') ORDER BY id DESC LIMIT 1""",
                 (profile['owner_user_id'],profile['id'])).fetchone()
         else:
-            active=db.execute("""SELECT id,state FROM model_operation_tasks
-                WHERE room_id=? AND match_number=? AND round_number=? AND purpose=?
+            active=db.execute("""SELECT id,state,profile_id,profile_snapshot_hash,context_revision,retry_of
+                FROM model_operation_tasks WHERE room_id=? AND match_number=? AND round_number=? AND purpose=?
                   AND target_type=? AND target_key=? AND state IN ('queued','requesting')
                 ORDER BY id DESC LIMIT 1""",
                 (room_id,match_number,round_number,purpose,target_type,str(target_key))).fetchone()
         if active:
-            return int(active['id']),False,active['state']
+            same_input=(active['profile_id']==profile['id'] and
+                active['profile_snapshot_hash']==profile_hash and
+                active['context_revision']==context_revision and
+                active['retry_of']==retry_of)
+            if supplied_key and same_input:
+                db.execute('''INSERT OR IGNORE INTO model_operation_idempotency(
+                    scope_key,idempotency_key,request_fingerprint,operation_id,created_at)
+                    VALUES(?,?,?,?,?)''',
+                    (scope_key,supplied_key,request_fingerprint,int(active['id']),operation_timestamp()))
+            return int(active['id']),False,active['state'],False
         now=operation_timestamp()
         profile_name=profile.get('profile_name') or profile.get('name') or '个人模型配置'
         model_name=profile.get('model_name') or profile.get('model') or '未知模型'
@@ -1574,9 +1618,37 @@ def create_app(db_path=None):
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'queued',?,?,?,?)''',
             (room_id,match_number,round_number,purpose,target_type,str(target_key),target_label,
              profile['id'],profile['owner_user_id'],trigger_user_id,profile_name,model_name,
-             model_profile_snapshot_hash(profile),context_revision,retry_of,
-             (idempotency_key or secrets.token_urlsafe(18))[:128],now,now))
-        return int(cur.lastrowid),True,'queued'
+             profile_hash,context_revision,retry_of,
+             (supplied_key or secrets.token_urlsafe(18))[:128],now,now))
+        operation_id=int(cur.lastrowid)
+        if supplied_key:
+            db.execute('''INSERT INTO model_operation_idempotency(
+                scope_key,idempotency_key,request_fingerprint,operation_id,created_at)
+                VALUES(?,?,?,?,?)''',
+                (scope_key,supplied_key,request_fingerprint,operation_id,now))
+        return operation_id,True,'queued',False
+
+    def replay_model_operation_result(db, operation_id, profile):
+        task=db.execute('SELECT * FROM model_operation_tasks WHERE id=?',(operation_id,)).fetchone()
+        if not task:
+            raise HTTPException(409,'原模型任务已不存在；请确认当前比赛状态后重新操作。')
+        if task['state']=='failed':
+            raise HTTPException(502,task['error_message'] or '原模型请求失败；如需再次尝试，请发起新的操作。')
+        if task['state'] in ('blocked','stale','interrupted'):
+            raise HTTPException(409,task['error_message'] or '原模型任务未完成；如需再次尝试，请发起新的操作。')
+        usage={}
+        if task['usage_known']:
+            usage={
+                'prompt_tokens':task['prompt_tokens'],
+                'completion_tokens':task['completion_tokens'],
+                'total_tokens':task['total_tokens'],
+            }
+        return {
+            'ok':task['state']=='completed' and bool(task['request_succeeded']),
+            'state':task['state'],'replayed':True,'operation_id':int(task['id']),
+            'model':profile.get('model_name') or profile.get('model'),
+            'preview':'','latency_ms':task['duration_ms'],'usage':usage,
+        }
 
     def finish_model_operation_in_db(db, operation_id, state, *, error=None, result_applied=False):
         now=operation_timestamp()
@@ -1753,11 +1825,13 @@ def create_app(db_path=None):
         with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             profile=require_owned_model_profile(db,profile_id,u['id'])
-            operation_id,created,_=create_model_operation_task(
+            operation_id,created,_,replayed=create_model_operation_task(
                 db,purpose='connection_test',target_type='model_profile',
                 target_key=profile_id,target_label=profile['name'],profile=profile,
                 trigger_user_id=u['id'],idempotency_key=request.headers.get('Idempotency-Key'))
             if not created:
+                if replayed:
+                    return replay_model_operation_result(db,operation_id,profile)
                 raise HTTPException(409,'该模型配置已有连接测试正在进行。')
         actor_id=u['id']
         session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
@@ -2229,11 +2303,13 @@ def create_app(db_path=None):
             u=caller(request,db,mutate=True)
             require_room_manager(db,room_id,u)
             profile=require_owned_model_profile(db,profile_id,u['id'])
-            operation_id,created,_=create_model_operation_task(
+            operation_id,created,_,replayed=create_model_operation_task(
                 db,purpose='connection_test',target_type='model_profile',
                 target_key=profile_id,target_label=profile['name'],profile=profile,
                 trigger_user_id=u['id'],idempotency_key=request.headers.get('Idempotency-Key'))
             if not created:
+                if replayed:
+                    return replay_model_operation_result(db,operation_id,profile)
                 raise HTTPException(409,'该模型配置已有连接测试正在进行。')
         actor_id=u['id']
         session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
@@ -2459,7 +2535,7 @@ def create_app(db_path=None):
             queued_profiles=[]
             for profile in profiles:
                 with connection(immediate=True) as db:
-                    operation_id,created,active_state=create_model_operation_task(
+                    operation_id,created,active_state,replayed=create_model_operation_task(
                         db,purpose='judge_question',target_type='ai_judge',
                         target_key=profile['judge_id'],target_label=profile['label'],
                         profile=profile,trigger_user_id=actor_id,room_id=room_id,
@@ -2471,7 +2547,8 @@ def create_app(db_path=None):
                     queued_profiles.append(profile)
                 else:
                     results.append({'judge_id':profile['judge_id'],'label':profile['label'],
-                                    'status':active_state,'reason':'该席位已有进行中的模型任务。'})
+                                    'status':active_state,'operation_id':operation_id,'replayed':replayed,
+                                    'reason':'已按 Idempotency-Key 返回原任务状态。' if replayed else '该席位已有进行中的模型任务。'})
             profiles=queued_profiles
         if profiles:
             await app.state.hub.notify(room_id,'model_operation_updated')
@@ -2815,7 +2892,7 @@ def create_app(db_path=None):
                 context_revision=hashlib.sha256(
                     (question+'\0'+history_by_alias.get(profile['alias'],'')).encode('utf-8')).hexdigest()
                 with connection(immediate=True) as task_db:
-                    operation_id,created,active_state=create_model_operation_task(
+                    operation_id,created,active_state,replayed=create_model_operation_task(
                         task_db,purpose='ai_answer',target_type='ai_player',
                         target_key=profile['alias'],
                         target_label=f"{profile['alias']} · {profile.get('ai_name') or profile.get('name')}",
@@ -2828,7 +2905,8 @@ def create_app(db_path=None):
                     queued_profiles.append(profile)
                 else:
                     results.append({'alias':profile['alias'],'status':active_state,
-                                    'reason':'该席位已有进行中的模型任务。'})
+                                    'operation_id':operation_id,'replayed':replayed,
+                                    'reason':'已按 Idempotency-Key 返回原任务状态。' if replayed else '该席位已有进行中的模型任务。'})
             profiles=queued_profiles
         if profiles:
             await app.state.hub.notify(room_id,'model_operation_updated')
@@ -3173,7 +3251,7 @@ def create_app(db_path=None):
             queued_profiles=[]
             for profile in profiles:
                 with connection(immediate=True) as task_db:
-                    operation_id,created,active_state=create_model_operation_task(
+                    operation_id,created,active_state,replayed=create_model_operation_task(
                         task_db,purpose='judge_verdict',target_type='ai_judge',
                         target_key=profile['judge_id'],target_label=profile['label'],
                         profile=profile,trigger_user_id=actor_id,room_id=room_id,
@@ -3185,7 +3263,8 @@ def create_app(db_path=None):
                     queued_profiles.append(profile)
                 else:
                     results.append({'judge_id':profile['judge_id'],'status':active_state,
-                                    'reason':'该席位已有进行中的模型任务。'})
+                                    'operation_id':operation_id,'replayed':replayed,
+                                    'reason':'已按 Idempotency-Key 返回原任务状态。' if replayed else '该席位已有进行中的模型任务。'})
             profiles=queued_profiles
         if profiles:
             await app.state.hub.notify(room_id,'model_operation_updated')
