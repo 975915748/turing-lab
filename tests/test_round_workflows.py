@@ -95,11 +95,11 @@ def test_one_request_workflow_survives_logout_and_idempotent_replay(workflow_app
         judge = mutate(admin, base + '/ai-judges', {'name': '自动裁判', 'model_profile_id': profile_id})
         ai = mutate(admin, base + '/ai', {'name': '自动参赛者', 'model_profile_id': profile_id})
         body = {'match_number': 1, 'round_number': 1, 'include_ai_questions': True, 'mode': 'start'}
-        first = mutate(admin, base + '/round-workflows', body, extra_headers={'Idempotency-Key': 'workflow-first-key-0001'})
+        first = mutate(admin, base + '/round-workflows', body, expected=202, extra_headers={'Idempotency-Key': 'workflow-first-key-0001'})
         workflow_id = first['workflow']['id']
         assert started.wait(5), 'server worker did not start the model request'
 
-        duplicate = mutate(admin, base + '/round-workflows', body,
+        duplicate = mutate(admin, base + '/round-workflows', body, expected=202,
                            extra_headers={'Idempotency-Key': 'workflow-different-key-0002'})
         assert duplicate['workflow']['id'] == workflow_id
         assert duplicate['created'] is False
@@ -153,7 +153,7 @@ def test_workflow_auto_retries_only_transient_failures_and_caps_at_three(workflo
         mutate(admin, base + '/ai-judges', {'name': '重试裁判', 'model_profile_id': profile_id})
         result = mutate(admin, base + '/round-workflows', {
             'match_number': 1, 'round_number': 1, 'include_ai_questions': True, 'mode': 'start',
-        }, extra_headers={'Idempotency-Key': 'workflow-retry-key-0001'})
+        }, expected=202, extra_headers={'Idempotency-Key': 'workflow-retry-key-0001'})
         workflow_id = result['workflow']['id']
         completed = wait_for_workflow(path, workflow_id)
         assert completed['state'] == 'completed'
@@ -194,7 +194,7 @@ def test_unknown_provider_outcome_requires_explicit_confirmation_after_restart(w
         mutate(admin, base + '/ai-judges', {'name': '重启恢复裁判', 'model_profile_id': profile_id})
         result = mutate(admin, base + '/round-workflows', {
             'match_number': 1, 'round_number': 1, 'include_ai_questions': True, 'mode': 'start',
-        }, extra_headers={'Idempotency-Key': 'workflow-restart-key-0001'})
+        }, expected=202, extra_headers={'Idempotency-Key': 'workflow-restart-key-0001'})
         workflow_id = result['workflow']['id']
         assert started.wait(5), 'model request did not reach the provider mock'
     # Simulate process startup recovery after a request was sent but before its result was stored.
@@ -234,7 +234,7 @@ def test_unknown_provider_outcome_requires_explicit_confirmation_after_restart(w
         player.close()
 
 
-def test_round_timer_deadline_and_host_timeout_finish(workflow_app):
+def test_round_timer_deadline_and_host_timeout_finish(workflow_app, monkeypatch):
     app, path = workflow_app
     with TestClient(app) as admin:
         mutate(admin, '/api/login', {'username': 'workflow_admin', 'password': 'workflow-admin-password'})
@@ -286,7 +286,7 @@ def test_round_timer_deadline_and_host_timeout_finish(workflow_app):
                            {'match_number': 1, 'confirm': True})
         assert duplicate['already_finished'] is True
         with db_open(path) as db:
-            events = db.execute("SELECT COUNT(*) FROM events WHERE room_id=? AND type='round_timeout'",
+            events = db.execute("SELECT COUNT(*) FROM events WHERE room_id=? AND kind='round_timeout'",
                                 (room['room_id'],)).fetchone()[0]
             settlements = db.execute('SELECT COUNT(*) FROM match_settlements WHERE room_id=?',
                                      (room['room_id'],)).fetchone()[0]
@@ -298,16 +298,23 @@ def test_round_timer_deadline_and_host_timeout_finish(workflow_app):
         public = admin.get(base).json()
         assert public['round_duration_seconds'] == 60
         assert public['rounds'][0]['duration_seconds'] == 30
+        profile_id = create_profile(admin)
+        mutate(admin, base + '/ai-judges', {'name': '下一轮自动裁判', 'model_profile_id': profile_id})
+        async def fake_chat(profile, messages, api_key):
+            return {'text': '第二轮裁判问题', 'usage': {'prompt_tokens': 3, 'completion_tokens': 4}}
+        monkeypatch.setattr(app_module, 'chat_completion', fake_chat)
         next_round = mutate(admin, base + '/next', {})
         assert next_round['workflow_id']
-        for _ in range(100):
-            public = admin.get(base).json()
-            if public.get('round_workflow', {}).get('state') == 'waiting_input':
-                break
-            time.sleep(0.05)
+        completed = wait_for_workflow(path, next_round['workflow_id'])
+        assert completed['state'] == 'completed'
+        public = admin.get(base).json()
         assert public['current_round'] == 2
         assert public['rounds'][1]['status'] == 'draft'
         assert public['round_workflow']['mode'] == 'prepare_only'
-        assert public['round_workflow']['state'] == 'waiting_input'
+        assert public['round_workflow']['state'] == 'completed'
+        with db_open(path) as db:
+            question = db.execute('''SELECT text FROM ai_judge_questions
+                WHERE room_id=? AND round_number=2''',(room['room_id'],)).fetchone()
+        assert question['text'] == '第二轮裁判问题'
     for player in players:
         player.close()
