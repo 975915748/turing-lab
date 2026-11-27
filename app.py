@@ -3928,6 +3928,8 @@ def create_app(db_path=None):
             rnd=current_round(db,room)
             if rnd['status'] not in ('collecting','revealed'):
                 raise HTTPException(409,'仅能修改当前轮次的已提交 AI 回答。')
+            if rnd['status']=='collecting' and round_deadline_expired(rnd):
+                raise HTTPException(409,'本轮答题时间已到，不能再修改回答。')
             old=db.execute('SELECT text FROM answers WHERE round_id=? AND alias=?',(rnd['id'],alias)).fetchone()
             if not old:
                 raise HTTPException(409,'该 AI 本轮尚未提交回复。')
