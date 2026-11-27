@@ -995,8 +995,10 @@ async function logout(page) {
         '外部裁判模式的手动判决应标记为 legacy');
 
       await page.goto(site + '#room=' + externalRoom.room_id);
-      // The completed-round reminder is modal and must be dismissed before navigation.
-      await page.locator('#judgeNotice').evaluate(dialog => { if (dialog.open) dialog.close(); });
+      await page.getByRole('heading', { name: '外部裁判人设展示验收', exact: true }).waitFor();
+      // Wait for the completed-round reminder to open before dismissing it.
+      await page.waitForFunction(() => document.querySelector('#judgeNotice')?.open);
+      await page.locator('#judgeNotice').evaluate(dialog => dialog.close());
       // The owner deliberately remains on the participant-management tab.
       await page.locator('[data-action="room-view"][data-view="admin"]').click();
       await page.getByRole('heading', { name: '本场 AI 席位人设', exact: true }).waitFor();
