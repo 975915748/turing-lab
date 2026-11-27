@@ -504,7 +504,7 @@ def test_same_model_seats_use_distinct_frozen_persona_prompts(operation_lab):
     judge_request = lab['state']['requests'][-1]
     assert judge_request['model'] == lab['profile_body']['model']
     assert judge_request['max_tokens'] == 768
-    assert '语言细节' in judge_request['system']
+    assert '重点检查措辞' in judge_request['system']
 
     post(admin, base + '/start')
     post(p1, base + '/answers', {'text': '我会先核对信息，再修正判断。'})
@@ -514,7 +514,7 @@ def test_same_model_seats_use_distinct_frozen_persona_prompts(operation_lab):
     participant_request = lab['state']['requests'][-1]
     assert participant_request['model'] == judge_request['model']
     assert participant_request['max_tokens'] == 256
-    assert '严谨分析者' in participant_request['system']
+    assert '表达结构清晰' in participant_request['system']
     assert participant_request['system'] != judge_request['system']
 
 
