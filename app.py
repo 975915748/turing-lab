@@ -1370,6 +1370,9 @@ def public_room(db, room, user, mine):
     is_judge_view = bool(judge) and not is_admin
     humans, ais, roster = aliases(db, room['id'])
     judges = judge_records(db,room['id'])
+    persona_revealed=bool(room['revealed_at'])
+    revealed_personas=revealed_persona_rows(db,room['id'],room['match_number']) if persona_revealed else []
+    persona_frozen=is_match_persona_frozen(db,room['id'],room['match_number'])
     rounds = db.execute('SELECT * FROM rounds WHERE room_id=? ORDER BY number', (room['id'],)).fetchall()
     body = []
     for r in rounds:
@@ -1434,7 +1437,8 @@ def public_room(db, room, user, mine):
             'revealed_at':room['revealed_at'],'mine':None,'is_admin':False,'is_judge':True,
             'my_judge_label':judge['label'],'my_verdict':my_verdict,
             'aliases':roster,'rounds':body,'suggestions':suggestions,
-            'judges_count':len(judges),'server_now':utcnow()}
+            'judges_count':len(judges),'server_now':utcnow(),
+            'personas_revealed':persona_revealed,'seat_personas':revealed_personas}
     suggestions = db.execute('''SELECT s.id,s.round_number,s.text,s.created_at,u.display_name,
         m.alias FROM suggestions s JOIN users u ON u.id=s.sender_id
         LEFT JOIN members m ON m.room_id=s.room_id AND m.user_id=s.sender_id
@@ -1485,11 +1489,13 @@ def public_room(db, room, user, mine):
                        'name':r['display_name'], 'username':r['username']} for r in humans],
             'ais':[{'alias':r['alias'],'name':r['name'],
                     'model_profile_id':r['model_profile_id'] if manager else None,
-                    'model_profile':profile_summaries.get(r['model_profile_id']) if manager else None} for r in ais],
+                    'model_profile':profile_summaries.get(r['model_profile_id']) if manager else None,
+                    'persona':persona_config_from_row(dict(r),'participant') if manager else None} for r in ais],
             'judges': [{'id':r['id'],'kind':r['kind'],'user_id':r['user_id'],
                         'label':r['label'],'username':r['username'],
                         'model_profile_id':r['model_profile_id'] if manager and r['kind']=='ai' else None,
                         'model_profile':profile_summaries.get(r['model_profile_id']) if manager and r['kind']=='ai' else None,
+                        'persona':persona_config_from_row(dict(r),'judge') if manager and r['kind']=='ai' else None,
                         'uid':user_uid(r['user_id']) if r['kind']=='human' else None,
                         'locked':bool(r['locked'])} for r in judges] if manager else
                       [{'kind':r['kind'],'label':r['label'],'locked':bool(r['locked'])} for r in judges],
@@ -1497,7 +1503,12 @@ def public_room(db, room, user, mine):
             'ai_edits':ai_edits,'packets':[dict(p) for p in pkts],
             'model_profiles':model_profiles,'model_api_enabled':has_valid_credential_key(),
             'server_now':utcnow()}
+    if persona_revealed:
+        result['personas_revealed']=True
+        result['seat_personas']=revealed_personas
     if manager:
+        result['personas_revealed']=persona_revealed
+        result['personas_frozen']=persona_frozen
         result['round_duration_seconds']=room['round_duration_seconds']
         current_round_row=db.execute('SELECT status FROM rounds WHERE room_id=? AND number=?',
                                       (room['id'],room['current_round'])).fetchone()
