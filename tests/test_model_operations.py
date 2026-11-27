@@ -9,7 +9,9 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 import app as app_module
-from app import create_app, db_open, seed_admin
+from app import (
+    anonymous_match_packet, anonymous_player_history, create_app, db_open, seed_admin,
+)
 from model_api import ModelAPIError
 
 
@@ -41,17 +43,25 @@ def delete(client, path, expected=200):
 def operation_lab(tmp_path, monkeypatch):
     monkeypatch.setenv('MODEL_CREDENTIAL_KEY', Fernet.generate_key().decode('ascii'))
     monkeypatch.setattr(app_module, 'validate_base_url', lambda value: value.strip().rstrip('/'))
-    state = {'calls': 0, 'fail_next': 0, 'block': None}
+    state = {'calls': 0, 'fail_next': 0, 'block': None, 'requests': []}
     lock = threading.Lock()
 
     async def fake_chat(profile, messages, api_key):
         with lock:
             state['calls'] += 1
+            state['requests'].append({
+                'model': profile.get('model'),
+                'max_tokens': profile.get('max_tokens'),
+                'temperature': profile.get('temperature'),
+                'api_key': api_key,
+                'system': messages[0]['content'] if messages else '',
+            })
             fail = state['fail_next'] > 0
             if fail:
                 state['fail_next'] -= 1
             block = state['block']
         if block:
+            block['profile_model']=profile['model']
             block['started'].set()
             await asyncio.to_thread(block['release'].wait, 10)
         if fail:
@@ -101,6 +111,131 @@ def operation_lab(tmp_path, monkeypatch):
 
 def add_ai_judge(client, base, name, profile_id):
     return post(client, base + '/ai-judges', {'name': name, 'model_profile_id': profile_id})
+
+
+def test_persona_history_windows_are_bounded_and_participant_history_is_private(operation_lab):
+    lab = operation_lab
+    admin, base = lab['admin'], lab['base']
+    ai = post(admin, base + '/ai', {'name': '仅使用自身历史的 AI'})
+    room = admin.get(base).json()
+    human_aliases = [item['alias'] for item in room['humans']]
+    assert len(human_aliases) == 2
+
+    with db_open(lab['path']) as db:
+        first = db.execute('SELECT id FROM rounds WHERE room_id=? AND number=1',
+                           (lab['room_id'],)).fetchone()
+        for number in range(1, 7):
+            if number == 1:
+                round_id = first['id']
+                db.execute("UPDATE rounds SET question=?,status='revealed' WHERE id=?",
+                           (f'QUESTION_{number}', round_id))
+            else:
+                cur = db.execute('''INSERT INTO rounds(room_id,number,question,status,created_at)
+                    VALUES(?,?,?,'revealed',?)''',
+                    (lab['room_id'], number, f'QUESTION_{number}', f'2026-11-27T12:0{number}:00+00:00'))
+                round_id = cur.lastrowid
+            for alias, marker in ((human_aliases[0], 'HUMAN_A'), (human_aliases[1], 'HUMAN_B'),
+                                  (ai['alias'], 'AI_SELF')):
+                db.execute('''INSERT INTO answers(round_id,alias,text,submitted_at)
+                    VALUES(?,?,?,?)''',
+                    (round_id, alias, f'{marker}_ANSWER_{number}', f'2026-11-27T12:1{number}:00+00:00'))
+
+        packet_zero = anonymous_match_packet(db, lab['room_id'], 6, history_rounds=0)
+        packet_five = anonymous_match_packet(db, lab['room_id'], 6, history_rounds=5)
+        packet_hundred = anonymous_match_packet(db, lab['room_id'], 6, history_rounds=100)
+        full_packet = anonymous_match_packet(db, lab['room_id'])
+        own_zero = anonymous_player_history(db, lab['room_id'], ai['alias'], 6, history_rounds=0)
+        own_five = anonymous_player_history(db, lab['room_id'], ai['alias'], 6, history_rounds=5)
+        own_hundred = anonymous_player_history(db, lab['room_id'], ai['alias'], 6, history_rounds=100)
+
+    assert 'QUESTION_1' not in packet_zero and 'QUESTION_6' not in packet_zero
+    assert 'QUESTION_1' not in packet_five and all(f'QUESTION_{n}' in packet_five for n in range(2, 7))
+    assert all(f'QUESTION_{n}' in packet_hundred for n in range(1, 7))
+    assert all(f'QUESTION_{n}' in full_packet for n in range(1, 7))
+    assert 'AI_SELF_ANSWER_1' not in own_zero
+    assert 'AI_SELF_ANSWER_1' not in own_five
+    assert all(f'AI_SELF_ANSWER_{n}' in own_five for n in range(2, 7))
+    assert all(f'AI_SELF_ANSWER_{n}' in own_hundred for n in range(1, 7))
+    assert 'HUMAN_A_ANSWER_' not in own_hundred
+    assert 'HUMAN_B_ANSWER_' not in own_hundred
+
+
+def test_persona_presets_change_mock_prompts_and_output_limits(operation_lab):
+    lab = operation_lab
+    admin, base, profile_id = lab['admin'], lab['base'], lab['profile_id']
+    judge = add_ai_judge(admin, base, '语言细节裁判', profile_id)
+    analytical = post(admin, base + '/ai', {'name': '严谨参赛席', 'model_profile_id': profile_id})
+    custom = post(admin, base + '/ai', {'name': '自定义参赛席', 'model_profile_id': profile_id})
+
+    put(admin, base + f"/ai-judges/{judge['id']}/persona", {
+        'preset_id': 'language_detail', 'custom_system_prompt': '',
+        'output_length': 'short', 'history_rounds': 0,
+    })
+    put(admin, base + f"/ai/{analytical['alias']}/persona", {
+        'preset_id': 'analytical', 'custom_system_prompt': '',
+        'output_length': 'medium', 'history_rounds': 5,
+    })
+    custom_style = '使用自然口语，只给出直接回应，不使用分点列表。'
+    put(admin, base + f"/ai/{custom['alias']}/persona", {
+        'preset_id': 'custom', 'custom_system_prompt': custom_style,
+        'output_length': 'short', 'history_rounds': 2,
+    })
+
+    questions = post(admin, base + '/ai-judges/questions/generate')
+    assert questions['generated'] == 1
+    post(admin, base + '/start')
+    answers = post(admin, base + '/ai/answers/generate')
+    assert answers['generated'] == 2
+
+    requests = lab['state']['requests']
+    judge_request = next(x for x in requests if '重点检查措辞' in x['system'])
+    analytical_request = next(x for x in requests if '事实依据' in x['system'])
+    custom_request = next(x for x in requests if custom_style in x['system'])
+    assert judge_request['max_tokens'] == 256
+    assert '约 80 个中文字符' in judge_request['system']
+    assert analytical_request['max_tokens'] == 768
+    assert '约 300 个中文字符' in analytical_request['system']
+    assert custom_request['max_tokens'] == 256
+    assert '约 80 个中文字符' in custom_request['system']
+    assert {x['model'] for x in requests} == {'ops-test-model'}
+    assert {x['temperature'] for x in requests} == {0.4}
+    assert lab['state']['calls'] == 3
+
+
+def test_concurrent_independent_question_generation_freezes_once(operation_lab):
+    lab = operation_lab
+    admin, base, profile_id = lab['admin'], lab['base'], lab['profile_id']
+    add_ai_judge(admin, base, '并发冻结裁判', profile_id)
+    second_admin = TestClient(lab['app'])
+    post(second_admin, '/api/login', {
+        'username': 'ops_admin', 'password': 'ops-admin-password',
+    })
+    block = {'started': threading.Event(), 'release': threading.Event()}
+    lab['state']['block'] = block
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(post, admin, base + '/ai-judges/questions/generate')
+        assert block['started'].wait(5), '首个并发请求没有进入模型调用'
+        second = pool.submit(post, second_admin, base + '/ai-judges/questions/generate')
+        second_result = second.result(timeout=10)
+        block['release'].set()
+        first_result = first.result(timeout=15)
+
+    lab['state']['block'] = None
+    assert first_result['generated'] == 1
+    assert second_result['generated'] == 0
+    assert lab['state']['calls'] == 1
+    room = admin.get(base).json()
+    assert len(room['rounds'][0]['questions']) == 1
+    with db_open(lab['path']) as db:
+        assert db.execute(
+            'SELECT COUNT(*) FROM match_persona_freezes WHERE room_id=?',
+            (lab['room_id'],),
+        ).fetchone()[0] == 1
+        assert db.execute(
+            "SELECT COUNT(*) FROM model_operation_tasks WHERE room_id=? AND purpose='judge_question'",
+            (lab['room_id'],),
+        ).fetchone()[0] == 1
 
 
 def test_connection_and_game_calls_are_owner_scoped_and_cleaned_differently(operation_lab):
@@ -220,6 +355,38 @@ def test_failed_attempt_is_preserved_when_single_seat_retry_succeeds(operation_l
     assert len(room['rounds'][0]['questions']) == 1
 
 
+def test_frozen_model_retry_uses_rotated_api_key_and_records_credential_version(operation_lab):
+    lab = operation_lab
+    admin, base, profile_id = lab['admin'], lab['base'], lab['profile_id']
+    judge = add_ai_judge(admin, base, '凭据轮换恢复裁判', profile_id)
+    lab['state']['fail_next'] = 1
+
+    first = post(admin, base + '/ai-judges/questions/generate')
+    assert len(first['failed']) == 1
+    room = admin.get(base).json()
+    failed = next(task for task in room['model_operations'] if task['state'] == 'failed')
+    assert failed['target_key'] == str(judge['id'])
+    assert lab['state']['requests'][-1]['api_key'] == lab['profile_body']['api_key']
+
+    rotated_key = 'sk-ops-rotated-provider-key'
+    updated_profile = dict(lab['profile_body'], api_key=rotated_key)
+    put(admin, f'/api/me/models/{profile_id}', updated_profile)
+    retried = post(admin, f"{base}/model-operations/{failed['id']}/retry")
+    assert retried['generated'] == 1
+    assert lab['state']['requests'][-1]['api_key'] == rotated_key
+
+    room = admin.get(base).json()
+    retry_task = next(task for task in room['model_operations'] if task['retry_of'] == failed['id'])
+    assert retry_task['state'] == 'completed'
+    assert retry_task['result_applied'] is True
+    assert retry_task['credential_version_changed'] is True
+    assert room['model_request_count'] == 2
+    records = admin.get('/api/me/model-operations').json()
+    assert any(item['id'] == retry_task['id'] and item['credential_version_changed']
+               for item in records['records'])
+    assert rotated_key not in json.dumps(records, ensure_ascii=False)
+
+
 def test_other_manager_trigger_is_recorded_under_configuration_owner(operation_lab):
     lab = operation_lab
     admin = lab['admin']
@@ -278,7 +445,7 @@ def test_inflight_result_does_not_resurrect_tasks_after_match_cleanup(operation_
 
 
 
-def test_ai_question_result_is_stale_when_profile_changes_during_provider_call(operation_lab):
+def test_ai_question_uses_frozen_profile_when_profile_changes_during_provider_call(operation_lab):
     lab = operation_lab
     admin, base, profile_id = lab['admin'], lab['base'], lab['profile_id']
     add_ai_judge(admin, base, '配置修改期间出题的裁判', profile_id)
@@ -297,16 +464,222 @@ def test_ai_question_result_is_stale_when_profile_changes_during_provider_call(o
         block['release'].set()
         result = future.result(timeout=15)
 
+    assert block['profile_model'] == lab['profile_body']['model']
+    lab['state']['block'] = None
+    assert result['generated'] == 1
+    assert result['skipped'] == 0
+    room = admin.get(base).json()
+    assert len(room['rounds'][0]['questions']) == 1
+    assert room['rounds'][0]['questions'][0]['text'] == '如果你最近改变过一个重要看法，是什么促使你改变？'
+    task = room['model_operations'][0]
+    assert task['state'] == 'completed'
+    assert task['request_succeeded'] is True
+    assert task['result_applied'] is True
+    assert room['model_request_count'] == 1
+
+def test_cancel_preparation_discards_inflight_persona_question_result(operation_lab):
+    lab = operation_lab
+    admin, base = lab['admin'], lab['base']
+    judge = add_ai_judge(admin, base, '取消准备期间正在出题的裁判', lab['profile_id'])
+    block = {'started': threading.Event(), 'release': threading.Event()}
+    lab['state']['block'] = block
+    second_admin = TestClient(lab['app'])
+    post(second_admin, '/api/login', {'username': 'ops_admin', 'password': 'ops-admin-password'})
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(post, second_admin, base + '/ai-judges/questions/generate')
+        try:
+            assert block['started'].wait(5), '模拟模型请求没有进入请求阶段'
+            reset = post(admin, base + '/personas/reset-preparation', {'confirm': True})
+            assert reset['reset'] is True
+        finally:
+            block['release'].set()
+        result = future.result(timeout=15)
+
     lab['state']['block'] = None
     assert result['generated'] == 0
-    assert result['skipped'] == 1
     room = admin.get(base).json()
+    assert room['personas_frozen'] is False
     assert room['rounds'][0]['questions'] == []
-    task = room['model_operations'][0]
-    assert task['state'] == 'stale'
-    assert task['request_succeeded'] is True
-    assert task['result_applied'] is False
-    assert room['model_request_count'] == 1
+    with db_open(lab['path']) as db:
+        task = db.execute(
+            "SELECT state,result_applied FROM model_operation_tasks WHERE room_id=?",
+            (lab['room_id'],)).fetchone()
+        assert task['state'] == 'stale'
+        assert task['result_applied'] == 0
+        assert db.execute(
+            'SELECT 1 FROM ai_judge_questions WHERE room_id=? AND ai_judge_id=?',
+            (lab['room_id'], judge['id'])).fetchone() is None
+        assert db.execute(
+            'SELECT 1 FROM match_persona_freezes WHERE room_id=?',
+            (lab['room_id'],)).fetchone() is None
+        assert db.execute(
+            'SELECT 1 FROM match_seat_persona_snapshots WHERE room_id=?',
+            (lab['room_id'],)).fetchone() is None
+
+
+def test_cancel_preparation_invalidates_completed_persona_question_task(operation_lab):
+    lab = operation_lab
+    admin, base = lab['admin'], lab['base']
+    judge = add_ai_judge(admin, base, '取消准备后不可重试的裁判', lab['profile_id'])
+
+    generated = post(admin, base + '/ai-judges/questions/generate')
+    assert generated['generated'] == 1
+    assert lab['state']['calls'] == 1
+    room = admin.get(base).json()
+    assert len(room['rounds'][0]['questions']) == 1
+    task = next(item for item in room['model_operations'] if item['purpose'] == 'judge_question')
+    assert task['state'] == 'completed'
+    assert task['result_applied'] is True
+
+    reset = post(admin, base + '/personas/reset-preparation', {'confirm': True})
+    assert reset['reset'] is True
+    room = admin.get(base).json()
+    assert room['personas_frozen'] is False
+    assert room['rounds'][0]['questions'] == []
+    with db_open(lab['path']) as db:
+        invalidated = db.execute(
+            'SELECT state,result_applied FROM model_operation_tasks WHERE id=?',
+            (task['id'],),
+        ).fetchone()
+    assert invalidated['state'] == 'stale'
+    assert invalidated['result_applied'] == 0
+    assert lab['state']['calls'] == 1
+
+    response = admin.post(base + f"/model-operations/{task['id']}/retry",
+                          headers={'X-CSRF-Token': admin.get('/api/me').json()['user']['csrf']})
+    assert response.status_code == 409
+    assert response.json()['detail'] == '只有失败、中断或额度阻止的任务可以重试。'
+    assert lab['state']['calls'] == 1
+
+
+def test_same_model_seats_use_distinct_frozen_persona_prompts(operation_lab):
+    lab = operation_lab
+    admin, p1, p2, base, profile_id = (
+        lab['admin'], lab['p1'], lab['p2'], lab['base'], lab['profile_id'])
+    participant = post(admin, base + '/ai', {
+        'name': '同模型参赛者', 'model_profile_id': profile_id,
+    })
+    judge = add_ai_judge(admin, base, '同模型裁判', profile_id)
+    put(admin, base + f"/ai/{participant['alias']}/persona", {
+        'preset_id': 'analytical', 'custom_system_prompt': '',
+        'output_length': 'short', 'history_rounds': 0,
+    })
+    put(admin, base + f"/ai-judges/{judge['id']}/persona", {
+        'preset_id': 'language_detail', 'custom_system_prompt': '',
+        'output_length': 'medium', 'history_rounds': 0,
+    })
+
+    question = post(admin, base + '/ai-judges/questions/generate')
+    assert question['generated'] == 1
+    judge_request = lab['state']['requests'][-1]
+    assert judge_request['model'] == lab['profile_body']['model']
+    assert judge_request['max_tokens'] == 768
+    assert '重点检查措辞' in judge_request['system']
+
+    post(admin, base + '/start')
+    post(p1, base + '/answers', {'text': '我会先核对信息，再修正判断。'})
+    post(p2, base + '/answers', {'text': '我会结合上下文说明理由。'})
+    answer = post(admin, base + '/ai/answers/generate')
+    assert answer['generated'] == 1
+    participant_request = lab['state']['requests'][-1]
+    assert participant_request['model'] == judge_request['model']
+    assert participant_request['max_tokens'] == 256
+    assert '表达结构清晰' in participant_request['system']
+    assert participant_request['system'] != judge_request['system']
+
+
+def test_legacy_in_progress_match_freezes_personas_before_ai_verdict(operation_lab):
+    lab = operation_lab
+    admin, base, profile_id = lab['admin'], lab['base'], lab['profile_id']
+    judge = add_ai_judge(admin, base, '旧比赛首次使用 AI 判决', profile_id)
+    post(admin, base + f"/ai-judges/{judge['id']}/questions", {
+        'text': '请判断匿名参赛者的身份并给出依据。',
+    })
+    post(admin, base + '/start')
+    post(lab['p1'], base + '/answers', {'text': '我会先核对事实，再解释结论。'})
+    post(lab['p2'], base + '/answers', {'text': '我会结合上下文说明理由。'})
+    assert admin.get(base).json()['rounds'][0]['status'] == 'revealed'
+
+    # Simulate a match that was already active before persona snapshots existed.
+    with db_open(lab['path']) as db:
+        db.execute('DELETE FROM match_seat_persona_snapshots WHERE room_id=?', (lab['room_id'],))
+        db.execute('DELETE FROM match_persona_freezes WHERE room_id=?', (lab['room_id'],))
+        db.execute(
+            "UPDATE model_profiles SET model='legacy-current-model' WHERE id=?",
+            (profile_id,),
+        )
+
+    verdict = post(admin, base + '/ai-judges/verdicts/generate')
+    assert verdict['generated'] == 1
+    assert lab['state']['calls'] == 1
+    with db_open(lab['path']) as db:
+        freeze = db.execute(
+            'SELECT source FROM match_persona_freezes WHERE room_id=?',
+            (lab['room_id'],),
+        ).fetchone()
+        snapshot = db.execute(
+            "SELECT model_json FROM match_seat_persona_snapshots "
+            "WHERE room_id=? AND seat_type='judge' AND seat_key=?",
+            (lab['room_id'], str(judge['id'])),
+        ).fetchone()
+        task = db.execute(
+            "SELECT persona_snapshot_id FROM model_operation_tasks "
+            "WHERE room_id=? AND purpose='judge_verdict' ORDER BY id DESC LIMIT 1",
+            (lab['room_id'],),
+        ).fetchone()
+    assert freeze['source'] == 'legacy_verdict_generation'
+    assert json.loads(snapshot['model_json'])['model'] == 'legacy-current-model'
+    assert task['persona_snapshot_id'] is not None
+
+
+def test_short_persona_keeps_full_frozen_token_budget_for_final_verdict(operation_lab):
+    lab = operation_lab
+    admin, p1, p2, base, profile_id = (
+        lab['admin'], lab['p1'], lab['p2'], lab['base'], lab['profile_id'])
+    judge = add_ai_judge(admin, base, '短档最终判断裁判', profile_id)
+    put(admin, base + f"/ai-judges/{judge['id']}/persona", {
+        "preset_id": "language_detail",
+        "custom_system_prompt": "",
+        "output_length": "short",
+        "history_rounds": 0,
+    })
+
+    # First AI judge question freezes the persona and model parameters.
+    question_result = post(admin, base + "/ai-judges/questions/generate")
+    assert question_result['generated'] == 1
+    assert lab['state']['requests'][-1]['max_tokens'] == 256
+
+    # Later edits to the personal profile must not replace the frozen model.
+    changed = dict(lab['profile_body'], model='changed-live-model', api_key='')
+    put(admin, f"/api/me/models/{profile_id}", changed)
+
+    post(admin, base + "/start")
+    post(p1, base + "/answers", {"text": "我会先核对事实，再调整自己的判断。"})
+    post(p2, base + "/answers", {"text": "我会结合上下文分析表达习惯。"})
+    assert admin.get(base).json()['rounds'][0]['status'] == 'revealed'
+
+    verdict_result = post(admin, base + "/ai-judges/verdicts/generate")
+    assert verdict_result['generated'] == 1
+    request = lab['state']['requests'][-1]
+    assert request['model'] == lab['profile_body']['model']
+    assert request['max_tokens'] == lab['profile_body']['max_tokens']
+    assert request['temperature'] == lab['profile_body']['temperature']
+    assert '约 80 个中文字符' in request['system']
+    assert '不得截断或省略 JSON 字段' in request['system']
+    with db_open(lab['path']) as db:
+        row = db.execute(
+            'SELECT verdict_json,locked_at FROM ai_judge_verdicts WHERE room_id=? AND ai_judge_id=?',
+            (lab['room_id'], judge['id'])).fetchone()
+        assert row and row['locked_at']
+        verdict = json.loads(row['verdict_json'])
+        assert set(verdict['predictions']) == {'A', 'B'}
+        task = db.execute(
+            "SELECT state,result_applied FROM model_operation_tasks "
+            "WHERE room_id=? AND purpose='judge_verdict' ORDER BY id DESC LIMIT 1",
+            (lab['room_id'],)).fetchone()
+        assert task['state'] == 'completed' and task['result_applied'] == 1
+
 
 def test_startup_marks_unfinished_tasks_interrupted_without_replaying(operation_lab):
     lab = operation_lab

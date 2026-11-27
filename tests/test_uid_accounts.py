@@ -163,6 +163,7 @@ def snapshot(db):
         'friend_requests', 'friendships', 'friend_notes',
         'dm_conversations', 'dm_messages', 'dm_read_positions', 'api_rate_limits',
         'round_workflows', 'round_timeouts',
+        'match_persona_freezes', 'match_seat_persona_snapshots',
     )
     placeholders = ','.join('?' for _ in schema_additions)
     tables = [r[0] for r in db.execute(
@@ -179,7 +180,17 @@ def snapshot(db):
             for row in rows:
                 row.pop('model_request_limit', None)
                 row.pop('match_started_at', None)
-        # Exit, timer and workflow migrations add nullable / defaulted columns.
+        # Persona migration adds non-null defaults, which are not legacy data.
+        persona_columns={
+            'ai_players':('persona_preset_id','persona_preset_version','persona_custom_prompt',
+                          'persona_output_length','persona_history_rounds','persona_revision'),
+            'ai_judges':('persona_preset_id','persona_preset_version','persona_custom_prompt',
+                         'persona_output_length','persona_history_rounds','persona_revision'),
+        }.get(name,())
+        for column in persona_columns:
+            for row in rows:
+                row.pop(column,None)
+        # Exit, timer and workflow migrations add nullable columns.
         added_columns={
             'rooms':('closed_at','round_duration_seconds'),
             'members':('leave_reason',),
@@ -208,12 +219,12 @@ def test_legacy_migration_preserves_all_records_backup_and_passwords(tmp_path):
             assert row.pop('records_deleted') == 0
         assert after == before
         assert db.execute('PRAGMA foreign_key_check').fetchall() == []
-    backups = list(tmp_path.glob('legacy.pre-v1_10-*.sqlite3'))
+    backups = list(tmp_path.glob('legacy.pre-v1_12-*.sqlite3'))
     assert len(backups) == 1
     with db_open(backups[0]) as db:
         assert snapshot(db) == before
     create_app(path)
-    assert len(list(tmp_path.glob('legacy.pre-v1_10-*.sqlite3'))) == 1
+    assert len(list(tmp_path.glob('legacy.pre-v1_12-*.sqlite3'))) == 1
     assert seed_admin(path, 'legacy_admin', '不覆盖', 'new-password') is False
     # All original identities retain their IDs; old username login is explicit.
     for old_name, uid in (('legacy_admin', 'TL00000007'), ('legacy_player', 'TL00000023'), ('TL00000023', 'TL00000030')):

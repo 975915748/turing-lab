@@ -106,12 +106,12 @@ def test_room_id_migration_preserves_every_row_and_backup(tmp_path):
         assert snapshot(db) == before
         assert 'AUTOINCREMENT' in db.execute("SELECT sql FROM sqlite_master WHERE name='rooms'").fetchone()[0]
         assert not db.execute('PRAGMA foreign_key_check').fetchall()
-    backups = list(tmp_path.glob('v15.pre-v1_10-*.sqlite3'))
+    backups = list(tmp_path.glob('v15.pre-v1_12-*.sqlite3'))
     assert len(backups) == 1
     with db_open(backups[0]) as db:
         assert snapshot(db) == before
     create_app(path)
-    assert len(list(tmp_path.glob('v15.pre-v1_10-*.sqlite3'))) == 1
+    assert len(list(tmp_path.glob('v15.pre-v1_12-*.sqlite3'))) == 1
 
 
 def test_room_id_migration_rolls_back_on_copy_denial(tmp_path, monkeypatch):

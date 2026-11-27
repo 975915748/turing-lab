@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 from starlette.staticfiles import StaticFiles
 
 from model_api import (ModelAPIError, chat_completion, decrypt_api_key,
@@ -27,6 +27,10 @@ from model_api import (ModelAPIError, chat_completion, decrypt_api_key,
 from points import points_state, settle_match_points
 from social import register_social_routes, ensure_app_schema, cleanup_deleted_account
 from match_orchestration import PersistentWorkflowWorker
+from seat_personas import (compose_system_prompt, freeze_match_personas, is_match_persona_frozen,
+                            normalize_persona_config, output_token_limit, persona_catalog,
+                            persona_config_from_row, revealed_persona_rows,
+                            freeze_new_manual_participant_seat)
 
 ROOT = Path(__file__).resolve().parent
 DATABASE = ROOT / 'data' / 'game.sqlite3'
@@ -95,12 +99,25 @@ def init_db(path):
             old_round_columns={x['name'] for x in old.execute('PRAGMA table_info(rounds)')} if 'rounds' in old_tables else set()
             old_task_columns={x['name'] for x in old.execute('PRAGMA table_info(model_operation_tasks)')} if 'model_operation_tasks' in old_tables else set()
             old_workflow_columns={x['name'] for x in old.execute('PRAGMA table_info(round_workflows)')} if 'round_workflows' in old_tables else set()
+            old_player_columns={x['name'] for x in old.execute('PRAGMA table_info(ai_players)')} if 'ai_players' in old_tables else set()
+            old_judge_columns={x['name'] for x in old.execute('PRAGMA table_info(ai_judges)')} if 'ai_judges' in old_tables else set()
+            old_freeze_columns={x['name'] for x in old.execute('PRAGMA table_info(match_persona_freezes)')} if 'match_persona_freezes' in old_tables else set()
+            persona_columns={'persona_preset_id','persona_preset_version','persona_custom_prompt',
+                             'persona_output_length','persona_history_rounds','persona_revision'}
+            needs_persona_schema=(
+                'match_persona_freezes' not in old_tables or 'match_seat_persona_snapshots' not in old_tables or
+                'participant_roster_revision' not in old_freeze_columns or
+                not persona_columns.issubset(old_player_columns) or
+                not persona_columns.issubset(old_judge_columns) or
+                not {'persona_snapshot_id','credential_version_hash','credential_version_changed'}.issubset(old_task_columns)
+            )
             needs_workflow_schema=(
                 'round_workflows' not in old_tables or 'round_timeouts' not in old_tables or
                 'round_duration_seconds' not in old_room_columns or
                 not {'started_at','duration_seconds','deadline_at','timeout_ended_at'}.issubset(old_round_columns) or
                 not {'workflow_id','workflow_generation'}.issubset(old_task_columns) or
-                ('round_workflows' in old_tables and 'manual_retry_authorized' not in old_workflow_columns)
+                ('round_workflows' in old_tables and 'manual_retry_authorized' not in old_workflow_columns) or
+                needs_persona_schema
             )
             if 'users' in old_tables and (
                 'model_operation_tasks' not in old_tables or
@@ -124,7 +141,8 @@ def init_db(path):
                     x['name'] for x in old.execute('PRAGMA table_info(answers)')}) or
                 needs_workflow_schema):
                 stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
-                backup_tag = ('v1_10' if needs_workflow_schema else
+                backup_tag = ('v1_12' if needs_persona_schema else
+                              'v1_10' if needs_workflow_schema else
                               'v1_9' if 'model_operation_tasks' not in old_tables or
                                   ('rooms' in old_tables and 'model_request_limit' not in {
                                       x['name'] for x in old.execute('PRAGMA table_info(rooms)')}) else
@@ -176,6 +194,12 @@ def init_db(path):
         CREATE TABLE IF NOT EXISTS ai_players (
             room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
             alias TEXT NOT NULL, name TEXT NOT NULL,
+            persona_preset_id TEXT NOT NULL DEFAULT 'default',
+            persona_preset_version INTEGER NOT NULL DEFAULT 1,
+            persona_custom_prompt TEXT NOT NULL DEFAULT '',
+            persona_output_length TEXT NOT NULL DEFAULT 'default',
+            persona_history_rounds INTEGER NOT NULL DEFAULT 5,
+            persona_revision INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY(room_id,alias));
         CREATE TABLE IF NOT EXISTS rounds (
             id INTEGER PRIMARY KEY, room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
@@ -227,7 +251,13 @@ def init_db(path):
         CREATE TABLE IF NOT EXISTS ai_judges (
             id INTEGER PRIMARY KEY,
             room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-            label TEXT NOT NULL, created_at TEXT NOT NULL);
+            label TEXT NOT NULL, created_at TEXT NOT NULL,
+            persona_preset_id TEXT NOT NULL DEFAULT 'balanced',
+            persona_preset_version INTEGER NOT NULL DEFAULT 1,
+            persona_custom_prompt TEXT NOT NULL DEFAULT '',
+            persona_output_length TEXT NOT NULL DEFAULT 'default',
+            persona_history_rounds INTEGER NOT NULL DEFAULT 5,
+            persona_revision INTEGER NOT NULL DEFAULT 1);
         CREATE TABLE IF NOT EXISTS model_profiles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -297,6 +327,9 @@ def init_db(path):
             retry_of INTEGER REFERENCES model_operation_tasks(id) ON DELETE SET NULL,
             workflow_id INTEGER REFERENCES round_workflows(id) ON DELETE SET NULL,
             workflow_generation INTEGER,
+            persona_snapshot_id INTEGER,
+            credential_version_hash TEXT,
+            credential_version_changed INTEGER NOT NULL DEFAULT 0,
             idempotency_key TEXT,
             queued_at TEXT NOT NULL, request_started_at TEXT, request_finished_at TEXT,
             finished_at TEXT, queue_ms INTEGER, duration_ms INTEGER,
@@ -305,6 +338,22 @@ def init_db(path):
             prompt_tokens INTEGER, completion_tokens INTEGER, total_tokens INTEGER,
             error_message TEXT, updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS match_persona_freezes (
+            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            match_number INTEGER NOT NULL,
+            frozen_at TEXT NOT NULL,
+            source TEXT NOT NULL,
+            participant_roster_revision TEXT,
+            PRIMARY KEY(room_id,match_number));
+        CREATE TABLE IF NOT EXISTS match_seat_persona_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            match_number INTEGER NOT NULL,
+            seat_type TEXT NOT NULL CHECK(seat_type IN ('participant','judge')),
+            seat_key TEXT NOT NULL, seat_label TEXT NOT NULL,
+            config_json TEXT NOT NULL, model_json TEXT,
+            config_hash TEXT NOT NULL, frozen_at TEXT NOT NULL,
+            UNIQUE(room_id,match_number,seat_type,seat_key));
         CREATE INDEX IF NOT EXISTS idx_model_operations_room_match_round
             ON model_operation_tasks(room_id,match_number,round_number,id DESC);
         CREATE INDEX IF NOT EXISTS idx_model_operations_owner
@@ -320,6 +369,19 @@ def init_db(path):
             db.execute('ALTER TABLE ai_players ADD COLUMN model_profile_id INTEGER REFERENCES model_profiles(id) ON DELETE SET NULL')
         if 'model_profile_id' not in {x['name'] for x in db.execute('PRAGMA table_info(ai_judges)')}:
             db.execute('ALTER TABLE ai_judges ADD COLUMN model_profile_id INTEGER REFERENCES model_profiles(id) ON DELETE SET NULL')
+        for table, default_preset in (('ai_players','default'),('ai_judges','balanced')):
+            columns={x['name'] for x in db.execute(f'PRAGMA table_info({table})')}
+            definitions=(
+                ('persona_preset_id',f"TEXT NOT NULL DEFAULT '{default_preset}'"),
+                ('persona_preset_version','INTEGER NOT NULL DEFAULT 1'),
+                ('persona_custom_prompt',"TEXT NOT NULL DEFAULT ''"),
+                ('persona_output_length',"TEXT NOT NULL DEFAULT 'default'"),
+                ('persona_history_rounds','INTEGER NOT NULL DEFAULT 5'),
+                ('persona_revision','INTEGER NOT NULL DEFAULT 1'),
+            )
+            for column, definition in definitions:
+                if column not in columns:
+                    db.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
         if 'removed_at' not in {x['name'] for x in db.execute('PRAGMA table_info(members)')}:
             db.execute('ALTER TABLE members ADD COLUMN removed_at TEXT')
         if 'edited_at' not in {x['name'] for x in db.execute('PRAGMA table_info(answers)')}:
@@ -329,11 +391,20 @@ def init_db(path):
                                    ('deadline_at','TEXT'),('timeout_ended_at','TEXT')):
             if column not in round_columns:
                 db.execute(f'ALTER TABLE rounds ADD COLUMN {column} {definition}')
+        freeze_columns={x['name'] for x in db.execute('PRAGMA table_info(match_persona_freezes)')}
+        if 'participant_roster_revision' not in freeze_columns:
+            db.execute('ALTER TABLE match_persona_freezes ADD COLUMN participant_roster_revision TEXT')
         task_columns={x['name'] for x in db.execute('PRAGMA table_info(model_operation_tasks)')}
         if 'workflow_id' not in task_columns:
             db.execute('ALTER TABLE model_operation_tasks ADD COLUMN workflow_id INTEGER REFERENCES round_workflows(id) ON DELETE SET NULL')
         if 'workflow_generation' not in task_columns:
             db.execute('ALTER TABLE model_operation_tasks ADD COLUMN workflow_generation INTEGER')
+        if 'persona_snapshot_id' not in task_columns:
+            db.execute('ALTER TABLE model_operation_tasks ADD COLUMN persona_snapshot_id INTEGER')
+        if 'credential_version_hash' not in task_columns:
+            db.execute('ALTER TABLE model_operation_tasks ADD COLUMN credential_version_hash TEXT')
+        if 'credential_version_changed' not in task_columns:
+            db.execute('ALTER TABLE model_operation_tasks ADD COLUMN credential_version_changed INTEGER NOT NULL DEFAULT 0')
         workflow_columns={x['name'] for x in db.execute('PRAGMA table_info(round_workflows)')}
         if 'manual_retry_authorized' not in workflow_columns:
             db.execute('ALTER TABLE round_workflows ADD COLUMN manual_retry_authorized INTEGER NOT NULL DEFAULT 0')
@@ -623,6 +694,17 @@ class ModelBindingData(BaseModel, extra='forbid'):
     keep_existing: bool = False
 
 
+class SeatPersonaData(BaseModel, extra='forbid'):
+    preset_id: str = Field(min_length=1, max_length=40)
+    custom_system_prompt: str = Field(default='', max_length=8000)
+    output_length: Literal['default','short','medium','long'] = 'default'
+    history_rounds: StrictInt = Field(default=5, ge=0, le=100)
+
+
+class PersonaResetData(ConfirmData):
+    pass
+
+
 class ModelRequestLimitData(BaseModel, extra='forbid'):
     limit: Optional[int] = Field(default=None, ge=1, le=1000000)
 
@@ -744,6 +826,23 @@ def model_profile_snapshot_valid(db, profile):
     if not row:
         return False
     current=dict(row)
+    if profile.get('_persona_snapshot_id') is not None:
+        snapshot=db.execute('''SELECT config_hash,config_json,model_json FROM match_seat_persona_snapshots
+            WHERE id=? AND room_id=? AND match_number=?''',
+            (profile['_persona_snapshot_id'],profile.get('_persona_snapshot_room_id'),
+             profile.get('_persona_snapshot_match_number'))).fetchone()
+        actual_snapshot_hash=(hashlib.sha256((snapshot['config_json']+"\0"+(snapshot['model_json'] or "")).encode('utf-8')).hexdigest()
+                              if snapshot else None)
+        frozen=bool(snapshot and snapshot['config_hash']==profile.get('_persona_snapshot_config_hash')
+                    and snapshot['config_hash']==actual_snapshot_hash
+                    and snapshot['model_json'] is not None
+                    and hashlib.sha256(snapshot['model_json'].encode('utf-8')).hexdigest()==profile.get('_frozen_model_hash')
+                    and is_match_persona_frozen(db,profile.get('_persona_snapshot_room_id'),
+                                                profile.get('_persona_snapshot_match_number')))
+        # Profile edits and API-key rotation do not rewrite a match; deletion,
+        # owner revocation, credential damage, or preparation reset invalidate it.
+        return (frozen and current.get('owner_user_id')==profile.get('owner_user_id') and
+                not current.get('ownership_issue') and model_profile_credential_status(current)=='ok')
     if model_profile_credential_status(current)!='ok':
         return False
     fields=('owner_user_id','base_url','model','api_key_encrypted','temperature','max_tokens','timeout_seconds','updated_at')
@@ -751,6 +850,8 @@ def model_profile_snapshot_valid(db, profile):
 
 
 def model_profile_snapshot_hash(profile):
+    if profile.get('_persona_snapshot_id') is not None:
+        return profile['_frozen_model_hash']
     fields=('id','owner_user_id','base_url','model','api_key_encrypted','temperature',
             'max_tokens','timeout_seconds','updated_at')
     payload=[profile.get(field) for field in fields]
@@ -881,6 +982,8 @@ def judge_records(db, room_id):
         WHERE j.room_id=? AND j.left_at IS NULL AND (u.deleted_at IS NULL OR EXISTS(
             SELECT 1 FROM judge_verdicts v WHERE v.room_id=j.room_id AND v.judge_user_id=j.user_id))""", (room_id,)).fetchall()
     ai = db.execute("""SELECT j.id,j.label,j.created_at,j.model_profile_id,
+        j.persona_preset_id,j.persona_preset_version,j.persona_custom_prompt,
+        j.persona_output_length,j.persona_history_rounds,j.persona_revision,
         EXISTS(SELECT 1 FROM ai_judge_verdicts v WHERE v.room_id=j.room_id AND v.ai_judge_id=j.id) AS locked
         FROM ai_judges j WHERE j.room_id=?""", (room_id,)).fetchall()
     data = [dict(r, id=r['user_id'], kind='human') for r in people]
@@ -926,6 +1029,8 @@ def check_restart_judge_conflicts(db, room_id, viewer=None):
 
 
 def check_judge_registration(db, room, user_id, viewer=None):
+    if is_match_persona_frozen(db,room['id'],room['match_number']):
+        raise HTTPException(409,'本场 AI 席位配置已冻结；如首轮尚未开始，请先取消准备并重置配置。')
     if room['owner_id'] == user_id:
         raise HTTPException(409, '房主不能同时担任本房间的独立裁判。')
     if room['status'] != 'open' or room['verdict_locked_at'] or db.execute(
@@ -955,7 +1060,9 @@ def aliases(db, room_id):
         JOIN users u ON u.id=m.user_id WHERE m.room_id=? AND m.removed_at IS NULL
         AND (u.deleted_at IS NULL OR ?) ORDER BY m.alias''',
         (room_id,1 if include_deleted else 0)).fetchall()
-    ais = db.execute('SELECT alias,name,model_profile_id FROM ai_players WHERE room_id=? ORDER BY alias', (room_id,)).fetchall()
+    ais = db.execute('''SELECT alias,name,model_profile_id,persona_preset_id,persona_preset_version,
+        persona_custom_prompt,persona_output_length,persona_history_rounds,persona_revision
+        FROM ai_players WHERE room_id=? ORDER BY alias''', (room_id,)).fetchall()
     all_aliases = sorted([r['alias'] for r in humans] + [r['alias'] for r in ais])
     return humans, ais, all_aliases
 
@@ -981,10 +1088,24 @@ def needs_roster_recovery(db, room):
         (room['id'],)).fetchone())
 
 
-def ensure_roster_unlocked(db, room):
+def require_persona_editable(db, room):
+    if room['status']!='open' or room['verdict_locked_at']:
+        raise HTTPException(409,'比赛已结束或裁判判断已锁定，不能修改 AI 席位人设。')
+    if room['match_started_at']:
+        raise HTTPException(409,'首轮已经开始；本场人设、上下文策略和模型绑定均已冻结。')
+    if is_match_persona_frozen(db,room['id'],room['match_number']):
+        raise HTTPException(409,'本场准备已冻结；请先执行“取消准备并编辑”，再修改席位配置。')
+
+
+def ensure_roster_unlocked(db, room, *, allow_frozen=False, allow_poststart_recovery=False):
     if room['status'] != 'open':
         raise HTTPException(409, '比赛已结束。')
-    if needs_roster_recovery(db, room):
+    recovery=needs_roster_recovery(db,room)
+    if room['match_started_at'] and not (allow_poststart_recovery and recovery):
+        raise HTTPException(409,'比赛已经开始，不能再加入新的参赛者。')
+    if is_match_persona_frozen(db,room['id'],room['match_number']) and not recovery and not allow_frozen:
+        raise HTTPException(409,'本场 AI 席位配置已冻结；如首轮尚未开始，请先取消准备并重置配置。')
+    if recovery:
         return
     r = db.execute('SELECT question FROM rounds WHERE room_id=? AND number=1', (room['id'],)).fetchone()
     if (r and r['question']) or db.execute(
@@ -1004,7 +1125,7 @@ def clear_match_records(db, room_id):
     # 只清除比赛内容，房间、成员、AI 参赛位及裁判配置保留。
     for table in ('model_operation_tasks', 'rounds', 'suggestions', 'events', 'judge_questions', 'judge_verdicts',
                   'ai_judge_questions', 'ai_judge_verdicts', 'ai_answer_revisions', 'packets',
-                  'round_workflows', 'chat_messages'):
+                  'round_workflows', 'match_seat_persona_snapshots', 'match_persona_freezes', 'chat_messages'):
         db.execute(f'DELETE FROM {table} WHERE room_id=?', (room_id,))
     db.execute('''UPDATE rooms SET verdict_json=NULL,verdict_locked_at=NULL,
         revealed_at=NULL,records_deleted=1 WHERE id=?''', (room_id,))
@@ -1051,14 +1172,16 @@ def workflow_roster_revision(db, room_id):
         FROM members m JOIN users u ON u.id=m.user_id
         WHERE m.room_id=? AND m.removed_at IS NULL AND u.deleted_at IS NULL
         ORDER BY m.alias,m.user_id''',(room_id,)).fetchall()]
-    ais=[tuple(row) for row in db.execute('''SELECT 'ai' AS kind,alias,name,model_profile_id
-        FROM ai_players WHERE room_id=? ORDER BY alias''',(room_id,)).fetchall()]
+    ais=[tuple(row) for row in db.execute('''SELECT 'ai' AS kind,alias,name,model_profile_id,
+        persona_preset_id,persona_preset_version,persona_custom_prompt,persona_output_length,
+        persona_history_rounds,persona_revision FROM ai_players WHERE room_id=? ORDER BY alias''',(room_id,)).fetchall()]
     human_judges=[tuple(row) for row in db.execute('''SELECT 'human' AS kind,j.user_id,j.label
         FROM room_judges j JOIN users u ON u.id=j.user_id
         WHERE j.room_id=? AND j.left_at IS NULL AND u.deleted_at IS NULL
         ORDER BY j.user_id''',(room_id,)).fetchall()]
-    ai_judges=[tuple(row) for row in db.execute('''SELECT 'ai' AS kind,id,label,model_profile_id
-        FROM ai_judges WHERE room_id=? ORDER BY id''',(room_id,)).fetchall()]
+    ai_judges=[tuple(row) for row in db.execute('''SELECT 'ai' AS kind,id,label,model_profile_id,
+        persona_preset_id,persona_preset_version,persona_custom_prompt,persona_output_length,
+        persona_history_rounds,persona_revision FROM ai_judges WHERE room_id=? ORDER BY id''',(room_id,)).fetchall()]
     payload={'participants':humans+ais,'judges':human_judges+ai_judges}
     return hashlib.sha256(json.dumps(payload,ensure_ascii=False,separators=(',',':')).encode('utf-8')).hexdigest()
 
@@ -1074,7 +1197,8 @@ def participant_roster_revision(db, room_id):
         FROM members m JOIN users u ON u.id=m.user_id
         WHERE m.room_id=? AND m.removed_at IS NULL AND u.deleted_at IS NULL
         ORDER BY m.alias,m.user_id''',(room_id,)).fetchall()]
-    ais=[tuple(row) for row in db.execute('''SELECT 'ai' AS kind,alias,name
+    ais=[tuple(row) for row in db.execute('''SELECT 'ai' AS kind,alias,name,persona_preset_id,
+        persona_custom_prompt,persona_output_length,persona_history_rounds,persona_revision
         FROM ai_players WHERE room_id=? ORDER BY alias''',(room_id,)).fetchall()]
     payload=humans+ais
     return hashlib.sha256(json.dumps(payload,ensure_ascii=False,separators=(',',':')).encode('utf-8')).hexdigest()
@@ -1125,7 +1249,24 @@ def timed_out_aliases(db, round_id):
         'SELECT alias FROM round_timeouts WHERE round_id=? ORDER BY alias',(round_id,)).fetchall()]
 
 
+def ensure_persona_participant_roster_unchanged(db,room):
+    # The first-round preparation snapshot must not be reused after the actual
+    # contestant roster changes. Later voluntary departures follow match rules.
+    if room['match_started_at']:
+        return
+    frozen=db.execute('''SELECT participant_roster_revision FROM match_persona_freezes
+        WHERE room_id=? AND match_number=?''',(room['id'],room['match_number'])).fetchone()
+    expected=frozen['participant_roster_revision'] if frozen else None
+    # A pre-upgrade freeze may have no roster fingerprint. Fail closed rather
+    # than silently trusting a snapshot whose original roster cannot be verified.
+    if frozen and (not expected or expected!=participant_roster_revision(db,room['id'])):
+        raise HTTPException(409,'首轮准备期间参赛名单或匿名代号已变化，或旧快照缺少名单校验；请取消准备并重新入队。')
+
+
 def start_round_record(db, room, rnd, question):
+    ensure_persona_participant_roster_unchanged(db,room)
+    freeze_match_personas(db,room,source='round_start',
+        participant_roster_revision=participant_roster_revision(db,room['id']))
     started=datetime.now(timezone.utc)
     duration=room['round_duration_seconds'] if 'round_duration_seconds' in room.keys() else None
     deadline=(started+timedelta(seconds=int(duration))).isoformat(timespec='milliseconds') if duration else None
@@ -1256,6 +1397,7 @@ def match_readiness(db, room):
 def model_operation_view(row):
     return {
         'id':row['id'],'workflow_id':row['workflow_id'] if 'workflow_id' in row.keys() else None,
+        'credential_version_changed':bool(row['credential_version_changed']) if 'credential_version_changed' in row.keys() else False,
         'purpose':row['purpose'],'target_type':row['target_type'],
         'target_key':row['target_key'],'target_label':row['target_label'],
         'profile_name':row['profile_name'],'model_name':row['model_name'],
@@ -1277,6 +1419,9 @@ def public_room(db, room, user, mine):
     is_judge_view = bool(judge) and not is_admin
     humans, ais, roster = aliases(db, room['id'])
     judges = judge_records(db,room['id'])
+    persona_revealed=bool(room['revealed_at'])
+    revealed_personas=revealed_persona_rows(db,room['id'],room['match_number']) if persona_revealed else []
+    persona_frozen=is_match_persona_frozen(db,room['id'],room['match_number'])
     rounds = db.execute('SELECT * FROM rounds WHERE room_id=? ORDER BY number', (room['id'],)).fetchall()
     body = []
     for r in rounds:
@@ -1341,7 +1486,8 @@ def public_room(db, room, user, mine):
             'revealed_at':room['revealed_at'],'mine':None,'is_admin':False,'is_judge':True,
             'my_judge_label':judge['label'],'my_verdict':my_verdict,
             'aliases':roster,'rounds':body,'suggestions':suggestions,
-            'judges_count':len(judges),'server_now':utcnow()}
+            'judges_count':len(judges),'server_now':utcnow(),
+            'personas_revealed':persona_revealed,'seat_personas':revealed_personas}
     suggestions = db.execute('''SELECT s.id,s.round_number,s.text,s.created_at,u.display_name,
         m.alias FROM suggestions s JOIN users u ON u.id=s.sender_id
         LEFT JOIN members m ON m.room_id=s.room_id AND m.user_id=s.sender_id
@@ -1384,7 +1530,8 @@ def public_room(db, room, user, mine):
             'roster_recovery':manager and needs_roster_recovery(db,room),
             'status':room['status'],'current_round':room['current_round'],
             'verdict_locked':bool(room['verdict_locked_at']) or (bool(judges) and all(j['locked'] for j in judges)),
-            'revealed_at':room['revealed_at'],'verdict':verdict,'verdicts':verdicts,
+            'revealed_at':room['revealed_at'],'personas_revealed':persona_revealed,
+            'verdict':verdict,'verdicts':verdicts,
             'mine':mine,'is_admin':is_admin,'is_judge':False,
             'self_withdrawn':bool(db.execute('SELECT 1 FROM members WHERE room_id=? AND user_id=? AND removed_at IS NOT NULL',(room['id'],user['id'])).fetchone()),
             'invite_code':room['code'] if manager else None,
@@ -1392,11 +1539,13 @@ def public_room(db, room, user, mine):
                        'name':r['display_name'], 'username':r['username']} for r in humans],
             'ais':[{'alias':r['alias'],'name':r['name'],
                     'model_profile_id':r['model_profile_id'] if manager else None,
-                    'model_profile':profile_summaries.get(r['model_profile_id']) if manager else None} for r in ais],
+                    'model_profile':profile_summaries.get(r['model_profile_id']) if manager else None,
+                    'persona':persona_config_from_row(dict(r),'participant') if manager else None} for r in ais],
             'judges': [{'id':r['id'],'kind':r['kind'],'user_id':r['user_id'],
                         'label':r['label'],'username':r['username'],
                         'model_profile_id':r['model_profile_id'] if manager and r['kind']=='ai' else None,
                         'model_profile':profile_summaries.get(r['model_profile_id']) if manager and r['kind']=='ai' else None,
+                        'persona':persona_config_from_row(dict(r),'judge') if manager and r['kind']=='ai' else None,
                         'uid':user_uid(r['user_id']) if r['kind']=='human' else None,
                         'locked':bool(r['locked'])} for r in judges] if manager else
                       [{'kind':r['kind'],'label':r['label'],'locked':bool(r['locked'])} for r in judges],
@@ -1404,7 +1553,12 @@ def public_room(db, room, user, mine):
             'ai_edits':ai_edits,'packets':[dict(p) for p in pkts],
             'model_profiles':model_profiles,'model_api_enabled':has_valid_credential_key(),
             'server_now':utcnow()}
+    if persona_revealed:
+        result['personas_revealed']=True
+        result['seat_personas']=revealed_personas
     if manager:
+        result['personas_revealed']=persona_revealed
+        result['personas_frozen']=persona_frozen
         result['round_duration_seconds']=room['round_duration_seconds']
         current_round_row=db.execute('SELECT status FROM rounds WHERE room_id=? AND number=?',
                                       (room['id'],room['current_round'])).fetchone()
@@ -1456,7 +1610,7 @@ def public_room(db, room, user, mine):
     return result
 
 
-def anonymous_match_packet(db, room_id, through_round=None):
+def anonymous_match_packet(db, room_id, through_round=None, history_rounds=None):
     """Build a full-match judging packet containing aliases and text only."""
     _, _, roster = aliases(db, room_id)
     lines = ['多人图灵测试 · 全场匿名裁判资料',
@@ -1464,6 +1618,11 @@ def anonymous_match_packet(db, room_id, through_round=None):
     rounds = db.execute('''SELECT id,number,question FROM rounds WHERE room_id=?
         AND (? IS NULL OR number<=?) ORDER BY number''',
         (room_id, through_round, through_round)).fetchall()
+    if history_rounds is not None:
+        if history_rounds <= 0:
+            rounds=[]
+        else:
+            rounds=rounds[-int(history_rounds):]
     for rnd in rounds:
         lines += ['', f'===== 第 {rnd["number"]} 轮 =====', '', '【裁判问题】', rnd['question']]
         answers = {row['alias']: row['text'] for row in db.execute(
@@ -1478,11 +1637,16 @@ def anonymous_match_packet(db, room_id, through_round=None):
     return '\n'.join(lines) + '\n'
 
 
-def anonymous_player_history(db, room_id, alias, through_round):
+def anonymous_player_history(db, room_id, alias, through_round, history_rounds=None):
     """Return only this AI seat's own prior answers, never other contestants' text."""
     lines = []
     rounds = db.execute('''SELECT id,number,question FROM rounds
         WHERE room_id=? AND number<=? ORDER BY number''',(room_id,through_round)).fetchall()
+    if history_rounds is not None:
+        if history_rounds <= 0:
+            rounds=[]
+        else:
+            rounds=rounds[-int(history_rounds):]
     for rnd in rounds:
         answer=db.execute('SELECT text FROM answers WHERE round_id=? AND alias=?',
                           (rnd['id'],alias)).fetchone()
@@ -1926,16 +2090,26 @@ def create_app(db_path=None):
         now=operation_timestamp()
         profile_name=profile.get('profile_name') or profile.get('name') or '个人模型配置'
         model_name=profile.get('model_name') or profile.get('model') or '未知模型'
+        persona_snapshot_id=profile.get('_persona_snapshot_id')
+        credential_version_hash=(hashlib.sha256(profile['api_key_encrypted'].encode('utf-8')).hexdigest()
+                                  if persona_snapshot_id is not None and profile.get('api_key_encrypted') else None)
+        previous_credential=db.execute('''SELECT credential_version_hash FROM model_operation_tasks
+            WHERE persona_snapshot_id=? AND credential_version_hash IS NOT NULL ORDER BY id DESC LIMIT 1''',
+            (persona_snapshot_id,)).fetchone() if persona_snapshot_id is not None else None
+        credential_version_changed=bool(previous_credential and
+            previous_credential['credential_version_hash']!=credential_version_hash)
         cur=db.execute('''INSERT INTO model_operation_tasks(
             room_id,match_number,round_number,purpose,target_type,target_key,target_label,
             profile_id,profile_owner_user_id,trigger_user_id,profile_name,model_name,
             profile_snapshot_hash,context_revision,state,retry_of,workflow_id,workflow_generation,
+            persona_snapshot_id,credential_version_hash,credential_version_changed,
             idempotency_key,queued_at,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'queued',?,?,?,?,?,?)''',
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'queued',?,?,?,?,?,?,?,?,?)''',
             (room_id,match_number,round_number,purpose,target_type,str(target_key),target_label,
              profile['id'],profile['owner_user_id'],trigger_user_id,profile_name,model_name,
              model_profile_snapshot_hash(profile),context_revision,retry_of,workflow_id,
-             workflow_generation,normalized_key or secrets.token_urlsafe(18),now,now))
+             workflow_generation,persona_snapshot_id,credential_version_hash,
+             1 if credential_version_changed else 0,normalized_key or secrets.token_urlsafe(18),now,now))
         return int(cur.lastrowid),True,'queued'
 
     def finish_model_operation_in_db(db, operation_id, state, *, error=None, result_applied=False):
@@ -1965,6 +2139,35 @@ def create_app(db_path=None):
             row=db.execute('SELECT room_id FROM model_operation_tasks WHERE id=?',(operation_id,)).fetchone()
         if row and row['room_id'] is not None:
             await app.state.hub.notify(row['room_id'],'model_operation_updated')
+
+    def match_seat_persona_snapshot(db, room_id, match_number, seat_type, seat_key):
+        return db.execute('''SELECT * FROM match_seat_persona_snapshots
+            WHERE room_id=? AND match_number=? AND seat_type=? AND seat_key=?''',
+            (room_id,match_number,seat_type,str(seat_key))).fetchone()
+
+    def load_frozen_model_profile(db, snapshot):
+        if not snapshot or not snapshot['model_json']:
+            return None
+        model=json.loads(snapshot['model_json'])
+        if not model or not model.get('profile_id') or not model.get('owner_user_id') or not model.get('model'):
+            return None
+        row=db.execute('''SELECT mp.api_key_encrypted,mp.owner_user_id,mp.ownership_issue,
+                u.deleted_at AS owner_deleted_at FROM model_profiles mp
+            LEFT JOIN users u ON u.id=mp.owner_user_id WHERE mp.id=?''',(model['profile_id'],)).fetchone()
+        if not row or row['owner_user_id']!=model['owner_user_id'] or row['ownership_issue'] or row['owner_deleted_at']:
+            return None
+        profile=dict(model)
+        profile.update({'id':model['profile_id'],'owner_user_id':model['owner_user_id'],
+                        'api_key_encrypted':row['api_key_encrypted'],
+                        'ownership_issue':row['ownership_issue'],'owner_deleted_at':row['owner_deleted_at'],
+                        'profile_name':model.get('profile_name'),'model_name':model.get('model_name'),
+                        '_persona_snapshot_id':snapshot['id'],
+                        '_persona_snapshot_room_id':snapshot['room_id'],
+                        '_persona_snapshot_match_number':snapshot['match_number'],
+                        '_persona_snapshot_config_hash':snapshot['config_hash'],
+                        '_persona':json.loads(snapshot['config_json']),
+                        '_frozen_model_hash':hashlib.sha256(snapshot['model_json'].encode('utf-8')).hexdigest()})
+        return profile
 
     def workflow_actor_valid(db, workflow):
         row=db.execute('SELECT * FROM round_workflows WHERE id=?',(workflow['id'],)).fetchone()
@@ -1998,7 +2201,8 @@ def create_app(db_path=None):
                                       target_label, actor_id, session_hash, room_id,
                                       match_number, round_number, context_revision,
                                       messages, validate_context, apply_result,
-                                      workflow=None, retry_of=None, idempotency_key=None):
+                                      workflow=None, retry_of=None, idempotency_key=None,
+                                      request_max_tokens=None):
         workflow_id=workflow['id'] if workflow else None
         workflow_generation=workflow['execution_generation'] if workflow else None
         previous=None
@@ -2092,7 +2296,10 @@ def create_app(db_path=None):
                         if not model_profile_snapshot_valid(db,profile):
                             return '模型配置、凭据或配置所属账号已变化；未向服务商发送请求。'
                         return validate_context(db)
-                result=await model_call(profile,messages,key,preflight,operation_id=operation_id)
+                request_profile=dict(profile)
+                if request_max_tokens is not None:
+                    request_profile['max_tokens']=int(request_max_tokens)
+                result=await model_call(request_profile,messages,key,preflight,operation_id=operation_id)
                 parsed=result['text']
                 with connection(immediate=True) as db:
                     if workflow:
@@ -2140,10 +2347,11 @@ def create_app(db_path=None):
     async def generate_ai_judge_questions_shared(room_id, actor_id, session_hash=None,
                                                   target_judge_id=None, retry_of=None,
                                                   workflow=None, idempotency_key=None):
-        with connection() as db:
+        with connection(immediate=True) as db:
             room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
             if not room or room['status']!='open' or room['verdict_locked_at']:
                 raise HTTPException(409,'比赛已结束或裁判判断已锁定，不能生成 AI 裁判问题。')
+            ensure_persona_participant_roster_unchanged(db,room)
             if workflow:
                 actor_status=workflow_actor_valid(db,workflow)
                 if actor_status is not True:
@@ -2163,6 +2371,12 @@ def create_app(db_path=None):
             roster=aliases(db,room_id)[2]
             if len(roster)<2:
                 raise HTTPException(409,'至少需要两名在场参赛者才能生成 AI 裁判问题。')
+            if target_judge_id is not None and not db.execute(
+                    'SELECT 1 FROM ai_judges WHERE room_id=? AND id=?',(room_id,target_judge_id)).fetchone():
+                raise HTTPException(404,'AI 裁判席不存在。')
+            if not is_match_persona_frozen(db,room_id,room['match_number']):
+                freeze_match_personas(db,room,source='question_generation',
+                    participant_roster_revision=participant_roster_revision(db,room_id))
             rows=db.execute('''SELECT j.id AS judge_id,j.label,j.model_profile_id,
                     mp.*,u.deleted_at AS owner_deleted_at,q.id AS question_id
                 FROM ai_judges j
@@ -2174,12 +2388,29 @@ def create_app(db_path=None):
                 rows=[row for row in rows if row['judge_id']==target_judge_id]
             match_number=room['match_number']
             round_number=rnd['number']
-            history=anonymous_match_packet(db,room_id,round_number-1)
+            history_rounds=5
+            history=anonymous_match_packet(db,room_id,round_number-1,history_rounds)
             roster_revision=participant_roster_revision(db,room_id)
             results=[]
             profiles=[]
             for raw in rows:
                 profile=dict(raw)
+                snapshot=match_seat_persona_snapshot(db,room_id,match_number,'judge',profile['judge_id'])
+                if is_match_persona_frozen(db,room_id,match_number) and not snapshot:
+                    results.append({'judge_id':profile['judge_id'],'label':profile['label'],
+                        'status':'skipped','reason':'本场冻结的人设快照缺失；为避免读取可变配置，已停止调用。'})
+                    continue
+                persona=json.loads(snapshot['config_json']) if snapshot else persona_config_from_row(profile,'judge')
+                if snapshot and profile['model_profile_id'] is not None:
+                    frozen_profile=load_frozen_model_profile(db,snapshot)
+                    if not frozen_profile:
+                        results.append({'judge_id':profile['judge_id'],'label':profile['label'],
+                            'status':'skipped','reason':'本场冻结的模型配置或所属账号已不可用；请修复凭据后重试。'})
+                        continue
+                    frozen_profile.update({key:profile[key] for key in
+                        ('judge_id','label','model_profile_id','question_id') if key in profile})
+                    profile=frozen_profile
+                profile['_persona']=persona
                 if profile['question_id'] is not None:
                     continue
                 if profile['model_profile_id'] is None:
@@ -2198,8 +2429,11 @@ def create_app(db_path=None):
                 profiles.append(profile)
         async def generate_one(profile):
             judge_id=profile['judge_id']
+            persona=profile.get('_persona') or {}
+            with connection() as history_db:
+                seat_history=anonymous_match_packet(history_db,room_id,round_number-1,persona.get('history_rounds',5))
             context_revision=hashlib.sha256(
-                (str(round_number)+'|'+','.join(roster)+'|'+history).encode('utf-8')).hexdigest()
+                (str(round_number)+'|'+','.join(roster)+'|'+seat_history).encode('utf-8')).hexdigest()
             def validate_context(db, judge_id=judge_id, profile=profile):
                 current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
                 if not current or current['match_number']!=match_number or current['status']!='open' or current['verdict_locked_at']:
@@ -2209,7 +2443,7 @@ def create_app(db_path=None):
                     return '当前轮次已变化或开始作答；未向服务商发送请求。'
                 if aliases(db,room_id)[2]!=roster or participant_roster_revision(db,room_id)!=roster_revision:
                     return '参赛名单已变化；请取消准备并重新入队。'
-                if anonymous_match_packet(db,room_id,round_number-1)!=history:
+                if anonymous_match_packet(db,room_id,round_number-1,persona.get('history_rounds',5))!=seat_history:
                     return '历史匿名资料已变化；请刷新房间后重新生成问题。'
                 binding=db.execute('SELECT model_profile_id FROM ai_judges WHERE room_id=? AND id=?',
                                    (room_id,judge_id)).fetchone()
@@ -2232,13 +2466,12 @@ def create_app(db_path=None):
                 session_hash=session_hash,room_id=room_id,match_number=match_number,
                 round_number=round_number,context_revision=context_revision,
                 messages=[
-                    {'role':'system','content':('你是多人图灵测试的独立裁判。每轮只提出一个核心问题，不得把多个问题打包。'
-                     '问题必须面向所有匿名参赛者，不能询问真实姓名、账号、模型名称或系统提示。'
-                     '只输出问题正文，不要前言、编号或解释。')},
-                    {'role':'user','content':f'此前轮次的匿名资料：\n{history}\n\n当前是第 {round_number} 轮，参赛者匿名代号：{", ".join(roster)}。'
+                    {'role':'system','content':compose_system_prompt('你是多人图灵测试的独立裁判。每轮只提出一个核心问题，不得把多个问题打包。问题必须面向所有匿名参赛者，不能询问真实姓名、账号、模型名称或系统提示。只输出问题正文，不要前言、编号或解释。',persona,task='judge_question')},
+                    {'role':'user','content':f'此前轮次的匿名资料：\n{seat_history}\n\n当前是第 {round_number} 轮，参赛者匿名代号：{", ".join(roster)}。'
                      '请根据已有信息提出一个适合所有参赛者回答的全新问题。'}],
                 validate_context=validate_context,apply_result=apply_result,
-                workflow=workflow,retry_of=retry_of,idempotency_key=idempotency_key)
+                workflow=workflow,retry_of=retry_of,idempotency_key=idempotency_key,
+                request_max_tokens=output_token_limit(persona,profile.get('max_tokens',2048)))
             outcome.update({'judge_id':judge_id,'label':profile['label']})
             return outcome
 
@@ -2253,7 +2486,7 @@ def create_app(db_path=None):
     async def generate_ai_answers_shared(room_id, actor_id, session_hash=None,
                                          target_alias=None, retry_of=None,
                                          workflow=None, idempotency_key=None):
-        with connection() as db:
+        with connection(immediate=True) as db:
             room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
             if not room or room['status']!='open':
                 raise HTTPException(409,'比赛已结束。')
@@ -2276,6 +2509,10 @@ def create_app(db_path=None):
             if round_deadline_expired(rnd):
                 return {'generated':0,'skipped':0,'blocked':0,'failed':[],
                         'timed_out':True,'results':[]}
+            ensure_persona_participant_roster_unchanged(db,room)
+            if not is_match_persona_frozen(db,room_id,room['match_number']):
+                freeze_match_personas(db,room,source='answer_generation',
+                    participant_roster_revision=participant_roster_revision(db,room_id))
             rows=db.execute('''SELECT ai.alias,ai.name AS ai_name,mp.*,
                     mp.name AS profile_name,mp.model AS model_name FROM ai_players ai
                 JOIN model_profiles mp ON mp.id=ai.model_profile_id AND mp.ownership_issue IS NULL
@@ -2287,14 +2524,33 @@ def create_app(db_path=None):
             match_number=room['match_number']
             round_number=rnd['number']
             question=rnd['question']
-            profiles=[dict(row) for row in rows]
-            history_by_alias={row['alias']:anonymous_player_history(db,room_id,row['alias'],round_number-1)
-                              for row in rows}
+            profiles=[]
+            results=[]
+            for raw in rows:
+                profile=dict(raw)
+                snapshot=match_seat_persona_snapshot(db,room_id,match_number,'participant',profile['alias'])
+                if is_match_persona_frozen(db,room_id,match_number) and not snapshot:
+                    results.append({'alias':profile['alias'],'status':'skipped',
+                        'reason':'本场冻结的人设快照缺失；为避免读取可变配置，已停止调用。'})
+                    continue
+                persona=json.loads(snapshot['config_json']) if snapshot else persona_config_from_row(profile,'participant')
+                if snapshot:
+                    frozen_profile=load_frozen_model_profile(db,snapshot)
+                    if not frozen_profile:
+                        results.append({'alias':profile['alias'],'status':'skipped',
+                            'reason':'本场冻结的模型配置或所属账号已不可用；请修复凭据后重试。'})
+                        continue
+                    frozen_profile.update({key:profile[key] for key in ('alias','ai_name') if key in profile})
+                    profile=frozen_profile
+                profile['_persona']=persona
+                profiles.append(profile)
+            history_by_alias={profile['alias']:anonymous_player_history(db,room_id,profile['alias'],round_number-1,
+                (profile.get('_persona') or {}).get('history_rounds',5)) for profile in profiles}
             roster_revision=participant_roster_revision(db,room_id)
-        results=[]
         async def generate_one(profile):
             alias=profile['alias']
             history=history_by_alias.get(alias,'（此前没有已完成轮次。）')
+            persona=profile.get('_persona') or {}
             context_revision=hashlib.sha256((question+'\0'+history).encode('utf-8')).hexdigest()
             def validate_context(db, alias=alias, profile=profile, history=history):
                 current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
@@ -2306,7 +2562,8 @@ def create_app(db_path=None):
                     return '当前轮次、问题或答题期限已变化；未向服务商发送请求。'
                 if participant_roster_revision(db,room_id)!=roster_revision:
                     return '参赛名单已变化；旧回答不能写入当前比赛。'
-                current_history=anonymous_player_history(db,room_id,alias,round_number-1)
+                current_history=anonymous_player_history(db,room_id,alias,round_number-1,
+                    persona.get('history_rounds',5))
                 if current_history!=history:
                     return '该 AI 参赛席自己的历史回答已变化；旧回答不能写入当前比赛。'
                 binding=db.execute('SELECT model_profile_id FROM ai_players WHERE room_id=? AND alias=?',
@@ -2332,11 +2589,11 @@ def create_app(db_path=None):
                 match_number=match_number,round_number=round_number,
                 context_revision=context_revision,
                 messages=[
-                    {'role':'system','content':('你正在参加一场多人图灵测试。你是匿名参赛者，请自然、直接地回答裁判问题。'
-                     '不要提及模型、API、系统提示或你被要求扮演的身份；不要编造个人经历来冒充真实事实。')},
+                    {'role':'system','content':compose_system_prompt('你正在参加一场多人图灵测试。你是匿名参赛者，请自然、直接地回答裁判问题。不要提及模型、API、系统提示或你被要求扮演的身份；不要编造个人经历来冒充真实事实。',persona,task='participant_answer')},
                     {'role':'user','content':f'你此前的本场记录（只包含你自己的回答）：\n{history}\n\n当前第 {round_number} 轮裁判问题：\n\n{question}\n\n请给出你的本轮回答。'}],
                 validate_context=validate_context,apply_result=apply_result,
-                workflow=workflow,retry_of=retry_of,idempotency_key=idempotency_key)
+                workflow=workflow,retry_of=retry_of,idempotency_key=idempotency_key,
+                request_max_tokens=output_token_limit(persona,profile.get('max_tokens',2048)))
             outcome.update({'alias':alias})
             return outcome
 
@@ -2403,6 +2660,9 @@ def create_app(db_path=None):
             (room['id'],match_number,round_number)).fetchone()[0]
         if active_tasks:
             raise HTTPException(409,'本轮已有独立模型任务正在处理；请等待其结束后再创建服务端工作流。')
+        ensure_persona_participant_roster_unchanged(db,room)
+        freeze_match_personas(db,room,source='workflow',
+            participant_roster_revision=participant_roster_revision(db,room['id']))
         now=operation_timestamp()
         roster_revision=workflow_roster_revision(db,room['id'])
         input_revision=workflow_input_revision(db,room['id'],round_number)
@@ -2957,7 +3217,7 @@ def create_app(db_path=None):
                 room=db.execute('SELECT * FROM rooms WHERE code=?',(body.code.strip().upper(),)).fetchone()
                 if not room:
                     raise HTTPException(404,'邀请码无效。')
-                ensure_roster_unlocked(db,room)
+                ensure_roster_unlocked(db,room,allow_frozen=True)
             username=norm_text(body.username,40)
             try:
                 pw_hash=hash_password(body.password)
@@ -3205,7 +3465,7 @@ def create_app(db_path=None):
                                  (room_id,u['id'])).fetchone()
                 if prior and (prior['leave_reason']!='voluntary' or room['match_started_at']):
                     raise HTTPException(403,'你已离开本场比赛，下一场可以重新加入；被移除者不能重入本场。')
-                ensure_roster_unlocked(db,room)
+                ensure_roster_unlocked(db,room,allow_frozen=True)
                 if prior:
                     if active_participant_count(db,room_id)>=MAX_PLAYERS:
                         raise HTTPException(409,f'最多支持 {MAX_PLAYERS} 位参赛者。')
@@ -3493,6 +3753,10 @@ def create_app(db_path=None):
         await app.state.hub.notify(room_id,'judge_added')
         return {'ok':True}
 
+    @app.get('/api/ai-seat-personas')
+    def list_ai_seat_personas():
+        return persona_catalog()
+
     @app.post('/api/rooms/{room_id}/ai-judges')
     async def add_ai_judge(room_id:int,body:AIData,request:Request):
         with connection(immediate=True) as db:
@@ -3518,6 +3782,7 @@ def create_app(db_path=None):
                 raise HTTPException(404,'AI 裁判席不存在。')
             if body.keep_existing:
                 return {'ok':True,'unchanged':True}
+            require_persona_editable(db,room)
             if room['status']!='open' or room['verdict_locked_at'] or db.execute(
                 'SELECT 1 FROM judge_verdicts WHERE room_id=? LIMIT 1',(room_id,)).fetchone() or db.execute(
                 'SELECT 1 FROM ai_judge_verdicts WHERE room_id=? LIMIT 1',(room_id,)).fetchone():
@@ -3854,15 +4119,55 @@ def create_app(db_path=None):
         with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
-            ensure_roster_unlocked(db,room)
+            if room['status']!='open' or room['verdict_locked_at']:
+                raise HTTPException(409,'比赛已结束或裁判判断已锁定，不能添加 AI 参赛位。')
+            recovery=needs_roster_recovery(db,room)
+            frozen=is_match_persona_frozen(db,room_id,room['match_number'])
+            post_start_recovery=bool(room['match_started_at']) and recovery
+            if frozen and not post_start_recovery:
+                raise HTTPException(409,'首轮准备已冻结；如需补位或修改 AI 席位，请先取消准备并重置配置。')
+            if post_start_recovery and body.model_profile_id is not None:
+                raise HTTPException(409,'比赛开始后因账号删除补位时，只能添加使用默认人设的手动 AI 席位。')
+            ensure_roster_unlocked(db,room,allow_frozen=True,
+                                   allow_poststart_recovery=post_start_recovery)
+            invalidated_ai_questions=0
+            if recovery:
+                now=utcnow()
+                stale_reason='参赛名单变化；当前轮旧 AI 裁判问题和准备任务已作废，请重新准备。'
+                db.execute('''UPDATE round_workflows SET state='stale',stage='stale',
+                    execution_generation=execution_generation+1,worker_token=NULL,
+                    waiting_reason=NULL,error_message=?,finished_at=?,updated_at=?
+                    WHERE room_id=? AND match_number=? AND round_number=?
+                    AND state NOT IN ('stale','cancelled')''',
+                    (stale_reason,now,now,room_id,room['match_number'],room['current_round']))
+                db.execute('''UPDATE model_operation_tasks SET state='stale',error_message=?,
+                    finished_at=?,updated_at=?,result_applied=0
+                    WHERE room_id=? AND match_number=? AND round_number=?
+                    AND purpose='judge_question' AND state NOT IN ('stale','cancelled')''',
+                    (stale_reason,now,now,room_id,room['match_number'],room['current_round']))
+                invalidated_ai_questions=db.execute(
+                    'DELETE FROM ai_judge_questions WHERE room_id=? AND round_number=?',
+                    (room_id,room['current_round'])).rowcount
             alias=new_alias(db,room_id)
             if body.model_profile_id is not None:
                 require_owned_model_profile(db,body.model_profile_id,u['id'])
+            name=norm_text(body.name,60)
             db.execute('INSERT INTO ai_players(room_id,alias,name,model_profile_id) VALUES(?,?,?,?)',
-                       (room_id,alias,norm_text(body.name,60),body.model_profile_id))
-            log_event(db,room_id,1,'ai_joined',alias,'AI 参赛位已添加')
+                       (room_id,alias,name,body.model_profile_id))
+            if frozen:
+                freeze_new_manual_participant_seat(
+                    db,room,alias,name,
+                    participant_roster_revision=participant_roster_revision(db,room_id))
+            elif room['match_started_at']:
+                # Legacy in-progress matches may predate persona snapshots.
+                freeze_match_personas(db,room,source='roster_recovery',
+                    participant_roster_revision=participant_roster_revision(db,room_id))
+            log_event(db,room_id,room['current_round'],'ai_joined',alias,
+                      '补位 AI 已添加；当前轮旧 AI 裁判问题已作废' if recovery else 'AI 参赛位已添加')
+        app.state.workflow_worker.wake()
         await app.state.hub.notify(room_id,'ai_joined')
-        return {'alias':alias,'automated':body.model_profile_id is not None}
+        return {'alias':alias,'automated':body.model_profile_id is not None,
+                'invalidated_ai_questions':invalidated_ai_questions}
 
     @app.put('/api/rooms/{room_id}/ai/{alias}/model')
     async def bind_ai_player_model(room_id:int,alias:str,body:ModelBindingData,request:Request):
@@ -3874,6 +4179,7 @@ def create_app(db_path=None):
                 raise HTTPException(404,'AI 参赛席不存在。')
             if body.keep_existing:
                 return {'ok':True,'unchanged':True}
+            require_persona_editable(db,room)
             if room['status']!='open' or room['verdict_locked_at'] or db.execute(
                 'SELECT 1 FROM judge_verdicts WHERE room_id=? LIMIT 1',(room_id,)).fetchone() or db.execute(
                 'SELECT 1 FROM ai_judge_verdicts WHERE room_id=? LIMIT 1',(room_id,)).fetchone():
@@ -3884,6 +4190,94 @@ def create_app(db_path=None):
                        (body.model_profile_id,room_id,alias))
         await app.state.hub.notify(room_id,'model_profile_changed')
         return {'ok':True}
+
+    @app.put('/api/rooms/{room_id}/ai-judges/{judge_id}/persona')
+    async def update_ai_judge_persona(room_id:int,judge_id:int,body:SeatPersonaData,request:Request):
+        try:
+            config=normalize_persona_config('judge',preset_id=body.preset_id,
+                custom_system_prompt=body.custom_system_prompt,output_length=body.output_length,
+                history_rounds=body.history_rounds)
+        except ValueError as exc:
+            raise HTTPException(422,str(exc))
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            require_persona_editable(db,room)
+            cur=db.execute('''UPDATE ai_judges SET persona_preset_id=?,persona_preset_version=?,
+                persona_custom_prompt=?,persona_output_length=?,persona_history_rounds=?,
+                persona_revision=persona_revision+1 WHERE room_id=? AND id=?''',
+                (config['preset_id'],config['preset_version'],config['custom_system_prompt'],
+                 config['output_length'],config['history_rounds'],room_id,judge_id))
+            if cur.rowcount!=1:
+                raise HTTPException(404,'AI 裁判席不存在。')
+        await app.state.hub.notify(room_id,'seat_persona_changed')
+        return {'ok':True}
+
+    @app.put('/api/rooms/{room_id}/ai/{alias}/persona')
+    async def update_ai_player_persona(room_id:int,alias:str,body:SeatPersonaData,request:Request):
+        alias=alias.upper()
+        try:
+            config=normalize_persona_config('participant',preset_id=body.preset_id,
+                custom_system_prompt=body.custom_system_prompt,output_length=body.output_length,
+                history_rounds=body.history_rounds)
+        except ValueError as exc:
+            raise HTTPException(422,str(exc))
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            require_persona_editable(db,room)
+            cur=db.execute('''UPDATE ai_players SET persona_preset_id=?,persona_preset_version=?,
+                persona_custom_prompt=?,persona_output_length=?,persona_history_rounds=?,
+                persona_revision=persona_revision+1 WHERE room_id=? AND alias=?''',
+                (config['preset_id'],config['preset_version'],config['custom_system_prompt'],
+                 config['output_length'],config['history_rounds'],room_id,alias))
+            if cur.rowcount!=1:
+                raise HTTPException(404,'AI 参赛席不存在。')
+        await app.state.hub.notify(room_id,'seat_persona_changed')
+        return {'ok':True}
+
+    @app.post('/api/rooms/{room_id}/personas/reset-preparation')
+    async def reset_persona_preparation(room_id:int,body:PersonaResetData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            rnd=current_round(db,room)
+            if (room['status']!='open' or room['verdict_locked_at'] or
+                    room['match_started_at'] or room['current_round']!=1 or rnd['status']!='draft'):
+                raise HTTPException(409,'只有首轮尚未开始的比赛才能取消准备并编辑人设。')
+            workflows=db.execute('''SELECT id FROM round_workflows
+                WHERE room_id=? AND match_number=? AND
+                (state IN ('queued','generating_questions','starting_round','generating_answers',
+                           'waiting_input','blocked','failed') OR
+                 (state='completed' AND mode='prepare_only'))''',
+                (room_id,room['match_number'])).fetchall()
+            if not is_match_persona_frozen(db,room_id,room['match_number']) and not workflows:
+                return {'ok':True,'reset':False}
+            now=operation_timestamp()
+            for row in workflows:
+                db.execute("""UPDATE round_workflows SET state='cancelled',stage='cancelled',
+                    execution_generation=execution_generation+1,worker_token=NULL,waiting_reason=NULL,
+                    error_message='房主取消准备并编辑席位配置。',finished_at=?,updated_at=?
+                    WHERE id=?""",(now,now,row['id']))
+            # Completed AI questions are deleted below too. Invalidate their task
+            # records so the ledger does not claim an applied result and cannot retry
+            # against a snapshot that this reset removes.
+            db.execute("""UPDATE model_operation_tasks SET state='stale',finished_at=?,updated_at=?,
+                error_message='准备已取消；旧模型结果不得写入或重试。',result_applied=0
+                WHERE room_id=? AND match_number=? AND round_number=1
+                  AND purpose='judge_question' AND state NOT IN ('stale','cancelled')""",
+                (now,now,room_id,room['match_number']))
+            # AI judge questions are regenerated from the new snapshot; human judge questions remain.
+            db.execute('DELETE FROM ai_judge_questions WHERE room_id=? AND round_number=1',(room_id,))
+            db.execute('DELETE FROM match_seat_persona_snapshots WHERE room_id=? AND match_number=?',
+                       (room_id,room['match_number']))
+            db.execute('DELETE FROM match_persona_freezes WHERE room_id=? AND match_number=?',
+                       (room_id,room['match_number']))
+            db.execute('UPDATE rooms SET match_started_at=NULL WHERE id=? AND match_number=?',
+                       (room_id,room['match_number']))
+        app.state.workflow_worker.wake()
+        await app.state.hub.notify(room_id,'persona_preparation_reset')
+        return {'ok':True,'reset':True,'cancelled_workflows':len(workflows)}
 
     @app.post('/api/rooms/{room_id}/question')
     async def set_question(room_id:int,body:TextData,request:Request):
@@ -4256,7 +4650,7 @@ def create_app(db_path=None):
     @app.post('/api/rooms/{room_id}/ai-judges/verdicts/generate')
     async def generate_ai_judge_verdicts(room_id:int,request:Request,
                                          target_judge_id:Optional[int]=Query(default=None,ge=1)):
-        with connection() as db:
+        with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
             if room['status']!='open' or room['verdict_locked_at']:
@@ -4264,6 +4658,12 @@ def create_app(db_path=None):
             rounds=db.execute('SELECT status FROM rounds WHERE room_id=? ORDER BY number',(room_id,)).fetchall()
             if not rounds or any(r['status']!='revealed' for r in rounds):
                 raise HTTPException(409,'所有轮次都完成后，AI 裁判才能做出最终判断。')
+            # Matches already in progress when persona snapshots were introduced
+            # have no historical snapshot. Freeze their current settings once,
+            # before the first post-upgrade AI verdict request.
+            if not is_match_persona_frozen(db,room_id,room['match_number']):
+                freeze_match_personas(db,room,source='legacy_verdict_generation',
+                    participant_roster_revision=participant_roster_revision(db,room_id))
             roster=aliases(db,room_id)[2]
             packet=anonymous_match_packet(db,room_id)
             evidence_revision=hashlib.sha256(packet.encode('utf-8')).hexdigest()
@@ -4278,25 +4678,42 @@ def create_app(db_path=None):
             actor_id=u['id']
             session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
             results=[]
-            profiles=[dict(row) for row in rows]
-            retry_of=getattr(request.state,'model_operation_retry_of',None)
-            queued_profiles=[]
-            for profile in profiles:
-                with connection(immediate=True) as task_db:
-                    operation_id,created,active_state=create_model_operation_task(
-                        task_db,purpose='judge_verdict',target_type='ai_judge',
-                        target_key=profile['judge_id'],target_label=profile['label'],
-                        profile=profile,trigger_user_id=actor_id,room_id=room_id,
-                        match_number=match_number,round_number=room['current_round'],
-                        context_revision=evidence_revision,retry_of=retry_of,
-                        idempotency_key=request.headers.get('Idempotency-Key'))
-                if created:
-                    profile['_operation_id']=operation_id
-                    queued_profiles.append(profile)
-                else:
-                    results.append({'judge_id':profile['judge_id'],'status':active_state,
-                                    'reason':'该席位已有进行中的模型任务。'})
-            profiles=queued_profiles
+            profiles=[]
+            for raw in rows:
+                profile=dict(raw)
+                snapshot=match_seat_persona_snapshot(db,room_id,match_number,'judge',profile['judge_id'])
+                if is_match_persona_frozen(db,room_id,match_number) and not snapshot:
+                    results.append({'judge_id':profile['judge_id'],'status':'skipped','reason':'本场冻结的人设快照缺失；为避免读取可变配置，已停止调用。'})
+                    continue
+                persona=json.loads(snapshot['config_json']) if snapshot else persona_config_from_row(profile,'judge')
+                if snapshot:
+                    frozen_profile=load_frozen_model_profile(db,snapshot)
+                    if not frozen_profile:
+                        results.append({'judge_id':profile['judge_id'],'status':'skipped',
+                            'reason':'本场冻结的模型配置或所属账号已不可用；请修复凭据后重试。'})
+                        continue
+                    frozen_profile.update({key:profile[key] for key in ('judge_id','label') if key in profile})
+                    profile=frozen_profile
+                profile['_persona']=persona
+                profiles.append(profile)
+        retry_of=getattr(request.state,'model_operation_retry_of',None)
+        queued_profiles=[]
+        for profile in profiles:
+            with connection(immediate=True) as task_db:
+                operation_id,created,active_state=create_model_operation_task(
+                    task_db,purpose='judge_verdict',target_type='ai_judge',
+                    target_key=profile['judge_id'],target_label=profile['label'],
+                    profile=profile,trigger_user_id=actor_id,room_id=room_id,
+                    match_number=match_number,round_number=room['current_round'],
+                    context_revision=evidence_revision,retry_of=retry_of,
+                    idempotency_key=request.headers.get('Idempotency-Key'))
+            if created:
+                profile['_operation_id']=operation_id
+                queued_profiles.append(profile)
+            else:
+                results.append({'judge_id':profile['judge_id'],'status':active_state,
+                                'reason':'该席位已有进行中的模型任务。'})
+        profiles=queued_profiles
         if profiles:
             await app.state.hub.notify(room_id,'model_operation_updated')
         if not profiles:
@@ -4328,12 +4745,14 @@ def create_app(db_path=None):
                             return False
                         current_packet=anonymous_match_packet(db,room_id)
                         return hashlib.sha256(current_packet.encode('utf-8')).hexdigest()==evidence_revision
+                persona=profile.get('_persona') or {}
+                platform_prompt=('你是多人图灵测试的独立裁判。你必须只根据匿名代号及参赛者回答，判断每个代号实际是人类还是 AI。'
+                    '不能访问或猜测真实身份、模型来源、账号资料。对所有代号都必须给出判断。'
+                    '严格返回 JSON 对象，不要使用 Markdown 代码块或附加说明。结构：'
+                    '{"predictions":{"A":"Human"},"evidence":"判断依据","confidence":0,"weakness":"最不确定之处","possible_error":"可能误判原因"}。'
+                    'predictions 的值只能是 Human 或 AI，confidence 必须为 0 到 100 的整数。')
                 result=await model_call(profile,[
-                    {'role':'system','content':('你是多人图灵测试的独立裁判。你必须只根据匿名代号及参赛者回答，判断每个代号实际是人类还是 AI。'
-                     '不能访问或猜测真实身份、模型来源、账号资料。对所有代号都必须给出判断。'
-                     '严格返回 JSON 对象，不要使用 Markdown 代码块或附加说明。结构：'
-                     '{"predictions":{"A":"Human"},"evidence":"判断依据","confidence":0,"weakness":"最不确定之处","possible_error":"可能误判原因"}。'
-                     'predictions 的值只能是 Human 或 AI，confidence 必须为 0 到 100 的整数。')},
+                    {'role':'system','content':compose_system_prompt(platform_prompt,persona,task='judge_verdict',final_verdict=True)},
                     {'role':'user','content':packet}],key,preflight,
                     operation_id=operation_id)
                 payload=parse_json_object(result['text'])
@@ -4421,6 +4840,13 @@ def create_app(db_path=None):
             if not profile_row or model_profile_credential_status(dict(profile_row))!='ok':
                 raise HTTPException(409,'原模型配置已删除或不可用，请先修复配置并重新绑定。')
             profile=dict(profile_row)
+            if task['persona_snapshot_id'] is not None:
+                snapshot=db.execute('SELECT * FROM match_seat_persona_snapshots WHERE id=? AND room_id=? AND match_number=?',
+                    (task['persona_snapshot_id'],room_id,task['match_number'])).fetchone()
+                frozen_profile=load_frozen_model_profile(db,snapshot) if snapshot else None
+                if not frozen_profile:
+                    raise HTTPException(409,'本场冻结模型配置或其凭据所有权已失效，不能重试。')
+                profile=frozen_profile
             if model_profile_snapshot_hash(profile)!=task['profile_snapshot_hash']:
                 raise HTTPException(409,'原模型配置已发生变化，请确认新配置后从当前阶段重新发起。')
             purpose=task['purpose']
@@ -4439,7 +4865,8 @@ def create_app(db_path=None):
                               (room_id,task['round_number'],int(target_key))).fetchone():
                     raise HTTPException(409,'该 AI 裁判已提交问题，无需重试。')
                 roster=aliases(db,room_id)[2]
-                history=anonymous_match_packet(db,room_id,task['round_number']-1)
+                persona=json.loads(db.execute('SELECT config_json FROM match_seat_persona_snapshots WHERE id=?',(task['persona_snapshot_id'],)).fetchone()['config_json']) if task['persona_snapshot_id'] is not None else {}
+                history=anonymous_match_packet(db,room_id,task['round_number']-1,persona.get('history_rounds',5))
                 revision=hashlib.sha256(
                     (str(task['round_number'])+'|'+','.join(roster)+'|'+history).encode('utf-8')).hexdigest()
                 if revision!=task['context_revision']:
@@ -4457,7 +4884,8 @@ def create_app(db_path=None):
                 if db.execute('SELECT 1 FROM answers WHERE round_id=? AND alias=?',
                               (rnd['id'],target_key)).fetchone():
                     raise HTTPException(409,'该 AI 参赛席已提交回答，无需重试。')
-                history=anonymous_player_history(db,room_id,target_key,task['round_number']-1)
+                persona=json.loads(db.execute('SELECT config_json FROM match_seat_persona_snapshots WHERE id=?',(task['persona_snapshot_id'],)).fetchone()['config_json']) if task['persona_snapshot_id'] is not None else {}
+                history=anonymous_player_history(db,room_id,target_key,task['round_number']-1,persona.get('history_rounds',5))
                 revision=hashlib.sha256((rnd['question']+'\0'+history).encode('utf-8')).hexdigest()
                 if revision!=task['context_revision']:
                     raise HTTPException(409,'回答所依据的问题或历史资料已变化，不能重试旧任务。')

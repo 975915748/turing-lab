@@ -1,13 +1,13 @@
 'use strict';
 const $ = (selector) => document.querySelector(selector);
 const app = $('#app');
-const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelSavePending:{},social:null,dmMessages:[],dmBeforeId:null,dmHasMore:false,dmSocket:null,personalModelEpoch:0,modelOperationRecords:[],modelOperationStats:{},modelOperationProfileOptions:[],modelOperationTotal:0,modelOperationOffset:0,modelOperationFilters:{profile_id:'',purpose:'',status:''},modelOperationsExpanded:false,modelOperationRequestVersion:0,modelOperationHistoryPanels:{},serverTimeOffset:0,dmUid:null,dmOtherName:'',dmCanSend:false,dmPending:null,dmDraft:'',dmReconnect:null,dmLoadVersion:0,socialEpoch:0,pointsLedgerEntries:[],pointsLedgerBeforeId:null,pointsLedgerHasMore:false,pointsLedgerLoaded:false};
+const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelSavePending:{},social:null,dmMessages:[],dmBeforeId:null,dmHasMore:false,dmSocket:null,personalModelEpoch:0,modelOperationRecords:[],modelOperationStats:{},modelOperationProfileOptions:[],modelOperationTotal:0,modelOperationOffset:0,modelOperationFilters:{profile_id:'',purpose:'',status:''},modelOperationsExpanded:false,modelOperationRequestVersion:0,modelOperationHistoryPanels:{},personaDrafts:{},personaEditorOpen:{},serverTimeOffset:0,dmUid:null,dmOtherName:'',dmCanSend:false,dmPending:null,dmDraft:'',dmReconnect:null,dmLoadVersion:0,socialEpoch:0,pointsLedgerEntries:[],pointsLedgerBeforeId:null,pointsLedgerHasMore:false,pointsLedgerLoaded:false};
 const esc = (v) => String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const shortDate = s => s ? new Date(s).toLocaleString('zh-CN',{hour12:false}) : '';
 const val = (id) => document.getElementById(id)?.value??'';
 const D = (txt='暂无记录') => `<p class="muted hint">${esc(txt)}</p>`;
 let toastTimer;
-function clearPersonalModelState(){stopDmWs();state.social=null;state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;state.dmOtherName='';state.dmCanSend=false;state.dmPending=null;state.dmDraft='';state.dmLoadVersion++;state.socialEpoch++;state.pointsLedgerEntries=[];state.pointsLedgerBeforeId=null;state.pointsLedgerHasMore=false;state.pointsLedgerLoaded=false;state.personalModelEpoch=(state.personalModelEpoch||0)+1;state.modelOperationRequestVersion=(state.modelOperationRequestVersion||0)+1;state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};state.personalModelTestVersions={};state.personalModelTestPending={};state.personalModelSavePending={};state.modelOperationRecords=[];state.modelOperationStats={};state.modelOperationProfileOptions=[];state.modelOperationTotal=0;state.modelOperationOffset=0;state.modelOperationFilters={profile_id:'',purpose:'',status:''};state.modelOperationsExpanded=false;state.modelOperationHistoryPanels={};}
+function clearPersonalModelState(){stopDmWs();state.social=null;state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;state.dmOtherName='';state.dmCanSend=false;state.dmPending=null;state.dmDraft='';state.dmLoadVersion++;state.socialEpoch++;state.pointsLedgerEntries=[];state.pointsLedgerBeforeId=null;state.pointsLedgerHasMore=false;state.pointsLedgerLoaded=false;state.personalModelEpoch=(state.personalModelEpoch||0)+1;state.modelOperationRequestVersion=(state.modelOperationRequestVersion||0)+1;state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};state.personalModelTestVersions={};state.personalModelTestPending={};state.personalModelSavePending={};state.modelOperationRecords=[];state.modelOperationStats={};state.modelOperationProfileOptions=[];state.modelOperationTotal=0;state.modelOperationOffset=0;state.modelOperationFilters={profile_id:'',purpose:'',status:''};state.modelOperationsExpanded=false;state.modelOperationHistoryPanels={};state.personaDrafts={};state.personaEditorOpen={};}
 function toast(message){const el=$('#toast');el.textContent=message;el.classList.add('visible');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('visible'),4200)}
 function setConnection(txt,online){const el=$('#connection');el.textContent=(online?'● ':'○ ')+txt;el.className='connection'+(online?' online':'')}
 function applyPrefs(){let theme=localStorage.getItem('turing_theme')||'light';document.body.dataset.theme=theme;$('#themeBtn').textContent=theme==='light'?'☾ 深色':'☀ 日间';let f=Number(localStorage.getItem('turing_font')||15);if(f<12||f>22)f=15;document.documentElement.style.setProperty('--font',f+'px');$('#fontSize').value=f;$('#fontValue').textContent=f;}
@@ -604,11 +604,59 @@ function renderHumanJudgeAdminPanel(r){
  return '<section class="card compact"><div class="label-line"><h2>真人裁判管理</h2><span class="pill">'+judges.length+' 位真人裁判</span></div>'+
  '<div class="feed">'+judges.map(j=>'<div class="feed-item"><div class="label-line"><strong>'+esc(j.label)+'</strong><span class="pill '+(j.locked?'ok':'')+'">'+(j.locked?'✓ 已锁定':'未锁定')+'</span></div><div class="tiny muted">UID：'+esc(j.uid||'不可用')+'</div><button class="small spaced" data-action="copy-uid" data-uid="'+esc(j.uid||'')+'">复制 UID</button></div>').join('')+'</div></section>';
 }
+function personaDraftKey(type,key,roomId=state.roomId,matchNumber=state.room?.match_number){
+ return `${roomId}:${matchNumber}:${type}:${key}`;
+}
+function rememberSeatPersonaDraft(target){
+ const form=target?.closest?.('form[data-form="seat-persona"]');
+ if(!form)return false;
+ state.personaDrafts[personaDraftKey(form.dataset.seatType,form.dataset.seatKey)]=Object.fromEntries(new FormData(form).entries());
+ return true;
+}
+function personaEditor(type,key,p,disabled){
+ p=p||{};const presets=type==='participant'?[
+  ['default','默认风格','保持自然、直接，不刻意套用固定表达模板。'],
+  ['minimal','极简交流者','优先使用短句，少作解释，直接回应问题；不为简短而遗漏必要信息。'],
+  ['casual','日常闲聊者','使用自然口语，可以适度联想和承接对话；避免机械套用固定开场或结尾。'],
+  ['analytical','严谨分析者','表达结构清晰，重视逻辑关系、事实依据和具体细节；区分事实、推测与不确定之处。'],
+  ['emotional','情绪表达者','更关注语气、情绪和交流对象的感受；表达自然，不刻意夸大情绪或迎合对方。'],
+  ['custom','自定义','填写本席位希望采用的风格提示词；正式揭晓后会展示。']
+ ]:[
+  ['balanced','默认均衡','综合衡量全部可用匿名证据，不因单一措辞或某种表达风格直接下结论。'],
+  ['language_detail','语言细节','重点检查措辞、句式、语义衔接、表达细节及其在上下文中的一致性；不得把某个单独语言特征当作身份定论。'],
+  ['cross_round','跨轮一致性','重点比较同一匿名代号跨轮回答中的立场、知识运用、表达习惯与自我修正；考虑正常变化，不把变化本身等同于 AI。'],
+  ['custom','自定义','填写本席位希望采用的判断风格提示词；正式揭晓后会展示。']
+ ];
+ const editorKey=personaDraftKey(type,key),draft=state.personaDrafts[editorKey];
+ const expanded=!!state.personaEditorOpen[editorKey];
+ const unappliedDraft=disabled&&draft?draft:null;
+ if(draft&&!disabled)p={...p,...draft};
+ const selectedPreset=presets.find(x=>x[0]===p.preset_id)||presets[0];
+ const presetLabel=selectedPreset[1]||p.display_name||p.preset_id||'默认风格';
+ const customSelected=selectedPreset[0]==='custom';
+ const lengths=[['default','沿用模型上限'],['short','短（约 80 字 / 最多 256 Token）'],['medium','中（约 300 字 / 最多 768 Token）'],['long','长（约 800 字 / 最多 2048 Token）']];
+ const opts=presets.map(x=>'<option value="'+x[0]+'" data-description="'+esc(x[2])+'" '+(selectedPreset[0]===x[0]?'selected':'')+'>'+x[1]+'</option>').join('');
+ const lens=lengths.map(x=>'<option value="'+x[0]+'" '+((p.output_length||'default')===x[0]?'selected':'')+'>'+x[1]+'</option>').join('');
+ const draftPreset=unappliedDraft?(presets.find(x=>x[0]===unappliedDraft.preset_id)||presets[0]):null;
+ const draftLength=unappliedDraft?(lengths.find(x=>x[0]===unappliedDraft.output_length)?.[1]||lengths[0][1]):'';
+ const draftPreview=unappliedDraft?
+  '<div class="notice persona-unsaved-draft"><strong>未保存草稿（未生效）</strong>'+
+  '<div class="hint">人设：'+esc(draftPreset[1])+' · '+esc(draftPreset[2])+'</div>'+
+  '<div class="hint">输出长度：'+esc(draftLength)+' · '+(type==='participant'?'回答':'出题')+'历史轮数：'+esc(unappliedDraft.history_rounds??5)+'</div>'+
+  (unappliedDraft.custom_system_prompt?'<div class="hint">自定义 System Prompt（未生效）</div><div class="question spaced">'+esc(unappliedDraft.custom_system_prompt)+'</div>':'')+
+  '</div>':'';
+ return '<details class="persona-editor" data-persona-editor data-key="'+esc(editorKey)+'" '+(expanded?'open':'')+'><summary>人设与回答策略 · '+esc(presetLabel)+' · '+(disabled?'已冻结 / 锁定':'可编辑')+'</summary><form data-form="seat-persona" data-seat-type="'+type+'" data-seat-key="'+esc(key)+'" class="stack spaced">'+
+ '<label class="field">人设预设</label><select name="preset_id" '+(disabled?'disabled':'')+'>'+opts+'</select>'+
+ '<p class="hint" data-preset-description>'+esc(selectedPreset[2])+'</p>'+
+ '<div class="persona-custom-prompt" data-custom-prompt-field '+(customSelected?'':'hidden')+'><label class="field">自定义 System Prompt（最多 8000 字；选择自定义时必填）</label><textarea name="custom_system_prompt" maxlength="8000" '+(customSelected?'required ':'')+(disabled?'disabled':'')+'>'+esc(p.custom_system_prompt||'')+'</textarea></div>'+
+ '<div class="grid2"><div><label class="field">输出长度</label><select name="output_length" '+(disabled?'disabled':'')+'>'+lens+'</select></div><div><label class="field">'+(type==='participant'?'回答历史轮数':'出题历史轮数')+'（0～100）</label><input name="history_rounds" type="number" min="0" max="100" required value="'+esc(p.history_rounds??5)+'" '+(disabled?'disabled':'')+'></div></div>'+
+ '<p class="tiny muted">短 / 中 / 长的 Token 上限分别为 256 / 768 / 2048，实际不超过绑定模型上限；最终裁判 JSON 始终沿用冻结模型上限。历史轮数只影响回答和出题；正式揭晓后会展示自定义提示词，请勿填写密钥。</p><button class="small" type="submit" '+(disabled?'disabled':'')+'>保存人设</button></form>'+draftPreview+'</details>';
+}
 function renderAIBindingControls(r){
  if(!r.ais?.length)return '';
- const disabled=r.status!=='open'||r.verdict_locked||(r.judges||[]).some(j=>j.locked);
+ const disabled=r.status!=='open'||r.verdict_locked||r.personas_frozen||(r.judges||[]).some(j=>j.locked);
  return '<div class="divider"></div><h3>AI 参赛席模型绑定</h3><p class="hint">更换或解除绑定不会删除 AI 席位及其匿名代号、历史回答。你只能选择自己拥有的配置；其他账号授权的现有绑定可以保留或解除。</p>'+
- r.ais.map(a=>'<form class="binding-row" data-form="bind-ai-player-model" data-alias="'+esc(a.alias)+'"><div><strong>'+esc(a.alias)+' · '+esc(a.name)+'</strong><div class="tiny muted">当前：'+esc(bindingLabel(a))+'</div></div><select name="model_profile_id">'+modelBindingOptions(a)+'</select><button class="small" type="submit" '+(disabled?'disabled':'')+'>更新绑定</button></form>').join('');
+ r.ais.map(a=>'<form class="binding-row" data-form="bind-ai-player-model" data-alias="'+esc(a.alias)+'"><div><strong>'+esc(a.alias)+' · '+esc(a.name)+'</strong><div class="tiny muted">当前：'+esc(bindingLabel(a))+'</div></div><select name="model_profile_id" '+(disabled?'disabled':'')+'>'+modelBindingOptions(a)+'</select><button class="small" type="submit" '+(disabled?'disabled':'')+'>更新绑定</button></form>'+personaEditor('participant',a.alias,a.persona,disabled)).join('');
 }
 function aiQuestionFeedback(result){
  const details=(result.results||[]).filter(x=>x.status==='failed'||x.status==='skipped'||x.status==='blocked').map(x=>{
@@ -631,12 +679,12 @@ function judgeAdminPanel(r){
  const manualAwaiting=awaiting.filter(j=>!usable(j));
  const autoAwaiting=awaiting.filter(j=>usable(j));
  const aliases=[...r.humans,...r.ais].map(x=>x.alias).sort();
- const canEdit=r.status==='open'&&!r.verdict_locked&&!judges.some(j=>j.locked);
+ const canEdit=r.status==='open'&&!r.verdict_locked&&!r.personas_frozen&&!judges.some(j=>j.locked);
  let html='<section class="card compact"><div class="label-line"><h2>AI 裁判管理</h2><span class="pill">'+judges.length+' 位 AI 裁判</span></div>'+
  '<p class="hint">AI 裁判可绑定你自己的个人模型配置自动出题和判断，也可手动转录。绑定后，本房间房主和全站管理员可通过比赛操作触发该配置的模型调用，服务商可能按实际调用量计费。绑定他人配置时，只能看到当前席位的必要摘要，不能读取或编辑对方的个人配置。</p>';
  if(judges.length){
   html+=judges.map(j=>'<div class="feed-item"><div class="label-line"><strong>'+esc(j.label)+'</strong><span class="pill '+(j.locked?'ok':'')+'">'+(j.locked?'✓ 已锁定':'未锁定')+'</span></div>'+
-   '<div class="tiny muted">当前绑定：'+esc(bindingLabel(j))+'</div><form data-form="bind-ai-judge-model" data-id="'+j.id+'" class="binding-row"><select name="model_profile_id">'+modelBindingOptions(j)+'</select><button class="small" type="submit" '+(canEdit?'':'disabled')+'>更新绑定</button></form></div>').join('');
+   '<div class="tiny muted">当前绑定：'+esc(bindingLabel(j))+'</div><form data-form="bind-ai-judge-model" data-id="'+j.id+'" class="binding-row"><select name="model_profile_id" '+(canEdit?'':'disabled')+'>'+modelBindingOptions(j)+'</select><button class="small" type="submit" '+(canEdit?'':'disabled')+'>更新绑定</button></form>'+personaEditor('judge',j.id,j.persona,!canEdit)+'</div>').join('');
  }else html+=D('尚无 AI 裁判席。');
  if(r.model_request_limit!==null&&r.model_request_limit!==undefined&&
     Number(r.model_request_count)>=Number(r.model_request_limit)){
@@ -650,7 +698,7 @@ function judgeAdminPanel(r){
  if(pendingRound?.status==='draft'&&pendingAis.length){
   html+='<div class="divider"></div><form data-form="ai-judge-question"><h3>代录 AI 裁判的第 '+r.current_round+' 轮问题</h3><p class="hint">手动转录或配置暂不可用的 AI 裁判，每席每轮只能提交一次。</p><select name="judge_id">'+pendingAis.map(j=>'<option value="'+j.id+'">'+esc(j.label)+'</option>').join('')+'</select><textarea name="text" data-draft="ai-judge-question" maxlength="3000" required placeholder="粘贴 AI 裁判提出的问题原文…">'+myDraft('ai-judge-question')+'</textarea><div class="form-actions"><button class="primary" type="submit">提交 AI 裁判问题</button></div></form>';
  }
- if(!r.revealed_at&&!r.verdict_locked){
+ if(!r.revealed_at&&!r.verdict_locked&&canEdit){
   html+='<div class="divider"></div><form data-form="add-ai-judge"><h3>添加 AI 裁判</h3><label class="field">AI 裁判名称</label><input type="text" name="name" required maxlength="60" placeholder="例如 DeepSeek-R1"><label class="field">个人模型配置</label><select name="model_profile_id">'+modelProfileOptions(r)+'</select><div class="form-actions"><button class="primary" type="submit">＋ 添加 AI 裁判</button></div></form>';
  }
  if(!r.revealed_at&&r.rounds.every(x=>x.status==='revealed')&&autoAwaiting.length){
@@ -669,6 +717,10 @@ function workflowStateText(value){
   generating_answers:'正在生成 AI 回答',waiting_input:'等待输入或人工确认',blocked:'等待处理阻塞',
   failed:'执行失败',completed:'自动步骤已完成',cancelled:'已取消',stale:'已作废'};
  return labels[value]||value||'未知';
+}
+function renderPersonaPreparationControl(r){
+ if(!r.can_manage||!r.personas_frozen||r.match_started||r.current_round!==1)return '';
+ return '<section class="card compact"><div class="label-line"><h2>人设配置已冻结</h2><span class="pill">首轮尚未开始</span></div><p class="hint">如需修改 AI 席位或人设，或因账号删除需要补位，先取消准备。旧 AI 裁判题目和在途任务会作废，真人裁判问题保留。</p><button class="small danger" data-action="reset-persona-preparation">取消准备并编辑人设</button></section>';
 }
 function renderRoundWorkflowPanel(r){
  const wf=r.round_workflow;if(!wf)return '';
@@ -763,6 +815,7 @@ function renderModelOperationPanel(r){
   return '<article class="operation-record"><div class="label-line"><strong>'+esc(t.target_label)+' · '+operationPurposeLabel(t.purpose)+'</strong><span class="operation-status '+esc(t.state)+'">'+operationStateLabel(t.state)+'</span></div>'+
    '<div class="tiny muted">'+esc(t.profile_name)+' · '+esc(t.model_name)+'</div>'+
    '<div class="operation-meta"><span>'+request+'</span><span>'+applied+'</span></div>'+
+   (t.credential_version_changed?'<div class="tiny muted">本次调用使用了轮换后的 API Key；模型与请求参数仍采用本场冻结版本。</div>':'')+
    '<div class="tiny muted">等待 '+(t.queue_ms===null?'—':esc(t.queue_ms)+' ms')+' · 请求 '+(t.duration_ms===null?'—':esc(t.duration_ms)+' ms')+' · '+usage+'</div>'+
    (t.retry_of?'<div class="tiny muted">重试自任务 #'+esc(t.retry_of)+'</div>':'')+
    (t.error_message?'<p class="operation-error">'+esc(t.error_message)+'</p>':'')+
@@ -804,7 +857,11 @@ function renderJudgeRoom(r){
  <div class="stack"><section class="card"><div class="label-line"><h2>第 ${n} 轮问题</h2><span class="pill">${round.status==='draft'?'收集问题中':round.status==='collecting'?'等待答复':'回答已公开'}</span></div><div class="feed">${questions}</div>${round.question?`<div class="question spaced">${esc(round.question)}</div>${renderRoundTimer(r,round,active)}`:''}<div class="buttonrow spaced"><button data-action="download-log" class="small">↓ 下载匿名 Log</button>${finished?'<button data-action="download-full-log" class="small">↓ 下载整场匿名 Log</button>':''}</div></section>
  <section class="card"><h2>匿名回答</h2>${answers}</section></div>
  <div class="right-panel"><section class="card"><h2>我的裁判操作</h2>${active&&pending&&!questionSubmitted?`<form data-form="judge-question"><p class="hint">每位裁判每轮最多提交一个问题，房主统一开启本轮作答。</p><textarea name="text" data-draft="judge-question" maxlength="3000" required placeholder="输入你要向所有参赛者提出的问题…">${myDraft('judge-queion')}</textarea><div class="form-actions"><button class="primary" type="submit">提交并实时同步问题</button></div></form>`:pending?D('你已提交本轮问题，等待房主开启作答。'):D('本轮已经开始作答，不能再添加新问题。')}
- <div class="divider"></div><h3>独立身份判决</h3>${form}</section></div></div>`;
+ <div class="divider"></div><h3>独立身份判决</h3>${form}</section></div></div>${renderRevealedSeatPersonas(r)}`;
+}
+function renderRevealedSeatPersonas(r){
+ if(!r.personas_revealed||!r.seat_personas?.length)return '';
+ return `<section class="card"><h2>本场 AI 席位人设</h2><p class="hint">以下内容来自本场冻结快照，不是个人中心当前配置。</p>${r.seat_personas.map(p=>`<div class="answer-card"><strong>${esc(p.seat_key)} · ${esc(p.persona_name)}</strong><div class="hint">${p.seat_type==='participant'?'AI 参赛者':'AI 裁判'} · 输出：${esc(p.output_length)} · ${p.seat_type==='participant'?'回答历史轮数':'出题历史轮数'}：${p.history_rounds}${p.model_name?' · 模型：'+esc(p.model_name)+' · 采样温度：'+esc(p.model_temperature)+' · 模型上限：'+esc(p.model_max_tokens)+' · '+(p.seat_type==='participant'?'回答':'出题')+' Token 上限：'+esc(p.effective_output_max_tokens)+(p.seat_type==='judge'?' · 最终判断 JSON 上限：'+esc(p.verdict_max_tokens):'')+' · 超时：'+esc(p.model_timeout_seconds)+' 秒':' · 手动席位'}</div>${p.custom_system_prompt?`<div class="hint">自定义 System Prompt</div><div class="question spaced">${esc(p.custom_system_prompt)}</div>`:p.style_prompt?`<div class="hint">预设风格</div><div class="question spaced">${esc(p.style_prompt)}</div>`:''}</div>`).join('')}</section>`;
 }
 function renderMultiResults(r,roster){
  return `<section class="card"><div class="overline">MATCH ACCURACY / 比赛识别统计</div><h2>多裁判独立判决结果</h2><p class="hint">比赛结束后向人类参与者展示全部裁判判决及评分；各裁判登录时仍只能读取自己的判断。</p>${r.verdicts.map(v=>{const count=roster.filter(p=>v.predictions?.[p.alias]===(p.role==='AI'?'AI':'Human')).length;return `<div class="answer-card"><div class="label-line"><h3>${esc(v.judge)} <span class="tiny muted">${v.kind==='ai'?'AI 裁判':v.kind==='human'?'真人裁判':''}</span></h3><span class="pill ok">${count} / ${roster.length} 正确</span></div><div class="hint">置信度 ${v.confidence}%</div>${roster.map(p=>`<div class="hint">${esc(p.alias)} · ${p.role} · 判断：${v.predictions?.[p.alias]==='Human'?'人类':'AI'} ${v.predictions?.[p.alias]===(p.role==='AI'?'AI':'Human')?'✓':'✗'}</div>`).join('')}<div class="question spaced">${esc(v.evidence)}</div><p class="hint">最弱环节：${esc(v.weakness||'未填写')}</p><p class="hint">可能误判：${esc(v.possible_error||'未填写')}</p></div>`}).join('')}</section>`;
@@ -831,8 +888,9 @@ function renderRoom(){
  ${active&&round.status==='collecting'&&!finished&&r.ais.some(a=>a.model_profile_id&&a.model_profile?.credential_status==='ok'&&!submitted.has(a.alias))?`<div class="divider"></div><button class="primary" data-action="generate-ai-answers">自动生成模型 AI 回复</button>`:''}
   ${active&&round.status==='collecting'&&!finished&&r.ais.some(a=>(!a.model_profile_id||a.model_profile?.credential_status!=='ok')&&!submitted.has(a.alias))?`<div class="divider"></div><form data-form="ai-answer"><label class="field">录入 AI 原始回答</label><select name="alias">${r.ais.filter(a=>(!a.model_profile_id||a.model_profile?.credential_status!=='ok')&&!submitted.has(a.alias)).map(a=>`<option value="${a.alias}">${a.alias} · ${esc(a.name)}</option>`).join('')}</select><label class="field">AI 回答（复制原文）</label><textarea name="answer" data-draft="ai-answer" maxlength="12000" required placeholder="请粘贴 AI 原样回答，不做修改…">${myDraft('ai-answer')}</textarea><div class="fom-actions"><button class="primary" type="submit">录入 AI 回答</button></div></form>`:''}
  ${r.invite_code?`<div class="notice"><div class="muted tiny">房间邀请码（房主 / 管理员可见）</div><div class="label-line"><strong class="code">${esc(r.invite_code)}</strong><button class="small" data-action="copy-code">复制</button></div></div>`:''}
- ${(r.rounds[0].status==='draft'||r.roster_recovery)&&active&&!finished?`<div class="divider"></div><label class="field">${r.roster_recovery?'补足本轮参赛者（至少 2 人）':'增加 AI 参赛位（最多总计 8 人）'}</label><form data-form="add-ai"><input name="name" maxlength="60" placeholder="AI 来源，如 GPT-6" required><label class="field">模型配置</label><select name="model_profile_id">${modelProfileOptions(r)}</select><div class="form-actions"><button type="submit">＋ 添加 AI</button></div></form>${r.roster_recovery?'<p class="hint">账号退赛后人数不足，可补齐至 2 人再开启本轮；历史代号和回答保留。</p>':''}`:''}
- ${!r.mine&&(!r.self_withdrawn||!r.match_started)&&(r.rounds[0].status==='draft'||r.roster_recovery)&&!finished?`<button class="small" data-action="admin-join">作为人类玩家加入</button>`:''}
+ ${r.roster_recovery&&r.personas_frozen&&!r.match_started?'<p class="hint">首轮准备冻结后账号删除导致参赛人数不足。请先取消准备并重置配置，再添加补位 AI；旧 AI 裁判问题不会沿用。</p>':''}
+ ${(r.rounds[0].status==='draft'||r.roster_recovery)&&active&&!finished&&(!r.personas_frozen||(r.roster_recovery&&r.match_started))?`<div class="divider"></div><label class="field">${r.roster_recovery?'补足本轮参赛者（至少 2 人）':'增加 AI 参赛位（最多总计 8 人）'}</label><form data-form="add-ai"><input name="name" maxlength="60" placeholder="AI 来源，如 GPT-6" required>${r.personas_frozen?'<p class="hint">比赛已经开始；账号删除导致人数不足时，只能补入使用默认人设的手动 AI 席位。</p>':'<label class="field">模型配置</label><select name="model_profile_id">'+modelProfileOptions(r)+'</select>'}<div class="form-actions"><button type="submit">＋ 添加 AI</button></div></form>${r.roster_recovery?'<p class="hint">账号退赛后人数不足，可补齐至 2 人再开启本轮；历史代号和回答保留。</p>':''}`:''}
+ ${!r.mine&&(!r.self_withdrawn||!r.match_started)&&(r.rounds[0].status==='draft'||r.roster_recovery)&&(!r.personas_frozen||r.roster_recovery)&&!finished?`<button class="small" data-action="admin-join">作为人类玩家加入</button>`:''}
  ${r.mine&&!finished?'<div class="divider"></div><button class="danger" data-action="withdraw">退赛（保留管理权限）</button>':''}
  ${renderAIBindingControls(r)}
  ${active&&!finished&&!locked&&['collecting','revealed'].includes(round.status)&&r.ais.some(a=>submitted.has(a.alias))?`<div class="divider"></div><form data-form="edit-ai-answer"><h3>修订 AI 参赛者回复</h3><p class="hint">仅能修改当前轮、下一轮开始之前的 AI 回复。已公开的修改将实时通知裁判，历史修订保留供审计；已锁定判决时不可修改。</p><label class="field">AI 参赛者</label><select name="alias" data-ai-edit-select>${r.ais.filter(a=>submitted.has(a.alias)).map(a=>`<option value="${esc(a.alias)}">${esc(a.alias)} · ${esc(a.name)}</option>`).join('')}</select><label class="field">修改后的回复</label><textarea name="text" data-ai-edit-text maxlength="12000" required>${esc(r.ai_edits?.[r.ais.find(a=>submitted.has(a.alias))?.alias]||'')}</textarea><div class="form-actions"><button type="submit">保存修订并同步</button></div></form>`:''}
@@ -843,7 +901,7 @@ function renderRoom(){
  const scored=r.verdict&&finished?roster.filter(p=>r.verdict.predictions[p.alias]===(p.role==='AI'?'AI':'Human')).length:null;
  app.innerHTML=`<div class="pagehead"><div><div class="overline">ROOM ${r.id} / REAL-TIME MATCH</div><h1>${esc(r.title)}</h1><div class="stat-row"><span class="pill ${finished?'ok':'warn'}">${finished?'比赛已结束':'比赛进行中'}</span><span cass="pill">${humans} 位人类 · ${ais} 位 AI</span><span class="pill">${r.judges?.length?`${r.judges.length} 位裁判（真人 / AI）`:`外部裁判：${esc(r.judge)}`}</span></div></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button class="ghost" data-action="back">← 比赛大厅</button><button data-action="sync">↻ 刷新</button></div></div>
  ${finishedActions(r)}${renderMyPointsResult(r)}<div class="room-layout ${canManage?'admin-room-layout':''}"><aside class="aside"><section class="card flat"><h2>参赛者身份</h2><div class="roster">${makeRoster(r)}</div></section><section class="card flat"><h2>比赛轮次</h2><div class="round-tags">${rtab}</div></section></aside>
- <div class="stack">${canManage&&state.roomView==='human-judges'?renderHumanJudgeAdminPanel(r):canManage&&state.roomView==='ai-judges'?judgeAdminPanel(r)+renderModelOperationPanel(r):canManage&&state.roomView==='admin'?judgeBox+renderReadinessPanel(r)+renderJudgeWorkflowPanel(r)+renderModelOperationPanel(r):''}
+ <div class="stack">${canManage&&state.roomView==='human-judges'?renderHumanJudgeAdminPanel(r):canManage&&state.roomView==='ai-judges'?judgeAdminPanel(r)+renderModelOperationPanel(r):canManage&&state.roomView==='admin'?judgeBox+renderPersonaPreparationControl(r)+renderReadinessPanel(r)+renderJudgeWorkflowPanel(r)+renderModelOperationPanel(r):''}
  <div class="${canManage&&state.roomView!=='match'?'hide':'stack'}"><section class="card"><div class="label-line"><div><div class="overline">JUDGE / ROUND ${n}</div><h2 style="margin:5px 0 0">裁判问题</h2></div><span class="pill ${round.status==='revealed'?'ok':'warn'}">${round.status==='draft'?'等待发布':round.status==='collecting'?'正在收集回答':'本轮已揭晓'}</span></div><div class="question spaced">${esc(round.question||'管理员尚未开启本轮作答。')}</div>${renderRoundTimer(r,round,active)}${round.status==='draft'&&round.questions?.length?`<div class="feed spaced">${round.questions.map(q=>`<div class="feed-item"><strong>${esc(q.judge)}</strong><div class="feed-text">${esc(q.text)}</div></div>`).join('')}</div>`:''}<div class="buttonrow spaced"><button class="small" data-action="download-log">↓ 下载本轮 Log (.md)</button>${finished?'<button class="small" data-action="download-full-log">↓ 下载整场 Log (.md)</button>':''}</div></section>
  <section class="card"><div class="label-line"><h2>参赛者回答</h2><span class="pill">${round.submitted.length}/${roster.length} 已提交</span></div>${answerView}
  ${canAnswer?`<form data-form="answer" class="spaced"><label class="field">我的本轮回答 · ${esc(r.mine)}</label><textarea name="answer" data-draft="answer" maxlength="12000" required placeholder="在这里回答裁判的问题。提交后不可修改，直到全员提交才统一公开。">${myDraft('answer')}</textarea><div class="form-actions"><button class="primary" type="submit">提交本轮回答</button></div></form>`:''}
@@ -851,7 +909,9 @@ function renderRoom(){
 ${renderPublicChat(r)}
  ${finished&&r.verdicts?.length?renderMultiResults(r,roster):''}
  ${finished&&!r.verdicts?.length?`<section class="card"><div class="overline">MATCH ACCURACY / 比赛识别统计</div><h2>最终判决与真实身份</h2><div class="score">${scored}/${roster.length}</div><p class="muted">裁判 ${esc(r.judge)} · 置信度 ${r.verdict?.confidence??'?'}%</p>${roster.map(p=>`<div class="answer-card"><strong>${p.alias} · ${esc(p.label)}</strong><div>真实身份：${p.role} / 裁判判断：${r.verdict?.predictions?.[p.alias]==='Human'?'人类':'AI'} ${r.verdict?.predictions?.[p.alias]===(p.role==='AI'?'AI':'Human')?'✓':'✗'}</div></div>`).join('')}<h3 class="spaced">判断依据</h3><div class="question">${esc(r.verdict?.evidence)}</div><p class="hint spaced">最弱环节：${esc(r.verdict?.weakness||'未填写')}</p><p class="hint">可能误判：${esc(r.verdict?.possible_error||'未填写')}</p></section>`:''}
- </div></div><div class="right-panel">${canManage?renderAdminRoomNav(r,finished):`<section class="card flat"><div class="overline">PARTICIPANT</div><h2>等待主持人推进比赛</h2><p class="hint">你的每次提交都会发送到服务器；全员提交完成后自动揭晓。若网络断开，请等待自动重连或手动刷新。</p></section>`}</div></div>`;
+ </div>
+ ${renderRevealedSeatPersonas(r)}
+ </div><div class="right-panel">${canManage?renderAdminRoomNav(r,finished):`<section class="card flat"><div class="overline">PARTICIPANT</div><h2>等待主持人推进比赛</h2><p class="hint">你的每次提交都会发送到服务器；全员提交完成后自动揭晓。若网络断开，请等待自动重连或手动刷新。</p></section>`}</div></div>`;
  updateTypingBadges();
  updateRoundCountdown();
  if(editingDraft){
@@ -864,6 +924,7 @@ async function downloadLog(){const id=state.roomId,n=state.selectedRound;const f
 async function downloadFullLog(){const id=state.roomId;const file=await api(`/api/rooms/${id}/log`,{raw:true});const href=URL.createObjectURL(file);const a=document.createElement('a');a.href=href;a.download=`room-${id}-full-log.md`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(href),1500)}
 app.addEventListener('toggle',e=>{
  if(e.target.matches('details[data-packet-panel]'))state.packetPanels[e.target.dataset.key]=e.target.open;
+ if(e.target.matches('details[data-persona-editor]'))state.personaEditorOpen[e.target.dataset.key]=e.target.open;
  if(e.target.matches('details[data-model-config]'))state.personalModelExpanded[Number(e.target.dataset.id)]=e.target.open;
  if(e.target.matches('[data-model-operations-panel]'))state.modelOperationsExpanded=!!e.target.open;
  if(e.target.matches('details[data-model-operation-history]'))state.modelOperationHistoryPanels[e.target.dataset.key]=e.target.open;
@@ -871,6 +932,7 @@ app.addEventListener('toggle',e=>{
 app.addEventListener('input',e=>{
  const dmInput=e.target.closest('form[data-form="dm-send"] textarea[name="text"]');
  if(dmInput){state.dmDraft=dmInput.value;return;}
+ if(rememberSeatPersonaDraft(e.target))return;
  const modelForm=e.target.closest('form[data-form="personal-model-edit"]');
  if(modelForm)invalidatePersonalModelTest(Number(modelForm.dataset.id));
  if(e.target.dataset?.chatDraft!==undefined){state.chatDraft=e.target.value;return;}
@@ -880,6 +942,18 @@ app.addEventListener('input',e=>{
  }
 });
 app.addEventListener('change',e=>{
+ const personaPreset=e.target.closest('form[data-form="seat-persona"] select[name="preset_id"]');
+ if(personaPreset){
+  const customPrompt=personaPreset.form.elements.namedItem('custom_system_prompt');
+  const customField=personaPreset.form.querySelector('[data-custom-prompt-field]');
+  const customSelected=personaPreset.value==='custom';
+  if(customPrompt){if(!customSelected)customPrompt.value='';customPrompt.required=customSelected;}
+  if(customField)customField.hidden=!customSelected;
+  const description=personaPreset.selectedOptions[0]?.dataset.description||'';
+  const descriptionField=personaPreset.form.querySelector('[data-preset-description]');
+  if(descriptionField)descriptionField.textContent=description;
+ }
+ if(rememberSeatPersonaDraft(e.target))return;
  if(e.target.matches('[data-ai-edit-select]')){
   const area=app.querySelector('[data-ai-edit-text]');if(area)area.value=state.room?.ai_edits?.[e.target.value]||'';
  }
@@ -961,6 +1035,11 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
     if(state.roomView!==view){state.roomView=view;if(view!=='match')state.selectedRound=state.room.current_round;renderRoom();window.scrollTo({top:0,behavior:'instant'});}
    }
    if(action==='sync')await refreshRoom();
+  if(action==='reset-persona-preparation'){
+   if(confirm('取消本场准备并编辑人设？在途任务和已生成的 AI 裁判问题会作废；真人裁判已提交的问题保留。')){
+    await api('/api/rooms/'+state.roomId+'/personas/reset-preparation',{method:'POST',body:{confirm:true}});await refreshRoom();toast('准备已取消，可以修改人设');
+   }
+  }
   if(action==='generate-ai-questions'){b.disabled=true;b.textContent='模型正在出题…';const result=await api(`/api/rooms/${state.roomId}/ai-judges/questions/generate`,{method:'POST'});await refreshRoom();toast(aiQuestionFeedback(result))}
   if(action==='generate-ai-answers'){b.disabled=true;b.textContent='模型正在回答…';const result=await api(`/api/rooms/${state.roomId}/ai/answers/generate`,{method:'POST'});await refreshRoom();const detail=result.failed?.length?'；失败：'+result.failed.map(x=>x.alias+' '+x.error).join('；'):'';toast(`模型 AI 已提交 ${result.generated||0} 个回答${detail}`)}
   if(action==='generate-ai-verdicts'){b.disabled=true;b.textContent='模型正在判断…';const result=await api(`/api/rooms/${state.roomId}/ai-judges/verdicts/generate`,{method:'POST'});await refreshRoom();const detail=result.failed?.length?'；失败：'+result.failed.map(x=>x.error).join('；'):'';toast(`AI 裁判已锁定 ${result.generated||0} 份最终判断${detail}`)}
@@ -1186,6 +1265,26 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
    // The user may have typed another message while the authoritative refresh was pending.
    if(state.room?.status==='open'&&state.chatDraft===requestDraft){state.chatDraft='';const chatInput=$('[data-form="chat"] [name="text"]');if(chatInput)chatInput.value='';}
    toast('消息已发送');return;
+  }
+  if(type==='seat-persona'){
+   const requestRoomId=id,requestMatch=state.room?.match_number,requestUid=state.me?.user?.uid,
+    requestCsrf=state.me?.user?.csrf,requestEpoch=state.personalModelEpoch;
+   const seatType=form.dataset.seatType,seatKey=form.dataset.seatKey;
+   const draftKey=personaDraftKey(seatType,seatKey,requestRoomId,requestMatch);
+   const submittedDraft={...data};
+   const payload={preset_id:data.preset_id,custom_system_prompt:data.custom_system_prompt||'',output_length:data.output_length,history_rounds:Number(data.history_rounds)};
+   if(!Number.isSafeInteger(payload.history_rounds)||payload.history_rounds<0||payload.history_rounds>100)throw new Error('历史上下文轮数必须为 0～100 的整数');
+   if(seatType==='participant')await api('/api/rooms/'+requestRoomId+'/ai/'+encodeURIComponent(seatKey)+'/persona',{method:'PUT',body:payload});
+   else await api('/api/rooms/'+requestRoomId+'/ai-judges/'+Number(seatKey)+'/persona',{method:'PUT',body:payload});
+   if(state.roomId!==requestRoomId||state.room?.match_number!==requestMatch||
+      state.me?.user?.uid!==requestUid||state.me?.user?.csrf!==requestCsrf||
+      state.personalModelEpoch!==requestEpoch)return;
+   const latestDraft=state.personaDrafts[draftKey];
+   if(!latestDraft||Object.keys(submittedDraft).every(k=>String(latestDraft[k]??'')===String(submittedDraft[k]??'')))delete state.personaDrafts[draftKey];
+   await refreshRoom();
+   if(state.roomId!==requestRoomId||state.room?.match_number!==requestMatch||
+      state.me?.user?.uid!==requestUid||state.personalModelEpoch!==requestEpoch)return;
+   toast('席位人设已保存');return;
   }
   if(type==='bind-ai-player-model'||type==='bind-ai-judge-model'){
    const keep=data.model_profile_id==='__unchanged__';
