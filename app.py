@@ -4640,7 +4640,7 @@ def create_app(db_path=None):
     @app.post('/api/rooms/{room_id}/ai-judges/verdicts/generate')
     async def generate_ai_judge_verdicts(room_id:int,request:Request,
                                          target_judge_id:Optional[int]=Query(default=None,ge=1)):
-        with connection() as db:
+        with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
             if room['status']!='open' or room['verdict_locked_at']:
@@ -4648,6 +4648,12 @@ def create_app(db_path=None):
             rounds=db.execute('SELECT status FROM rounds WHERE room_id=? ORDER BY number',(room_id,)).fetchall()
             if not rounds or any(r['status']!='revealed' for r in rounds):
                 raise HTTPException(409,'所有轮次都完成后，AI 裁判才能做出最终判断。')
+            # Matches already in progress when persona snapshots were introduced
+            # have no historical snapshot. Freeze their current settings once,
+            # before the first post-upgrade AI verdict request.
+            if not is_match_persona_frozen(db,room_id,room['match_number']):
+                freeze_match_personas(db,room,source='legacy_verdict_generation',
+                    participant_roster_revision=participant_roster_revision(db,room_id))
             roster=aliases(db,room_id)[2]
             packet=anonymous_match_packet(db,room_id)
             evidence_revision=hashlib.sha256(packet.encode('utf-8')).hexdigest()

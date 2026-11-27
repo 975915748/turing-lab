@@ -554,6 +554,50 @@ def test_same_model_seats_use_distinct_frozen_persona_prompts(operation_lab):
     assert participant_request['system'] != judge_request['system']
 
 
+def test_legacy_in_progress_match_freezes_personas_before_ai_verdict(operation_lab):
+    lab = operation_lab
+    admin, base, profile_id = lab['admin'], lab['base'], lab['profile_id']
+    judge = add_ai_judge(admin, base, '旧比赛首次使用 AI 判决', profile_id)
+    post(admin, base + f"/ai-judges/{judge['id']}/questions", {
+        'text': '请判断匿名参赛者的身份并给出依据。',
+    })
+    post(admin, base + '/start')
+    post(lab['p1'], base + '/answers', {'text': '我会先核对事实，再解释结论。'})
+    post(lab['p2'], base + '/answers', {'text': '我会结合上下文说明理由。'})
+    assert admin.get(base).json()['rounds'][0]['status'] == 'revealed'
+
+    # Simulate a match that was already active before persona snapshots existed.
+    with db_open(lab['path']) as db:
+        db.execute('DELETE FROM match_seat_persona_snapshots WHERE room_id=?', (lab['room_id'],))
+        db.execute('DELETE FROM match_persona_freezes WHERE room_id=?', (lab['room_id'],))
+        db.execute(
+            "UPDATE model_profiles SET model='legacy-current-model' WHERE id=?",
+            (profile_id,),
+        )
+
+    verdict = post(admin, base + '/ai-judges/verdicts/generate')
+    assert verdict['generated'] == 1
+    assert lab['state']['calls'] == 1
+    with db_open(lab['path']) as db:
+        freeze = db.execute(
+            'SELECT source FROM match_persona_freezes WHERE room_id=?',
+            (lab['room_id'],),
+        ).fetchone()
+        snapshot = db.execute(
+            "SELECT model_json FROM match_seat_persona_snapshots "
+            "WHERE room_id=? AND seat_type='judge' AND seat_key=?",
+            (lab['room_id'], str(judge['id'])),
+        ).fetchone()
+        task = db.execute(
+            "SELECT persona_snapshot_id FROM model_operation_tasks "
+            "WHERE room_id=? AND purpose='judge_verdict' ORDER BY id DESC LIMIT 1",
+            (lab['room_id'],),
+        ).fetchone()
+    assert freeze['source'] == 'legacy_verdict_generation'
+    assert json.loads(snapshot['model_json'])['model'] == 'legacy-current-model'
+    assert task['persona_snapshot_id'] is not None
+
+
 def test_short_persona_keeps_full_frozen_token_budget_for_final_verdict(operation_lab):
     lab = operation_lab
     admin, p1, p2, base, profile_id = (
