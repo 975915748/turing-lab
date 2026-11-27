@@ -1,13 +1,13 @@
 'use strict';
 const $ = (selector) => document.querySelector(selector);
 const app = $('#app');
-const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelSavePending:{},social:null,dmMessages:[],dmBeforeId:null,dmHasMore:false,dmSocket:null,personalModelEpoch:0,modelOperationRecords:[],modelOperationStats:{},modelOperationProfileOptions:[],modelOperationTotal:0,modelOperationOffset:0,modelOperationFilters:{profile_id:'',purpose:'',status:''},modelOperationsExpanded:false,modelOperationRequestVersion:0,modelOperationHistoryPanels:{},serverTimeOffset:0,dmUid:null,dmOtherName:'',dmCanSend:false,dmPending:null,dmDraft:'',dmReconnect:null,dmLoadVersion:0,socialEpoch:0,pointsLedgerEntries:[],pointsLedgerBeforeId:null,pointsLedgerHasMore:false,pointsLedgerLoaded:false};
+const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelSavePending:{},social:null,dmMessages:[],dmBeforeId:null,dmHasMore:false,dmSocket:null,personalModelEpoch:0,modelOperationRecords:[],modelOperationStats:{},modelOperationProfileOptions:[],modelOperationTotal:0,modelOperationOffset:0,modelOperationFilters:{profile_id:'',purpose:'',status:''},modelOperationsExpanded:false,modelOperationRequestVersion:0,modelOperationHistoryPanels:{},personaDrafts:{},serverTimeOffset:0,dmUid:null,dmOtherName:'',dmCanSend:false,dmPending:null,dmDraft:'',dmReconnect:null,dmLoadVersion:0,socialEpoch:0,pointsLedgerEntries:[],pointsLedgerBeforeId:null,pointsLedgerHasMore:false,pointsLedgerLoaded:false};
 const esc = (v) => String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const shortDate = s => s ? new Date(s).toLocaleString('zh-CN',{hour12:false}) : '';
 const val = (id) => document.getElementById(id)?.value??'';
 const D = (txt='暂无记录') => `<p class="muted hint">${esc(txt)}</p>`;
 let toastTimer;
-function clearPersonalModelState(){stopDmWs();state.social=null;state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;state.dmOtherName='';state.dmCanSend=false;state.dmPending=null;state.dmDraft='';state.dmLoadVersion++;state.socialEpoch++;state.pointsLedgerEntries=[];state.pointsLedgerBeforeId=null;state.pointsLedgerHasMore=false;state.pointsLedgerLoaded=false;state.personalModelEpoch=(state.personalModelEpoch||0)+1;state.modelOperationRequestVersion=(state.modelOperationRequestVersion||0)+1;state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};state.personalModelTestVersions={};state.personalModelTestPending={};state.personalModelSavePending={};state.modelOperationRecords=[];state.modelOperationStats={};state.modelOperationProfileOptions=[];state.modelOperationTotal=0;state.modelOperationOffset=0;state.modelOperationFilters={profile_id:'',purpose:'',status:''};state.modelOperationsExpanded=false;state.modelOperationHistoryPanels={};}
+function clearPersonalModelState(){stopDmWs();state.social=null;state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;state.dmOtherName='';state.dmCanSend=false;state.dmPending=null;state.dmDraft='';state.dmLoadVersion++;state.socialEpoch++;state.pointsLedgerEntries=[];state.pointsLedgerBeforeId=null;state.pointsLedgerHasMore=false;state.pointsLedgerLoaded=false;state.personalModelEpoch=(state.personalModelEpoch||0)+1;state.modelOperationRequestVersion=(state.modelOperationRequestVersion||0)+1;state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};state.personalModelTestVersions={};state.personalModelTestPending={};state.personalModelSavePending={};state.modelOperationRecords=[];state.modelOperationStats={};state.modelOperationProfileOptions=[];state.modelOperationTotal=0;state.modelOperationOffset=0;state.modelOperationFilters={profile_id:'',purpose:'',status:''};state.modelOperationsExpanded=false;state.modelOperationHistoryPanels={};state.personaDrafts={};}
 function toast(message){const el=$('#toast');el.textContent=message;el.classList.add('visible');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('visible'),4200)}
 function setConnection(txt,online){const el=$('#connection');el.textContent=(online?'● ':'○ ')+txt;el.className='connection'+(online?' online':'')}
 function applyPrefs(){let theme=localStorage.getItem('turing_theme')||'light';document.body.dataset.theme=theme;$('#themeBtn').textContent=theme==='light'?'☾ 深色':'☀ 日间';let f=Number(localStorage.getItem('turing_font')||15);if(f<12||f>22)f=15;document.documentElement.style.setProperty('--font',f+'px');$('#fontSize').value=f;$('#fontValue').textContent=f;}
@@ -604,12 +604,24 @@ function renderHumanJudgeAdminPanel(r){
  return '<section class="card compact"><div class="label-line"><h2>真人裁判管理</h2><span class="pill">'+judges.length+' 位真人裁判</span></div>'+
  '<div class="feed">'+judges.map(j=>'<div class="feed-item"><div class="label-line"><strong>'+esc(j.label)+'</strong><span class="pill '+(j.locked?'ok':'')+'">'+(j.locked?'✓ 已锁定':'未锁定')+'</span></div><div class="tiny muted">UID：'+esc(j.uid||'不可用')+'</div><button class="small spaced" data-action="copy-uid" data-uid="'+esc(j.uid||'')+'">复制 UID</button></div>').join('')+'</div></section>';
 }
+function personaDraftKey(type,key,roomId=state.roomId,matchNumber=state.room?.match_number){
+ return `${roomId}:${matchNumber}:${type}:${key}`;
+}
+function rememberSeatPersonaDraft(target){
+ const form=target?.closest?.('form[data-form="seat-persona"]');
+ if(!form)return false;
+ state.personaDrafts[personaDraftKey(form.dataset.seatType,form.dataset.seatKey)]=Object.fromEntries(new FormData(form).entries());
+ return true;
+}
 function personaEditor(type,key,p,disabled){
  p=p||{};const presets=type==='participant'?[['default','默认风格'],['minimal','极简交流者'],['casual','日常闲聊者'],['analytical','严谨分析者'],['emotional','情绪表达者'],['custom','自定义']]:[['balanced','默认均衡'],['language_detail','语言细节'],['cross_round','跨轮一致性'],['custom','自定义']];
+ const draft=state.personaDrafts[personaDraftKey(type,key)];
+ if(draft)p={...p,...draft};
+ const presetLabel=presets.find(x=>x[0]===p.preset_id)?.[1]||p.display_name||p.preset_id||'默认风格';
  const lengths=[['default','沿用模型上限'],['short','短'],['medium','中'],['long','长']];
  const opts=presets.map(x=>'<option value="'+x[0]+'" '+((p.preset_id||presets[0][0])===x[0]?'selected':'')+'>'+x[1]+'</option>').join('');
  const lens=lengths.map(x=>'<option value="'+x[0]+'" '+((p.output_length||'default')===x[0]?'selected':'')+'>'+x[1]+'</option>').join('');
- return '<details class="persona-editor"><summary>人设与回答策略 · '+esc(p.display_name||p.preset_id||'默认风格')+' · '+(disabled?'已冻结 / 锁定':'可编辑')+'</summary><form data-form="seat-persona" data-seat-type="'+type+'" data-seat-key="'+esc(key)+'" class="stack spaced">'+
+ return '<details class="persona-editor"><summary>人设与回答策略 · '+esc(presetLabel)+' · '+(disabled?'已冻结 / 锁定':'可编辑')+'</summary><form data-form="seat-persona" data-seat-type="'+type+'" data-seat-key="'+esc(key)+'" class="stack spaced">'+
  '<label class="field">人设预设</label><select name="preset_id" '+(disabled?'disabled':'')+'>'+opts+'</select>'+
  '<label class="field">自定义 System Prompt（最多 8000 字；选择自定义时必填）</label><textarea name="custom_system_prompt" maxlength="8000" '+(disabled?'disabled':'')+'>'+esc(p.custom_system_prompt||'')+'</textarea>'+
  '<div class="grid2"><div><label class="field">输出长度</label><select name="output_length" '+(disabled?'disabled':'')+'>'+lens+'</select></div><div><label class="field">历史上下文轮数（0～100）</label><input name="history_rounds" type="number" min="0" max="100" required value="'+esc(p.history_rounds??5)+'" '+(disabled?'disabled':'')+'></div></div>'+
@@ -886,6 +898,7 @@ app.addEventListener('toggle',e=>{
 app.addEventListener('input',e=>{
  const dmInput=e.target.closest('form[data-form="dm-send"] textarea[name="text"]');
  if(dmInput){state.dmDraft=dmInput.value;return;}
+ if(rememberSeatPersonaDraft(e.target))return;
  const modelForm=e.target.closest('form[data-form="personal-model-edit"]');
  if(modelForm)invalidatePersonalModelTest(Number(modelForm.dataset.id));
  if(e.target.dataset?.chatDraft!==undefined){state.chatDraft=e.target.value;return;}
@@ -895,6 +908,7 @@ app.addEventListener('input',e=>{
  }
 });
 app.addEventListener('change',e=>{
+ if(rememberSeatPersonaDraft(e.target))return;
  if(e.target.matches('[data-ai-edit-select]')){
   const area=app.querySelector('[data-ai-edit-text]');if(area)area.value=state.room?.ai_edits?.[e.target.value]||'';
  }
