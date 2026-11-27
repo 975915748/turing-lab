@@ -442,7 +442,12 @@ function connectDmWs(){
    return;
   }
   if(message.type==='name_lock_updated'){
-   try{state.me=await api('/api/me');if(location.hash.startsWith('#profile'))renderPersonalCenter();}catch{}
+   const context=capturePersonalSessionContext(ws);
+   try{
+    const refreshedMe=await api('/api/me');
+    if(!isCurrentPersonalSessionContext(context)||refreshedMe.user?.uid!==context.uid)return;
+    state.me=refreshedMe;renderPersonalCenter();
+   }catch{}
    return;
   }
   if(message.type==='dm_message'){
@@ -486,6 +491,12 @@ function isCurrentPersonalModelAccountContext(context){
 function isCurrentPersonalCenterContext(context){
  return isCurrentPersonalModelAccountContext(context)&&
   state.roomContextEpoch===context.pageEpoch&&location.hash.startsWith('#profile');
+}
+function capturePersonalSessionContext(socket=state.dmSocket){
+ return {...capturePersonalCenterContext(),socket};
+}
+function isCurrentPersonalSessionContext(context){
+ return isCurrentPersonalCenterContext(context)&&state.dmSocket===context.socket;
 }
 async function openPersonalCenter(options={}){
  const epoch=++state.roomContextEpoch,uid=state.me?.user?.uid,csrf=state.me?.user?.csrf;
@@ -1361,7 +1372,11 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
   if(type==='join'){const result=await api('/api/join',{method:'POST',body:{code:data.code,role:data.role||'player'}});await openRoom(result.room_id);toast(result.role==='judge'?'已作为真人裁判加入':'已加入比赛');return}
   if(type==='room'){const result=await api('/api/rooms',{method:'POST',body:data});await openRoom(result.room_id);toast('房间创建成功，可以分享邀请码');return}
   if(type==='profile-name'){
-   const result=await api('/api/me/profile',{method:'PUT',body:{display_name:data.display_name}});
+   const context=capturePersonalSessionContext();
+   let result;
+   try{result=await api('/api/me/profile',{method:'PUT',body:{display_name:data.display_name}});}
+   catch(error){if(!isCurrentPersonalSessionContext(context))return;throw error;}
+   if(!isCurrentPersonalSessionContext(context)||result.user?.uid!==context.uid)return;
    state.me.user=result.user;renderPersonalCenter();toast('名字已更新');return;
   }
   if(type==='change-password'){

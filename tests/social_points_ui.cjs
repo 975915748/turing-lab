@@ -53,6 +53,14 @@ async function openPersonalCenter(page) {
 async function closePersonalCenter(page) {
   await page.locator('[data-action="personal-back"]').click();
 }
+async function switchAccount(page, uid) {
+  await page.locator('#logoutBtn').click();
+  await visible(page.locator('form[data-form="login"]'));
+  await page.locator('form[data-form="login"] [name="uid"]').fill(uid);
+  await page.locator('form[data-form="login"] [name="password"]').fill('browser-password');
+  await clickSubmit(page, 'login');
+  await page.waitForFunction(expected => state.me?.user?.uid === expected, uid);
+}
 function friendDmButton(page, uid) {
   return page.locator('#socialPanel .feed-item [data-action="dm-open"][data-uid="' + uid + '"]');
 }
@@ -345,6 +353,98 @@ function friendDmButton(page, uid) {
     assert.equal(await pageA.locator('.dm-message').filter({ hasText: delayedText }).count(), 0);
     assert.equal(await pageA.evaluate(() => state.me?.user?.uid), uidC);
     await pageA.unroute('**/api/messages/' + uidB);
+    // A delayed profile-name response from the previous account must not replace the next login.
+    const profileAccountC = await pageA.evaluate(() => ({
+      uid: state.me?.user?.uid,
+      csrf: state.me?.user?.csrf,
+    }));
+    assert.equal(profileAccountC.uid, uidC);
+    let releaseProfileResponse;
+    let signalProfileResponseReady;
+    const profileGate = new Promise(resolve => { releaseProfileResponse = resolve; });
+    const profileResponseReady = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Timed out waiting for delayed profile-name response')), 10000);
+      signalProfileResponseReady = status => { clearTimeout(timer); resolve(status); };
+    });
+    await pageA.route('**/api/me/profile', async route => {
+      if (route.request().method() !== 'PUT') { await route.continue(); return; }
+      const response = await route.fetch();
+      signalProfileResponseReady(response.status());
+      await profileGate;
+      await route.fulfill({ response });
+    });
+    await pageA.locator('form[data-form="profile-name"] input[name="display_name"]').fill('C账号迟到改名');
+    await clickSubmit(pageA, 'profile-name');
+    assert.equal(await profileResponseReady, 200);
+    await switchAccount(pageA, uidA);
+    const accountAAfterLogin = await pageA.evaluate(() => ({
+      uid: state.me?.user?.uid,
+      csrf: state.me?.user?.csrf,
+      displayName: state.me?.user?.display_name,
+    }));
+    assert.equal(accountAAfterLogin.uid, uidA);
+    releaseProfileResponse();
+    await pageA.waitForTimeout(250);
+    assert.equal(await pageA.evaluate(() => state.me?.user?.uid), uidA);
+    assert.equal(await pageA.evaluate(() => state.me?.user?.csrf), accountAAfterLogin.csrf);
+    assert.equal(await pageA.evaluate(() => state.me?.user?.display_name), accountAAfterLogin.displayName);
+    assert.equal(await pageA.evaluate(() => location.hash), '');
+    await pageA.unroute('**/api/me/profile');
+
+    // A delayed name_lock_updated refresh must not overwrite the account logged in afterward.
+    const lockRoom = await api(pageA, 'POST', '/api/rooms', { title: '账号切换迟到锁名通知' });
+    const lockBase = '/api/rooms/' + lockRoom.room_id;
+    await api(pageA, 'POST', '/api/join', { code: lockRoom.code, role: 'player' });
+    await api(pageB, 'POST', '/api/join', { code: lockRoom.code, role: 'player' });
+    if (!(await pageB.locator('form[data-form="profile-name"]').count())) {
+      await openPersonalCenter(pageB);
+    }
+    await visible(pageB.locator('form[data-form="profile-name"]'));
+    await pageB.waitForFunction(() => state.dmSocket?.readyState === 1);
+    await pageB.evaluate(() => { window.__previousDmSocket = state.dmSocket; });
+
+    let releaseNameLockResponse;
+    let signalNameLockResponseReady;
+    const nameLockGate = new Promise(resolve => { releaseNameLockResponse = resolve; });
+    const nameLockResponseReady = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Timed out waiting for delayed name_lock_updated refresh')), 10000);
+      signalNameLockResponseReady = status => { clearTimeout(timer); resolve(status); };
+    });
+    let holdNextMeResponse = true;
+    await pageB.route('**/api/me', async route => {
+      if (holdNextMeResponse && route.request().method() === 'GET') {
+        holdNextMeResponse = false;
+        const response = await route.fetch();
+        signalNameLockResponseReady(response.status());
+        await nameLockGate;
+        await route.fulfill({ response });
+        return;
+      }
+      await route.continue();
+    });
+    await api(pageA, 'POST', lockBase + '/question', { text: '触发改名锁定通知' }, 1);
+    assert.equal(await nameLockResponseReady, 200);
+    await switchAccount(pageB, uidC);
+    await openPersonalCenter(pageB);
+    await pageB.waitForFunction(() => state.dmSocket?.readyState === 1);
+    const accountCAfterLogin = await pageB.evaluate(() => ({
+      uid: state.me?.user?.uid,
+      csrf: state.me?.user?.csrf,
+      displayName: state.me?.user?.display_name,
+    }));
+    assert.equal(accountCAfterLogin.uid, uidC);
+    assert.equal(await pageB.evaluate(() => state.dmSocket !== window.__previousDmSocket), true);
+    releaseNameLockResponse();
+    await pageB.waitForTimeout(250);
+    assert.equal(await pageB.evaluate(() => state.me?.user?.uid), uidC);
+    assert.equal(await pageB.evaluate(() => state.me?.user?.csrf), accountCAfterLogin.csrf);
+    assert.equal(await pageB.evaluate(() => state.me?.user?.display_name), accountCAfterLogin.displayName);
+    assert.equal(
+      await pageB.locator('form[data-form="profile-name"] input[name="display_name"]').inputValue(),
+      accountCAfterLogin.displayName,
+    );
+    await pageB.unroute('**/api/me');
+
     assert.deepEqual(errors, []);
   } finally {
     await contextA.close();
