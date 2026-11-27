@@ -1027,6 +1027,24 @@ def active_participant_count(db, room_id):
     return int(humans)+int(ais)
 
 
+def workflow_roster_revision(db, room_id):
+    """Fingerprint the actual contestant and judge seats, excluding transient viewers."""
+    humans=[tuple(row) for row in db.execute('''SELECT 'human' AS kind,m.alias,m.user_id
+        FROM members m JOIN users u ON u.id=m.user_id
+        WHERE m.room_id=? AND m.removed_at IS NULL AND u.deleted_at IS NULL
+        ORDER BY m.alias,m.user_id''',(room_id,)).fetchall()]
+    ais=[tuple(row) for row in db.execute('''SELECT 'ai' AS kind,alias,name,model_profile_id
+        FROM ai_players WHERE room_id=? ORDER BY alias''',(room_id,)).fetchall()]
+    human_judges=[tuple(row) for row in db.execute('''SELECT 'human' AS kind,j.user_id,j.label
+        FROM room_judges j JOIN users u ON u.id=j.user_id
+        WHERE j.room_id=? AND j.left_at IS NULL AND u.deleted_at IS NULL
+        ORDER BY j.user_id''',(room_id,)).fetchall()]
+    ai_judges=[tuple(row) for row in db.execute('''SELECT 'ai' AS kind,id,label,model_profile_id
+        FROM ai_judges WHERE room_id=? ORDER BY id''',(room_id,)).fetchall()]
+    payload={'participants':humans+ais,'judges':human_judges+ai_judges}
+    return hashlib.sha256(json.dumps(payload,ensure_ascii=False,separators=(',',':')).encode('utf-8')).hexdigest()
+
+
 def round_question_rows(db, room_id, round_number):
     return db.execute('''SELECT q.text,q.created_at,j.label,'human' AS kind,q.id
         FROM judge_questions q JOIN room_judges j
