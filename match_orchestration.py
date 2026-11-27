@@ -66,7 +66,7 @@ class PersistentWorkflowWorker:
                     await self._process(workflow)
                 except asyncio.CancelledError:
                     raise
-                except BaseException as exc:
+                except Exception as exc:
                     await self._on_error(workflow, exc)
                 continue
 
