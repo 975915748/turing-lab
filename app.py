@@ -2471,8 +2471,6 @@ def create_app(db_path=None):
             (room_id,match_number,round_number)).fetchall()
         queued=[]
         for row in rows:
-            if not (row['waiting_reason'] or '').startswith('等待人工裁判问题'):
-                continue
             if workflow_roster_revision(db,room_id)!=row['roster_revision']:
                 now=operation_timestamp()
                 db.execute("""UPDATE round_workflows SET state='stale',stage='stale',
