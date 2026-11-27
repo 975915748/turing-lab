@@ -121,7 +121,7 @@ def revealed_persona_rows(db,room_id,match_number):
   c=json.loads(row["config_json"]); m=json.loads(row["model_json"]) if row["model_json"] else None
   result.append({"seat_type":row["seat_type"],"seat_key":row["seat_key"],
    "preset_id":c["preset_id"],"preset_version":c["preset_version"],"persona_name":c["display_name"],
-   "custom_system_prompt":c["custom_system_prompt"],"output_length":c["output_length"],
+   "style_prompt":c["style_prompt"],"custom_system_prompt":c["custom_system_prompt"],"output_length":c["output_length"],
    "history_rounds":c["history_rounds"],"model_name":m.get("model_name") if m else None,
    "model_temperature":m.get("temperature") if m else None,
    "model_max_tokens":m.get("max_tokens") if m else None,
