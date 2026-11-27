@@ -234,6 +234,61 @@ def test_unknown_provider_outcome_requires_explicit_confirmation_after_restart(w
         player.close()
 
 
+def test_prepare_only_manual_question_resolves_unknown_result_without_retry(workflow_app, monkeypatch):
+    app, path = workflow_app
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    async def fake_chat(profile, messages, api_key):
+        calls.append(1)
+        if len(calls) == 1:
+            started.set()
+            await asyncio.to_thread(release.wait, 8)
+        return {'text': '模型原始问题', 'usage': {'prompt_tokens': 4, 'completion_tokens': 6}}
+
+    monkeypatch.setattr(app_module, 'chat_completion', fake_chat)
+    with TestClient(app) as admin:
+        mutate(admin, '/api/login', {'username': 'workflow_admin', 'password': 'workflow-admin-password'})
+        room, players = create_room_and_players(app, admin, count=2)
+        profile_id = create_profile(admin)
+        base = f"/api/rooms/{room['room_id']}"
+        judge = mutate(admin, base + '/ai-judges', {'name': '待人工补录裁判', 'model_profile_id': profile_id})
+        result = mutate(admin, base + '/round-workflows', {
+            'match_number': 1, 'round_number': 1, 'include_ai_questions': True, 'mode': 'prepare_only',
+        }, expected=202, extra_headers={'Idempotency-Key': 'prepare-unknown-manual-0001'})
+        workflow_id = result['workflow']['id']
+        assert started.wait(5), 'prepare-only model request did not reach the provider mock'
+
+    app_module.init_db(path)
+    with db_open(path) as db:
+        workflow = db.execute('SELECT * FROM round_workflows WHERE id=?', (workflow_id,)).fetchone()
+        interrupted = db.execute('''SELECT * FROM model_operation_tasks
+            WHERE workflow_id=? ORDER BY id DESC LIMIT 1''', (workflow_id,)).fetchone()
+    assert workflow['state'] == 'waiting_input'
+    assert interrupted['state'] == 'interrupted'
+    release.set()
+
+    resumed_app = create_app(path)
+    with TestClient(resumed_app) as admin:
+        mutate(admin, '/api/login', {'username': 'workflow_admin', 'password': 'workflow-admin-password'})
+        base = f"/api/rooms/{room['room_id']}"
+        mutate(admin, base + f"/ai-judges/{judge['id']}/questions", {'text': '人工补录的问题'})
+        completed = wait_for_workflow(path, workflow_id)
+        assert completed['state'] == 'completed'
+        with db_open(path) as db:
+            question = db.execute('''SELECT text FROM ai_judge_questions
+                WHERE room_id=? AND round_number=1 AND ai_judge_id=?''',
+                (room['room_id'], judge['id'])).fetchone()
+            attempts = db.execute('''SELECT state FROM model_operation_tasks
+                WHERE workflow_id=? ORDER BY id''', (workflow_id,)).fetchall()
+        assert question['text'] == '人工补录的问题'
+        assert [row['state'] for row in attempts] == ['interrupted']
+        assert calls == [1]
+    for player in players:
+        player.close()
+
+
 def test_round_timer_deadline_and_host_timeout_finish(workflow_app, monkeypatch):
     app, path = workflow_app
     with TestClient(app) as admin:
