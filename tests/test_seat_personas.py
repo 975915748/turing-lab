@@ -74,15 +74,22 @@ def test_match_persona_snapshot_is_immutable_and_revealed_without_secrets():
             id INTEGER, owner_user_id INTEGER, name TEXT, model TEXT, base_url TEXT,
             temperature REAL, max_tokens INTEGER, timeout_seconds INTEGER);
     """)
-    db.execute("INSERT INTO ai_players VALUES(1,'A','Bot A',NULL,'analytical',1,'','short',0,1)")
+    db.execute("INSERT INTO model_profiles VALUES(11,7,'private config','frozen-model',"
+               "'https://provider.example/v1',0.3,1024,30)")
+    db.execute("INSERT INTO ai_players VALUES(1,'A','Bot A',11,'analytical',1,'','short',0,1)")
     room = {"id": 1, "match_number": 3, "match_started_at": None}
     assert freeze_match_personas(db, room) is True
     assert freeze_match_personas(db, room) is False
     db.execute("UPDATE ai_players SET persona_preset_id='casual' WHERE room_id=1 AND alias='A'")
+    db.execute("UPDATE model_profiles SET model='changed-model' WHERE id=11")
     rows = revealed_persona_rows(db, 1, 3)
     assert rows[0]["persona_name"] == "严谨分析者"
     assert rows[0]["output_length"] == "short"
-    assert "api_key" not in rows[0]
+    assert rows[0]["model_name"] == "frozen-model"
+    assert rows[0]["model_temperature"] == 0.3
+    assert rows[0]["model_max_tokens"] == 1024
+    assert rows[0]["model_timeout_seconds"] == 30
+    assert "base_url" not in rows[0] and "profile_name" not in rows[0] and "api_key" not in rows[0]
 
 
 def test_persona_api_freezes_and_allows_preparation_reset(tmp_path):
