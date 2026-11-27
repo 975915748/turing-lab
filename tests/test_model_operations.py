@@ -52,6 +52,7 @@ def operation_lab(tmp_path, monkeypatch):
                 state['fail_next'] -= 1
             block = state['block']
         if block:
+            block['profile_model']=profile['model']
             block['started'].set()
             await asyncio.to_thread(block['release'].wait, 10)
         if fail:
@@ -278,7 +279,7 @@ def test_inflight_result_does_not_resurrect_tasks_after_match_cleanup(operation_
 
 
 
-def test_ai_question_result_is_stale_when_profile_changes_during_provider_call(operation_lab):
+def test_ai_question_uses_frozen_profile_when_profile_changes_during_provider_call(operation_lab):
     lab = operation_lab
     admin, base, profile_id = lab['admin'], lab['base'], lab['profile_id']
     add_ai_judge(admin, base, '配置修改期间出题的裁判', profile_id)
@@ -297,15 +298,17 @@ def test_ai_question_result_is_stale_when_profile_changes_during_provider_call(o
         block['release'].set()
         result = future.result(timeout=15)
 
+    assert block['profile_model'] == lab['profile_body']['model']
     lab['state']['block'] = None
-    assert result['generated'] == 0
-    assert result['skipped'] == 1
+    assert result['generated'] == 1
+    assert result['skipped'] == 0
     room = admin.get(base).json()
-    assert room['rounds'][0]['questions'] == []
+    assert len(room['rounds'][0]['questions']) == 1
+    assert room['rounds'][0]['questions'][0]['text'] == '如果你最近改变过一个重要看法，是什么促使你改变？'
     task = room['model_operations'][0]
-    assert task['state'] == 'stale'
+    assert task['state'] == 'completed'
     assert task['request_succeeded'] is True
-    assert task['result_applied'] is False
+    assert task['result_applied'] is True
     assert room['model_request_count'] == 1
 
 def test_startup_marks_unfinished_tasks_interrupted_without_replaying(operation_lab):
