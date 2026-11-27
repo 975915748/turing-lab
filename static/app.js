@@ -698,7 +698,7 @@ app.addEventListener('change',e=>{
  }
 });
 $('#judgeNoticeClose').addEventListener('click',()=>$('#judgeNotice').close());
-app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]');if(!b)return;const action=b.dataset.action;
+app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]');if(!b)return;const action=b.dataset.action;let roomErrorGuard=null;
  try{
   if(action==='tab-login'||action==='tab-register'){state.tab=action==='tab-login'?'login':'register';renderAuth()}
   if(action==='toggle-legacy-login'){state.legacyLogin=!state.legacyLogin;renderAuth()}
@@ -744,7 +744,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
    }
    if(action==='sync')await refreshRoom();
   if(action==='generate-ai-questions'){
-   const context=captureRoomOperationContext();if(!isCurrentRoomContext(context))return;
+   const context=captureRoomOperationContext();roomErrorGuard=()=>isCurrentRoomContext(context);if(!isCurrentRoomContext(context))return;
    b.disabled=true;b.textContent='模型正在出题…';
    const base=`/api/rooms/${context.roomId}`;
    const result=await idempotentApi(`room:${context.roomId}:match:${context.matchNumber}:round:${context.roundNumber}:judge_question`,
@@ -753,7 +753,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
    await refreshRoom(context);if(!isCurrentRoomContext(context))return;toast(aiQuestionFeedback(result));
   }
   if(action==='generate-ai-answers'){
-   const context=captureRoomOperationContext();if(!isCurrentRoomContext(context))return;
+   const context=captureRoomOperationContext();roomErrorGuard=()=>isCurrentRoomContext(context);if(!isCurrentRoomContext(context))return;
    b.disabled=true;b.textContent='模型正在回答…';
    const base=`/api/rooms/${context.roomId}`;
    const result=await idempotentApi(`room:${context.roomId}:match:${context.matchNumber}:round:${context.roundNumber}:ai_answer`,
@@ -764,7 +764,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
    toast(`模型 AI 已提交 ${result.generated||0} 个回答${detail}`);
   }
   if(action==='generate-ai-verdicts'){
-   const context=captureRoomOperationContext();if(!isCurrentRoomContext(context,false))return;
+   const context=captureRoomOperationContext();roomErrorGuard=()=>isCurrentRoomContext(context,false);if(!isCurrentRoomContext(context,false))return;
    b.disabled=true;b.textContent='模型正在判断…';
    const base=`/api/rooms/${context.roomId}`;
    const result=await idempotentApi(`room:${context.roomId}:match:${context.matchNumber}:judge_verdict`,
@@ -780,7 +780,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
    if(form){form.scrollIntoView({behavior:'smooth',block:'center'});form.querySelector('textarea')?.focus();}
   }
   if(action==='retry-model-operation'){
-   const context=captureRoomOperationContext();if(!isCurrentRoomContext(context,false))return;
+   const context=captureRoomOperationContext();roomErrorGuard=()=>isCurrentRoomContext(context,false);if(!isCurrentRoomContext(context,false))return;
    const taskId=Number(b.dataset.id),base=`/api/rooms/${context.roomId}`;b.disabled=true;b.textContent='正在重试…';
    const result=await idempotentApi(`room:${context.roomId}:match:${context.matchNumber}:retry:${taskId}`,
     base+'/model-operations/'+taskId+'/retry',{method:'POST',matchNumber:context.matchNumber});
@@ -850,7 +850,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
   }
   if(action==='admin-join'){await api('/api/join',{method:'POST',body:{code:state.room.invite_code}});await refreshRoom();toast('已作为玩家加入')}
   if(action==='next-round'){
-   const context=captureRoomOperationContext();
+   const context=captureRoomOperationContext();roomErrorGuard=()=>isCurrentRoomContext(context,false);
    if(!isCurrentRoomContext(context))throw new Error('房间状态已变化，请刷新后重试。');
    if(confirm('确定开启下一轮？')){
     const base=`/api/rooms/${context.roomId}`;
@@ -868,7 +868,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
    }
   }
   if(action==='start-round'){
-   const context=captureRoomOperationContext(),roomId=context.roomId,matchNumber=context.matchNumber,roundNumber=context.roundNumber;
+   const context=captureRoomOperationContext(),roomId=context.roomId,matchNumber=context.matchNumber,roundNumber=context.roundNumber;roomErrorGuard=()=>isCurrentRoomContext(context);
    if(!isCurrentRoomContext(context))throw new Error('房间状态已变化，请刷新后重试。');
    const readiness=state.room?.readiness;
    if(!readiness||(!readiness.can_start&&!readiness.can_generate_and_start)){
@@ -902,7 +902,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
   if(action==='view-packet'){const pack=await api(`/api/rooms/${state.roomId}/packets/${b.dataset.id}`);const win=window.open('','_blank');if(win){win.document.title='裁判匿名消息包';const pre=win.document.createElement('pre');pre.style.cssText='white-space:pre-wrap;overflow-wrap:anywhere;font:15px/1.7 sans-serif;padding:24px';pre.textContent=pack.content;win.document.body.appendChild(pre);}else{await navigator.clipboard.writeText(pack.content);toast('弹窗被阻止，已复制裁判包');}}
   if(action==='mark-sent'){if(confirm('确认已亲自发送此版本到裁判窗口？标记并不代表系统已自动发送。')){await api(`/api/rooms/${state.roomId}/packets/${b.dataset.id}/sent`,{method:'POST'});await refreshRoom();toast('已记录手动发送时间')}}
   if(action==='reveal'){if(confirm('裁判结论锁定后将向全部玩家公开身份和计分。确定结束比赛并揭晓？')){await api(`/api/rooms/${state.roomId}/reveal`,{method:'POST'});await refreshRoom();toast('已结束并揭晓比赛')}}
- }catch(err){toast(err.message)}
+ }catch(err){if(roomErrorGuard&&!roomErrorGuard())return;toast(err.message)}
 });
 app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-form]');if(!form)return;e.preventDefault();const type=form.dataset.form;const data=Object.fromEntries(new FormData(form));const btn=form.querySelector('[type=submit]');if(btn)btn.disabled=true;
  try{

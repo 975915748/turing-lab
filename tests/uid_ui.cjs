@@ -743,6 +743,40 @@ async function logout(page) {
         'A 的迟到出题响应不能为 B 房间触发模型回答');
       await page.unroute(questionPattern);
 
+      // A failed response from room A must not show its stale error on room B.
+      await page.locator('[data-action="open"][data-id="' + roomA.room_id + '"]').click();
+      await page.getByRole('heading', { name: '异步开局目标 A', exact: true }).waitFor();
+      await page.locator('[data-action="room-view"][data-view="admin"]').click();
+      await page.evaluate(() => {
+        const toast = document.querySelector('#toast');
+        if (toast) { toast.textContent = ''; toast.classList.remove('visible'); }
+      });
+      let releaseFailedQuestion;
+      let failedQuestionStarted;
+      const failedQuestionGate = new Promise(resolve => { releaseFailedQuestion = resolve; });
+      const failedQuestionRequestStarted = new Promise(resolve => { failedQuestionStarted = resolve; });
+      await page.route(questionPattern, async route => {
+        failedQuestionStarted();
+        await failedQuestionGate;
+        await route.fulfill({
+          status: 503,
+          contentType: 'application/json',
+          body: JSON.stringify({ detail: 'A 房间的迟到请求失败' }),
+        });
+      });
+      page.once('dialog', dialog => dialog.accept());
+      await page.locator('[data-action="start-round"]').click();
+      await failedQuestionRequestStarted;
+      await page.locator('[data-action="back"]').click();
+      await page.locator('[data-action="open"][data-id="' + roomB.room_id + '"]').click();
+      await page.getByRole('heading', { name: '异步开局目标 B', exact: true }).waitFor();
+      releaseFailedQuestion();
+      await page.waitForTimeout(300);
+      const staleToast = await page.locator('#toast').innerText();
+      assert.equal(staleToast.includes('A 房间的迟到请求失败'), false,
+        'A 的迟到失败响应不能把旧错误提示显示在 B 房间');
+      await page.unroute(questionPattern);
+
       // A delayed room refresh must not overwrite a room opened after that request began.
       let releaseRefresh;
       let refreshStarted;
