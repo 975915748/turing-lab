@@ -1,3 +1,4 @@
+import json
 import sqlite3
 
 import pytest
@@ -82,6 +83,13 @@ def test_match_persona_snapshot_is_immutable_and_revealed_without_secrets():
     assert freeze_match_personas(db, room, participant_roster_revision="roster-v1") is True
     assert freeze_match_personas(db, room, participant_roster_revision="roster-v2") is False
     assert db.execute("SELECT participant_roster_revision FROM match_persona_freezes").fetchone()[0] == "roster-v1"
+    frozen_models = {
+        row["seat_type"]: json.loads(row["model_json"])
+        for row in db.execute("SELECT seat_type,model_json FROM match_seat_persona_snapshots")
+    }
+    assert frozen_models["participant"]["effective_output_max_tokens"] == 256
+    assert frozen_models["judge"]["effective_output_max_tokens"] == 256
+    assert frozen_models["judge"]["verdict_max_tokens"] == 1024
     db.execute("UPDATE ai_players SET persona_preset_id='casual' WHERE room_id=1 AND alias='A'")
     db.execute("UPDATE model_profiles SET model='changed-model' WHERE id=11")
     rows = revealed_persona_rows(db, 1, 3)
