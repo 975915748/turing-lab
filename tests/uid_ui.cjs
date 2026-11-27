@@ -782,6 +782,14 @@ async function logout(page) {
       const judgeSaveResponse = await judgeSaved;
       assert.equal(judgeSaveResponse.status(), 200, await judgeSaveResponse.text());
 
+      // Keep a deliberately different, unsaved participant draft while the
+      // server freezes the saved analytical configuration.
+      await page.locator('[data-action="room-view"][data-view="admin"]').click();
+      await participantPersona.locator('[name="preset_id"]').selectOption('minimal');
+      await participantPersona.locator('[name="output_length"]').selectOption('long');
+      await participantPersona.locator('[name="history_rounds"]').fill('99');
+      await page.locator('[data-action="room-view"][data-view="ai-judges"]').click();
+
       const generate = page.locator('[data-action="generate-ai-questions"]');
       await generate.waitFor();
       const generated = page.waitForResponse(response =>
@@ -803,6 +811,16 @@ async function logout(page) {
       const resetButton = page.locator('[data-action="reset-persona-preparation"]');
       await resetButton.waitFor();
       assert.equal(await participantPersona.locator('[name="preset_id"]').isDisabled(), true);
+      assert.equal(await participantPersona.locator('[name="preset_id"]').inputValue(), 'analytical',
+        '冻结编辑器必须显示服务端保存的人设，而不是未保存草稿');
+      assert((await participantDetails.locator('summary').innerText()).includes('严谨分析者'),
+        '冻结状态标题必须以权威配置为准');
+      const unappliedDraft = participantDetails.locator('.persona-unsaved-draft');
+      await unappliedDraft.waitFor();
+      const unappliedDraftText = await unappliedDraft.innerText();
+      assert(unappliedDraftText.includes('未保存草稿（未生效）'));
+      assert(unappliedDraftText.includes('极简交流者'));
+      assert(unappliedDraftText.includes('99'));
       page.once('dialog', dialog => dialog.accept());
       const reset = page.waitForResponse(response =>
         response.url().endsWith('/personas/reset-preparation') && response.request().method() === 'POST');
@@ -820,6 +838,10 @@ async function logout(page) {
         '取消准备和房间刷新后应保留已展开的人设编辑器');
       await participantPersona.locator('[name="preset_id"]').waitFor({ state: 'visible' });
       assert.equal(await participantPersona.locator('[name="preset_id"]').isDisabled(), false);
+      // Restore the saved values before continuing the custom-prompt test.
+      await participantPersona.locator('[name="preset_id"]').selectOption('analytical');
+      await participantPersona.locator('[name="output_length"]').selectOption('medium');
+      await participantPersona.locator('[name="history_rounds"]').fill('12');
 
       await participantPersona.locator('[name="preset_id"]').selectOption('custom');
       const customStyle = '用简短自然的口语直接回应，不使用分点列表。<img src=x onerror=alert(1)>';
@@ -881,10 +903,102 @@ async function logout(page) {
       await judgePage.close();
       await judgeContext.close();
 
+      // The multi-judge host view also uses the shared post-match persona area.
+      await page.goto(site + '#room=' + roomId);
+      await page.getByRole('heading', { name: '本场 AI 席位人设', exact: true }).waitFor();
+      assert.equal(await page.getByRole('heading', {
+        name: '本场 AI 席位人设', exact: true,
+      }).count(), 1, '多裁判模式应在共用赛后区域展示一次人设详情');
+
       await screenshot(page, 'ai-seat-personas-desktop-light.png');
       await page.setViewportSize({ width: 390, height: 844 });
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
       await screenshot(page, 'ai-seat-personas-mobile-light.png');
+
+      // Exercise the legacy external-judge path: the host manually records the
+      // final verdict, so there is no multi-judge verdict array to render.
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      const externalCreate = await context.request.post(site + '/api/rooms', {
+        headers, data: { title: '外部裁判人设展示验收', judge: '外部裁判（手动转录）' },
+      });
+      assert.equal(externalCreate.status(), 200, await externalCreate.text());
+      const externalRoom = await externalCreate.json();
+      const externalBase = '/api/rooms/' + externalRoom.room_id;
+      const externalAIResponse = await context.request.post(site + externalBase + '/ai', {
+        headers, data: { name: '外部模式手动 AI' },
+      });
+      assert.equal(externalAIResponse.status(), 200, await externalAIResponse.text());
+      const externalAI = await externalAIResponse.json();
+      const externalPersonaResponse = await context.request.put(
+        site + externalBase + '/ai/' + encodeURIComponent(externalAI.alias) + '/persona',
+        { headers, data: {
+          preset_id: 'analytical', custom_system_prompt: '',
+          output_length: 'short', history_rounds: 7,
+        } },
+      );
+      assert.equal(externalPersonaResponse.status(), 200, await externalPersonaResponse.text());
+
+      for (const playerContext of playerContexts) {
+        const playerInfo = await (await playerContext.request.get(site + '/api/me')).json();
+        const joinedExternal = await playerContext.request.post(site + '/api/join', {
+          headers: { 'X-CSRF-Token': playerInfo.user.csrf },
+          data: { code: externalRoom.code, role: 'player' },
+        });
+        assert.equal(joinedExternal.status(), 200, await joinedExternal.text());
+      }
+
+      const externalQuestion = await context.request.post(site + externalBase + '/question', {
+        headers, data: { text: '请描述一次你修正错误判断的经历。' },
+      });
+      assert.equal(externalQuestion.status(), 200, await externalQuestion.text());
+      const externalStart = await context.request.post(site + externalBase + '/start', { headers });
+      assert.equal(externalStart.status(), 200, await externalStart.text());
+      const externalLive = await (await context.request.get(site + externalBase)).json();
+      assert.equal(externalLive.personas_frozen, true);
+      for (let i = 0; i < playerContexts.length; i++) {
+        const playerInfo = await (await playerContexts[i].request.get(site + '/api/me')).json();
+        const submitted = await playerContexts[i].request.post(site + externalBase + '/answers', {
+          headers: { 'X-CSRF-Token': playerInfo.user.csrf },
+          data: { text: '外部裁判模式下的人类回答 ' + (i + 1) },
+        });
+        assert.equal(submitted.status(), 200, await submitted.text());
+      }
+      const externalAIAnswer = await context.request.post(
+        site + externalBase + '/ai/' + encodeURIComponent(externalAI.alias) + '/answer',
+        { headers, data: { text: '外部裁判模式下的手动 AI 回答。' } },
+      );
+      assert.equal(externalAIAnswer.status(), 200, await externalAIAnswer.text());
+      const externalAnswered = await (await context.request.get(site + externalBase)).json();
+      assert.equal(externalAnswered.rounds[0].status, 'revealed');
+      const externalPredictions = Object.fromEntries([
+        ...externalAnswered.humans.map(person => [person.alias, 'Human']),
+        ...externalAnswered.ais.map(person => [person.alias, 'AI']),
+      ]);
+      const externalVerdict = await context.request.post(site + externalBase + '/verdict', {
+        headers, data: {
+          predictions: externalPredictions,
+          evidence: '房主手动转录外部裁判的最终判断。',
+          confidence: 88,
+        },
+      });
+      assert.equal(externalVerdict.status(), 200, await externalVerdict.text());
+      const externalReveal = await context.request.post(site + externalBase + '/reveal', { headers });
+      assert.equal(externalReveal.status(), 200, await externalReveal.text());
+      const externalRevealed = await (await context.request.get(site + externalBase)).json();
+      assert.equal(externalRevealed.judges.length, 0, '该场必须走外部裁判手动转录模式');
+      assert.equal(externalRevealed.personas_revealed, true);
+      assert.equal((externalRevealed.verdicts || []).length, 0,
+        '外部裁判模式使用房主手动转录的单份最终判决');
+
+      await page.goto(site + '#room=' + externalRoom.room_id);
+      await page.getByRole('heading', { name: '本场 AI 席位人设', exact: true }).waitFor();
+      const externalResultText = await page.locator('#app').innerText();
+      assert(externalResultText.includes('严谨分析者'));
+      assert(externalResultText.includes('回答历史轮数：7'));
+      assert.equal(await page.getByRole('heading', {
+        name: '本场 AI 席位人设', exact: true,
+      }).count(), 1, '外部裁判手动转录模式应展示一次冻结人设详情');
+
       for (const playerContext of playerContexts) await playerContext.close();
     } else {
       throw new Error('Unknown scenario: ' + scenario);
