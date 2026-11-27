@@ -2420,6 +2420,14 @@ def create_app(db_path=None):
             queued.append(int(row['id']))
         return queued
 
+    def self_deadline_reached(room_id, round_number):
+        with connection() as db:
+            room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
+            if not room:
+                return False
+            rnd=current_round(db,room,round_number)
+            return rnd['status']=='collecting' and round_deadline_expired(rnd)
+
     async def process_round_workflow(workflow):
         workflow_id=workflow['id']
         room_id=workflow['room_id']
