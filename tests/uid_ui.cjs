@@ -779,7 +779,8 @@ async function logout(page) {
         const field = document.querySelector('form[data-form="seat-persona"][data-seat-type="participant"] [name="preset_id"]');
         return field && !field.disabled;
       });
-      await participantDetails.evaluate(element => { element.open = true; });
+      assert.equal(await participantDetails.evaluate(element => element.open), true,
+        '取消准备和房间刷新后应保留已展开的人设编辑器');
       await participantPersona.locator('[name="preset_id"]').waitFor({ state: 'visible' });
       assert.equal(await participantPersona.locator('[name="preset_id"]').isDisabled(), false);
 
