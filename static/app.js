@@ -664,6 +664,63 @@ function judgeAdminPanel(r){
  return html+'</section>';
 }
 
+function workflowStateText(value){
+ const labels={queued:'排队中',generating_questions:'正在生成裁判问题',starting_round:'正在开启作答',
+  generating_answers:'正在生成 AI 回答',waiting_input:'等待输入或人工确认',blocked:'等待处理阻塞',
+  failed:'执行失败',completed:'自动步骤已完成',cancelled:'已取消',stale:'已作废'};
+ return labels[value]||value||'未知';
+}
+function renderRoundWorkflowPanel(r){
+ const wf=r.round_workflow;if(!wf)return '';
+ const actions=[];
+ if(wf.can_resume)actions.push('<button class="small primary" data-action="resume-round-workflow" data-id="'+wf.id+'">恢复工作流</button>');
+ if(wf.can_cancel)actions.push('<button class="small danger" data-action="cancel-round-workflow" data-id="'+wf.id+'">取消准备</button>');
+ return '<section class="card compact workflow-card"><div class="label-line"><h2>服务端比赛编排</h2><span class="pill">'+esc(workflowStateText(wf.state))+'</span></div>'+
+  '<p class="hint">任务由服务器持续推进；关闭网页、刷新或断线不会中断已授权的工作流。</p>'+
+  (wf.waiting_reason?'<p class="hint">'+esc(wf.waiting_reason)+'</p>':'')+
+  (wf.error_message?'<p class="operation-error">'+esc(wf.error_message)+'</p>':'')+
+  (actions.length?'<div class="buttonrow spaced">'+actions.join('')+'</div>':'')+
+  '</section>';
+}
+function renderRoundTimerSettings(r){
+ if(!r.can_manage||r.status!=='open')return '';
+ const value=r.round_duration_seconds===null||r.round_duration_seconds===undefined?'':esc(r.round_duration_seconds);
+ return '<section class="card compact"><div class="label-line"><h2>单轮答题限时</h2><span class="pill">'+(value?'已启用':'已关闭')+'</span></div>'+
+  '<p class="hint">留空表示关闭；启用范围为 30～3600 秒。当前轮次开始后，修改只影响后续轮次。</p>'+
+  '<form data-form="round-timer" class="operation-limit-form"><input name="seconds" type="number" min="30" max="3600" step="1" value="'+value+'" placeholder="留空表示关闭">'+
+  '<button class="small" type="submit">保存限时</button></form></section>';
+}
+function serverNowMs(){return Date.now()+(Number(state.serverTimeOffset)||0)}
+function formatCountdown(ms){
+ const seconds=Math.max(0,Math.ceil(ms/1000));
+ const hours=Math.floor(seconds/3600),minutes=Math.floor((seconds%3600)/60),rest=seconds%60;
+ return hours?String(hours).padStart(2,'0')+':'+String(minutes).padStart(2,'0')+':'+String(rest).padStart(2,'0'):
+  String(minutes).padStart(2,'0')+':'+String(rest).padStart(2,'0');
+}
+function renderRoundTimer(r,round,active){
+ if(round.duration_seconds===null||round.duration_seconds===undefined)return '';
+ const manager=!!r.can_manage&&active&&round.status==='collecting';
+ return '<div class="notice round-timer" data-round-timer><div class="label-line"><strong>本轮限时 · '+Math.round(round.duration_seconds/60*10)/10+' 分钟</strong>'+
+  '<strong id="roundCountdown" data-deadline="'+esc(round.deadline_at||'')+'">计算中…</strong></div>'+
+  (manager?'<div class="buttonrow spaced"><button class="small danger" id="finishRoundTimeoutBtn" data-action="finish-round-timeout" data-round="'+round.number+'" disabled>结束本轮</button></div>':'')+
+  '</div>';
+}
+function updateRoundCountdown(){
+ const el=$('#roundCountdown');if(!el)return;
+ const deadline=Date.parse(el.dataset.deadline||'');
+ if(!Number.isFinite(deadline))return;
+ const remaining=deadline-serverNowMs();
+ const round=state.room?.rounds?.find(x=>x.number===state.room.current_round);
+ const expired=remaining<=0;
+ el.textContent=expired?'时间已到':formatCountdown(remaining);
+ const button=$('#finishRoundTimeoutBtn');
+ if(button)button.disabled=!expired||round?.status!=='collecting';
+ const notice=el.closest('[data-round-timer]');
+ if(notice&&expired&&round?.status==='collecting'){
+  const hint=notice.querySelector('[data-timeout-hint]');
+  if(!hint){const p=document.createElement('p');p.className='hint';p.dataset.timeoutHint='1';p.textContent='已到截止时间；本轮不会自动结束，请房主确认结束。';notice.appendChild(p);}
+ }
+}
 function renderReadinessPanel(r){
  const x=r.readiness;if(!x||x.phase!=='draft')return '';
  const limit=x.model_request_limit===null?'不限':x.model_request_limit;
