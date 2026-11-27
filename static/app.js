@@ -614,17 +614,32 @@ function rememberSeatPersonaDraft(target){
  return true;
 }
 function personaEditor(type,key,p,disabled){
- p=p||{};const presets=type==='participant'?[['default','默认风格'],['minimal','极简交流者'],['casual','日常闲聊者'],['analytical','严谨分析者'],['emotional','情绪表达者'],['custom','自定义']]:[['balanced','默认均衡'],['language_detail','语言细节'],['cross_round','跨轮一致性'],['custom','自定义']];
+ p=p||{};const presets=type==='participant'?[
+  ['default','默认风格','保持自然、直接，不刻意套用固定表达模板。'],
+  ['minimal','极简交流者','优先使用短句，少作解释，直接回应问题；不为简短而遗漏必要信息。'],
+  ['casual','日常闲聊者','使用自然口语，可以适度联想和承接对话；避免机械套用固定开场或结尾。'],
+  ['analytical','严谨分析者','表达结构清晰，重视逻辑关系、事实依据和具体细节；区分事实、推测与不确定之处。'],
+  ['emotional','情绪表达者','更关注语气、情绪和交流对象的感受；表达自然，不刻意夸大情绪或迎合对方。'],
+  ['custom','自定义','填写本席位希望采用的风格提示词；正式揭晓后会展示。']
+ ]:[
+  ['balanced','默认均衡','综合衡量全部可用匿名证据，不因单一措辞或某种表达风格直接下结论。'],
+  ['language_detail','语言细节','重点检查措辞、句式、语义衔接、表达细节及其在上下文中的一致性；不得把某个单独语言特征当作身份定论。'],
+  ['cross_round','跨轮一致性','重点比较同一匿名代号跨轮回答中的立场、知识运用、表达习惯与自我修正；考虑正常变化，不把变化本身等同于 AI。'],
+  ['custom','自定义','填写本席位希望采用的判断风格提示词；正式揭晓后会展示。']
+ ];
  const editorKey=personaDraftKey(type,key),draft=state.personaDrafts[editorKey];
  const expanded=!!state.personaEditorOpen[editorKey];
  if(draft)p={...p,...draft};
- const presetLabel=presets.find(x=>x[0]===p.preset_id)?.[1]||p.display_name||p.preset_id||'默认风格';
+ const selectedPreset=presets.find(x=>x[0]===p.preset_id)||presets[0];
+ const presetLabel=selectedPreset[1]||p.display_name||p.preset_id||'默认风格';
+ const customSelected=selectedPreset[0]==='custom';
  const lengths=[['default','沿用模型上限'],['short','短（约 80 字 / 最多 256 Token）'],['medium','中（约 300 字 / 最多 768 Token）'],['long','长（约 800 字 / 最多 2048 Token）']];
- const opts=presets.map(x=>'<option value="'+x[0]+'" '+((p.preset_id||presets[0][0])===x[0]?'selected':'')+'>'+x[1]+'</option>').join('');
+ const opts=presets.map(x=>'<option value="'+x[0]+'" data-description="'+esc(x[2])+'" '+(selectedPreset[0]===x[0]?'selected':'')+'>'+x[1]+'</option>').join('');
  const lens=lengths.map(x=>'<option value="'+x[0]+'" '+((p.output_length||'default')===x[0]?'selected':'')+'>'+x[1]+'</option>').join('');
  return '<details class="persona-editor" data-persona-editor data-key="'+esc(editorKey)+'" '+(expanded?'open':'')+'><summary>人设与回答策略 · '+esc(presetLabel)+' · '+(disabled?'已冻结 / 锁定':'可编辑')+'</summary><form data-form="seat-persona" data-seat-type="'+type+'" data-seat-key="'+esc(key)+'" class="stack spaced">'+
  '<label class="field">人设预设</label><select name="preset_id" '+(disabled?'disabled':'')+'>'+opts+'</select>'+
- '<label class="field">自定义 System Prompt（最多 8000 字；选择自定义时必填）</label><textarea name="custom_system_prompt" maxlength="8000" '+(disabled?'disabled':'')+'>'+esc(p.custom_system_prompt||'')+'</textarea>'+
+ '<p class="hint" data-preset-description>'+esc(selectedPreset[2])+'</p>'+
+ '<div class="persona-custom-prompt" data-custom-prompt-field '+(customSelected?'':'hidden')+'><label class="field">自定义 System Prompt（最多 8000 字；选择自定义时必填）</label><textarea name="custom_system_prompt" maxlength="8000" '+(disabled?'disabled':'')+'>'+esc(p.custom_system_prompt||'')+'</textarea></div>'+
  '<div class="grid2"><div><label class="field">输出长度</label><select name="output_length" '+(disabled?'disabled':'')+'>'+lens+'</select></div><div><label class="field">'+(type==='participant'?'回答历史轮数':'出题历史轮数')+'（0～100）</label><input name="history_rounds" type="number" min="0" max="100" required value="'+esc(p.history_rounds??5)+'" '+(disabled?'disabled':'')+'></div></div>'+
  '<p class="tiny muted">短 / 中 / 长的 Token 上限分别为 256 / 768 / 2048，实际不超过绑定模型上限；最终裁判 JSON 始终沿用冻结模型上限。历史轮数只影响回答和出题；正式揭晓后会展示自定义提示词，请勿填写密钥。</p><button class="small" type="submit" '+(disabled?'disabled':'')+'>保存人设</button></form></details>';
 }
@@ -917,9 +932,15 @@ app.addEventListener('input',e=>{
 });
 app.addEventListener('change',e=>{
  const personaPreset=e.target.closest('form[data-form="seat-persona"] select[name="preset_id"]');
- if(personaPreset&&personaPreset.value!=='custom'){
+ if(personaPreset){
   const customPrompt=personaPreset.form.elements.namedItem('custom_system_prompt');
-  if(customPrompt)customPrompt.value='';
+  const customField=personaPreset.form.querySelector('[data-custom-prompt-field]');
+  const customSelected=personaPreset.value==='custom';
+  if(customPrompt&&!customSelected)customPrompt.value='';
+  if(customField)customField.hidden=!customSelected;
+  const description=personaPreset.selectedOptions[0]?.dataset.description||'';
+  const descriptionField=personaPreset.form.querySelector('[data-preset-description]');
+  if(descriptionField)descriptionField.textContent=description;
  }
  if(rememberSeatPersonaDraft(e.target))return;
  if(e.target.matches('[data-ai-edit-select]')){

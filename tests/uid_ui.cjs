@@ -742,11 +742,17 @@ async function logout(page) {
       const participantPersona = participantDetails.locator('form[data-form="seat-persona"]');
       await participantPersona.waitFor();
       assert.equal(await participantPersona.getByText('回答历史轮数（0～100）', { exact: true }).count(), 1);
+      assert.equal(await participantPersona.locator('[data-custom-prompt-field]').isVisible(), false,
+        '非自定义预设不应展示可编辑的自定义提示词');
       await participantPersona.locator('[name="preset_id"]').selectOption('custom');
+      assert.equal(await participantPersona.locator('[data-custom-prompt-field]').isVisible(), true);
       await participantPersona.locator('[name="custom_system_prompt"]').fill('临时自定义风格');
       await participantPersona.locator('[name="preset_id"]').selectOption('analytical');
       assert.equal(await participantPersona.locator('[name="custom_system_prompt"]').inputValue(), '',
         '切换到预设人设时应清空不适用的自定义提示词');
+      assert.equal(await participantPersona.locator('[data-custom-prompt-field]').isVisible(), false);
+      assert.equal(await participantPersona.locator('[data-preset-description]').innerText(),
+        '表达结构清晰，重视逻辑关系、事实依据和具体细节；区分事实、推测与不确定之处。');
       await participantPersona.locator('[name="output_length"]').selectOption('medium');
       await participantPersona.locator('[name="history_rounds"]').fill('12');
       const participantSaved = page.waitForResponse(response =>
@@ -763,6 +769,9 @@ async function logout(page) {
       await judgePersona.waitFor();
       assert.equal(await judgePersona.getByText('出题历史轮数（0～100）', { exact: true }).count(), 1);
       await judgePersona.locator('[name="preset_id"]').selectOption('language_detail');
+      assert.equal(await judgePersona.locator('[data-custom-prompt-field]').isVisible(), false);
+      assert.equal(await judgePersona.locator('[data-preset-description]').innerText(),
+        '重点检查措辞、句式、语义衔接、表达细节及其在上下文中的一致性；不得把某个单独语言特征当作身份定论。');
       await judgePersona.locator('[name="output_length"]').selectOption('short');
       await judgePersona.locator('[name="history_rounds"]').fill('0');
       const judgeSaved = page.waitForResponse(response =>
