@@ -1023,27 +1023,47 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
    }
   }
   if(action==='admin-join'){await api('/api/join',{method:'POST',body:{code:state.room.invite_code}});await refreshRoom();toast('已作为玩家加入')}
-  if(action==='next-round'){if(confirm('确定开启下一轮？')){await api(`/api/rooms/${state.roomId}/next`,{method:'POST'});await refreshRoom();const q=await api(`/api/rooms/${state.roomId}/ai-judges/questions/generate`,{method:'POST'});await refreshRoom();toast('下一轮已开启；'+aiQuestionFeedback(q))}}
+  if(action==='next-round'){if(confirm('确定创建下一轮？服务器会在后台准备可用 AI 裁判问题，但不会自动开放作答。')){const result=await api(`/api/rooms/${state.roomId}/next`,{method:'POST'});await refreshRoom();toast('第 '+result.number+' 轮已创建；服务端正在准备问题，准备完成后仍需单独开始答题。')}}
   if(action==='start-round'){
    const shouldGenerate=b.dataset.generateQuestions==='true';
-   const prompt=shouldGenerate?'确认先生成可用 AI 裁判问题，再按当前已提交问题重新检查并开启作答？':'确认按当前已提交的合规问题开启作答？未交题席位不会阻止本轮开始。';
+   const prompt=shouldGenerate?'提交一次服务端开局任务？服务器会先生成可用 AI 裁判问题，再检查条件、开启作答并自动生成 AI 回答。':'提交一次服务端开局任务？服务器会按当前已提交问题检查条件、开启作答并自动生成 AI 回答。';
    if(confirm(prompt)){
-    b.disabled=true;b.textContent=shouldGenerate?'正在生成问题…':'正在开启本轮…';
-    let q={generated:0,skipped:0,blocked:0,failed:[]};
-    if(shouldGenerate){
-     q=await api('/api/rooms/'+state.roomId+'/ai-judges/questions/generate',{method:'POST'});
-     await refreshRoom();
-    }
-    if(!state.room?.readiness?.can_start){
-     throw new Error(q.failed?.length?aiQuestionFeedback(q):'服务器重新检查后发现本轮尚不满足开局条件；请查看准备区提示。');
-    }
-    await api('/api/rooms/'+state.roomId+'/start',{method:'POST'});
+    b.disabled=true;b.textContent='已提交…';
+    const key=crypto.randomUUID?crypto.randomUUID():Array.from(crypto.getRandomValues(new Uint8Array(16)),x=>x.toString(16).padStart(2,'0')).join('');
+    const result=await api('/api/rooms/'+state.roomId+'/round-workflows',{
+     method:'POST',headers:{'Idempotency-Key':key},
+     body:{match_number:state.room.match_number,round_number:state.room.current_round,
+      include_ai_questions:shouldGenerate,mode:'start'}
+    });
     await refreshRoom();
-    const a=await api('/api/rooms/'+state.roomId+'/ai/answers/generate',{method:'POST'});
-    await refreshRoom();
-    const detail=a.failed?.length?'；失败：'+a.failed.map(x=>x.alias+' '+x.error).join('；'):'';
-    const questionDetail=q.generated||q.skipped||q.blocked||q.failed?.length?'；'+aiQuestionFeedback(q):'';
-    toast('本轮已开始，模型自动提交 '+(a.generated||0)+' 个回答'+detail+questionDetail);
+    toast('服务端开局任务已提交：'+workflowStateText(result.workflow?.state));
+   }
+  }
+  if(action==='finish-round-timeout'){
+   if(confirm('答题期限已到。结束本轮后，未提交席位会标记为“超时未提交”，已有回答将统一公开；不会自动开启下一轮或结算积分。')){
+    await api('/api/rooms/'+state.roomId+'/rounds/'+Number(b.dataset.round)+'/finish-timeout',{
+     method:'POST',body:{match_number:state.room.match_number,confirm:true}
+    });
+    await refreshRoom();toast('本轮已结束，超时状态和已有回答已公开');
+   }
+  }
+  if(action==='cancel-round-workflow'){
+   if(confirm('确定取消本次服务端准备？已发出的第三方模型请求可能仍会产生费用，但迟到结果不会写入比赛。')){
+    await api('/api/rooms/'+state.roomId+'/round-workflows/'+Number(b.dataset.id)+'/cancel',{
+     method:'POST',body:{confirm:true}
+    });
+    await refreshRoom();toast('服务端工作流已取消');
+   }
+  }
+  if(action==='resume-round-workflow'){
+   const wf=state.room?.round_workflow;
+   const unknown=!!wf?.requires_unknown_confirmation;
+   const prompt=unknown?'存在结果未知的模型请求。请先核对比赛内容；确认再次请求可能产生费用后继续？':'恢复此服务端工作流？服务器会只补齐尚未完成的席位。';
+   if(confirm(prompt)){
+    await api('/api/rooms/'+state.roomId+'/round-workflows/'+Number(b.dataset.id)+'/resume',{
+     method:'POST',body:{confirm_unknown_attempts:unknown}
+    });
+    await refreshRoom();toast('已请求恢复服务端工作流');
    }
   }
   if(action==='packet'){await api(`/api/rooms/${state.roomId}/packets`,{method:'POST'});await refreshRoom();toast('已生成匿名裁判包快照')}
