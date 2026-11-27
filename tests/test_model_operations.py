@@ -389,15 +389,10 @@ def test_batch_idempotency_is_per_seat_and_failed_replay_does_not_retry(operatio
     assert replay['results'][0]['replayed'] is True
     assert lab['state']['calls'] == 2, '失败任务的相同键重放不能再次请求模型'
 
-    third = TestClient(lab['app'])
-    with db_open(lab['path']) as db:
-        room_code = db.execute('SELECT code FROM rooms WHERE id=?', (lab['room_id'],)).fetchone()['code']
-    post(third, '/api/register', {
-        'username': 'idempotency_changed_roster',
-        'display_name': '新增参赛者',
-        'password': 'idempotency-player-password',
-        'code': room_code,
-    })
+    updated = dict(lab['profile_body'])
+    updated['temperature'] = 0.5
+    updated['api_key'] = ''
+    put(admin, f'/api/me/models/{profile_id}', updated)
     changed = admin.post(base + '/ai-judges/questions/generate', headers={
         'X-CSRF-Token': admin.get('/api/me').json()['user']['csrf'],
         'Idempotency-Key': 'judge-batch-once',
@@ -408,6 +403,23 @@ def test_batch_idempotency_is_per_seat_and_failed_replay_does_not_retry(operatio
     retried = post_with_idempotency_key(admin, base + '/ai-judges/questions/generate', 'judge-batch-new-attempt')
     assert retried['generated'] == 1
     assert lab['state']['calls'] == 3
+
+    # The same key in another room is a separate logical operation.
+    second_room = post(admin, '/api/rooms', {'title': '另一房间幂等隔离'})
+    second_base = f"/api/rooms/{second_room['room_id']}"
+    for index in range(2):
+        player = TestClient(lab['app'])
+        post(player, '/api/register', {
+            'username': f'idempotency_room_two_{index}',
+            'display_name': f'第二房间参赛者 {index}',
+            'password': 'idempotency-player-password',
+            'code': second_room['code'],
+        })
+    add_ai_judge(admin, second_base, '另一房间裁判', profile_id)
+    isolated = post_with_idempotency_key(
+        admin, second_base + '/ai-judges/questions/generate', 'judge-batch-once')
+    assert isolated['generated'] == 1
+    assert lab['state']['calls'] == 4
 
 
 def test_room_mutations_reject_stale_round_preconditions(operation_lab):
