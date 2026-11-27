@@ -3609,19 +3609,24 @@ def create_app(db_path=None):
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
             check_match_number(room,body.match_number)
-            rnd=current_round(db,room)
-            if body.round_number!=rnd['number']:
-                raise HTTPException(409,'当前轮次已变化，请刷新后重新提交。')
             existing=db.execute('''SELECT * FROM round_workflows
                 WHERE room_id=? AND match_number=? AND round_number=? AND idempotency_key=?''',
-                (room_id,room['match_number'],rnd['number'],key)).fetchone()
-            if not existing and rnd['status']!='draft':
-                raise HTTPException(409,'只有 draft 轮次可以创建新的开局工作流。')
-            workflow_id,created,row=create_round_workflow(
-                db,room,u,rnd,mode=body.mode,
-                include_ai_questions=body.include_ai_questions,idempotency_key=key)
-            row=db.execute('SELECT * FROM round_workflows WHERE id=?',(workflow_id,)).fetchone()
-            view=workflow_view(row)
+                (room_id,body.match_number,body.round_number,key)).fetchone()
+            if existing:
+                view=workflow_view(existing)
+                workflow_id=int(existing['id'])
+                created=False
+            else:
+                rnd=current_round(db,room)
+                if body.round_number!=rnd['number']:
+                    raise HTTPException(409,'当前轮次已变化，请刷新后重新提交。')
+                if rnd['status']!='draft':
+                    raise HTTPException(409,'只有 draft 轮次可以创建新的开局工作流。')
+                workflow_id,created,_=create_round_workflow(
+                    db,room,u,rnd,mode=body.mode,
+                    include_ai_questions=body.include_ai_questions,idempotency_key=key)
+                row=db.execute('SELECT * FROM round_workflows WHERE id=?',(workflow_id,)).fetchone()
+                view=workflow_view(row)
         app.state.workflow_worker.wake()
         await app.state.hub.notify(room_id,'round_workflow_updated')
         return {'ok':True,'created':created,'workflow':view}
