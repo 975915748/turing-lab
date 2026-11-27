@@ -139,3 +139,9 @@ def test_model_list_account_switch_race_browser(model_site):
         cwd=root, capture_output=True, text=True, encoding='utf-8', timeout=150)
     assert result.returncode == 0, result.stdout + result.stderr
 
+
+def test_personal_model_navigation_race_browser(model_site):
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(['node', str(root / 'tests' / 'uid_ui.cjs'), model_site, 'model-page-race'],
+        cwd=root, capture_output=True, text=True, encoding='utf-8', timeout=150)
+    assert result.returncode == 0, result.stdout + result.stderr

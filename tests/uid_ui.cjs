@@ -829,6 +829,120 @@ async function logout(page) {
       assert.deepEqual(afterRelease, [profileB.id],
         'A 的迟到模型列表不能覆盖 B 的个人配置');
       await page.unroute('**/api/me/models');
+    } else if (scenario === 'model-page-race') {
+      await page.getByRole('button', { name: '使用旧登录名', exact: true }).click();
+      await page.locator('[name="username"]').fill('browser_admin');
+      await page.locator('[name="password"]').fill('browser-password');
+      await clickSubmit(page, 'login');
+      await uidIs(page, 'TL00000001');
+      await page.locator('[data-action="personal-center"]').click();
+      await page.locator('form[data-form="personal-model-create"]').waitFor();
+
+      // Account A's create response is committed by the server, but delivered only
+      // after account B has logged in. It must not render A's old page over B's lobby.
+      const other = await browser.newContext();
+      const registered = await other.request.post(site + '/api/register', {
+        data: { username: 'model_page_race_b', display_name: '页面竞态账号 B', password: 'model-page-race-password' },
+      });
+      assert.equal(registered.status(), 200, await registered.text());
+      const otherMe = await (await other.request.get(site + '/api/me')).json();
+      const otherProfileResponse = await other.request.post(site + '/api/me/models', {
+        headers: { 'X-CSRF-Token': otherMe.user.csrf },
+        data: {
+          name: 'B 的模型配置', base_url: 'https://api.example.com/v1', model: 'page-race-model',
+          api_key: 'sk-page-race-b', temperature: 0.4, max_tokens: 512, timeout_seconds: 30,
+        },
+      });
+      assert.equal(otherProfileResponse.status(), 200, await otherProfileResponse.text());
+      const otherProfile = await otherProfileResponse.json();
+      await other.close();
+
+      const createForm = page.locator('form[data-form="personal-model-create"]');
+      await createForm.locator('[name="name"]').fill('A 的迟到创建配置');
+      await createForm.locator('[name="base_url"]').fill('https://api.example.com/v1');
+      await createForm.locator('[name="model"]').fill('late-create-model');
+      await createForm.locator('[name="api_key"]').fill('sk-late-create-a');
+      await createForm.locator('[name="temperature"]').fill('0.3');
+      await createForm.locator('[name="max_tokens"]').fill('512');
+      await createForm.locator('[name="timeout_seconds"]').fill('30');
+      let releaseCreate, createStartedResolve;
+      const createGate = new Promise(resolve => { releaseCreate = resolve; });
+      const createStarted = new Promise(resolve => { createStartedResolve = resolve; });
+      await page.route('**/api/me/models', async route => {
+        if (route.request().method() !== 'POST') return route.continue();
+        const response = await route.fetch();
+        createStartedResolve();
+        await createGate;
+        await route.fulfill({ response });
+      });
+      await clickSubmit(page, 'personal-model-create');
+      await createStarted;
+      await logout(page);
+      await page.locator('[name="uid"]').fill(otherMe.user.uid);
+      await page.locator('[name="password"]').fill('model-page-race-password');
+      await clickSubmit(page, 'login');
+      await uidIs(page, otherMe.user.uid);
+      releaseCreate();
+      await page.waitForTimeout(250);
+      assert.equal(await page.locator('[data-action="personal-back"]').count(), 0,
+        '账号 A 的迟到创建响应不能把账号 B 的大厅重绘成个人中心');
+      assert.equal(await page.locator('form[data-form="personal-model-create"]').count(), 0);
+      await page.unroute('**/api/me/models');
+
+      // Same-account navigation must also invalidate delayed edit and delete renders.
+      await page.locator('[data-action="personal-center"]').click();
+      const profile = page.locator('details[data-model-config][data-id="' + otherProfile.id + '"]');
+      await profile.waitFor();
+      await profile.locator('summary').click();
+      await profile.locator('[name="model"]').fill('edited-before-navigation');
+      let releaseEdit, editStartedResolve;
+      const editGate = new Promise(resolve => { releaseEdit = resolve; });
+      const editStarted = new Promise(resolve => { editStartedResolve = resolve; });
+      const profileUrl = '**/api/me/models/' + otherProfile.id;
+      await page.route(profileUrl, async route => {
+        if (route.request().method() !== 'PUT') return route.continue();
+        const response = await route.fetch();
+        editStartedResolve();
+        await editGate;
+        await route.fulfill({ response });
+      });
+      await profile.locator('form[data-form="personal-model-edit"] button[type="submit"]').click();
+      await editStarted;
+      await page.locator('[data-action="personal-back"]').click();
+      await uidIs(page, otherMe.user.uid);
+      releaseEdit();
+      await page.waitForTimeout(250);
+      assert.equal(await page.locator('[data-action="personal-back"]').count(), 0,
+        '编辑响应返回时用户已离开个人中心，不应重绘旧页面');
+      await page.unroute(profileUrl);
+
+      await page.locator('[data-action="personal-center"]').click();
+      const profileAfterEdit = page.locator('details[data-model-config][data-id="' + otherProfile.id + '"]');
+      await profileAfterEdit.waitFor();
+      assert.equal(await profileAfterEdit.locator('[name="model"]').inputValue(), 'edited-before-navigation');
+      await profileAfterEdit.locator('summary').click();
+      let releaseDelete, deleteStartedResolve;
+      const deleteGate = new Promise(resolve => { releaseDelete = resolve; });
+      const deleteStarted = new Promise(resolve => { deleteStartedResolve = resolve; });
+      await page.route(profileUrl, async route => {
+        if (route.request().method() !== 'DELETE') return route.continue();
+        const response = await route.fetch();
+        deleteStartedResolve();
+        await deleteGate;
+        await route.fulfill({ response });
+      });
+      page.once('dialog', dialog => dialog.accept());
+      await profileAfterEdit.locator('[data-action="delete-personal-model"]').click();
+      await deleteStarted;
+      await page.locator('[data-action="personal-back"]').click();
+      await uidIs(page, otherMe.user.uid);
+      releaseDelete();
+      await page.waitForTimeout(250);
+      assert.equal(await page.locator('[data-action="personal-back"]').count(), 0,
+        '删除响应返回时用户已离开个人中心，不应重绘旧页面');
+      const remaining = await (await context.request.get(site + '/api/me/models')).json();
+      assert.equal(remaining.models.some(item => item.id === otherProfile.id), false);
+      await page.unroute(profileUrl);
     } else {
       throw new Error('Unknown scenario: ' + scenario);
     }
