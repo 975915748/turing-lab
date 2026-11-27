@@ -2077,6 +2077,14 @@ def create_app(db_path=None):
                 if actor_status is not True:
                     return {'generated':0,'skipped':1,'blocked':0,'failed':[],
                             'results':[{'status':'skipped','reason':str(actor_status)}]}
+            else:
+                active=db.execute("""SELECT 1 FROM round_workflows
+                    WHERE room_id=? AND match_number=? AND round_number=?
+                      AND state IN ('queued','generating_questions','starting_round','generating_answers',
+                                    'waiting_input','blocked','failed') LIMIT 1""",
+                    (room_id,room['match_number'],room['current_round'])).fetchone()
+                if active:
+                    raise HTTPException(409,'本轮已有服务端工作流，请使用工作流恢复或取消入口。')
             rnd=current_round(db,room)
             if rnd['status']!='draft':
                 raise HTTPException(409,'当前轮次已经开始作答，不能再生成 AI 裁判问题。')
@@ -2179,6 +2187,14 @@ def create_app(db_path=None):
                 if actor_status is not True:
                     return {'generated':0,'skipped':1,'blocked':0,'failed':[],
                             'results':[{'status':'skipped','reason':str(actor_status)}]}
+            else:
+                active=db.execute("""SELECT 1 FROM round_workflows
+                    WHERE room_id=? AND match_number=? AND round_number=?
+                      AND state IN ('queued','generating_questions','starting_round','generating_answers',
+                                    'waiting_input','blocked','failed') LIMIT 1""",
+                    (room_id,room['match_number'],room['current_round'])).fetchone()
+                if active:
+                    raise HTTPException(409,'本轮已有服务端工作流，请使用工作流恢复或取消入口。')
             rnd=current_round(db,room)
             if rnd['status']!='collecting':
                 raise HTTPException(409,'只有本轮正在收集回答时才能生成 AI 回复。')
@@ -2286,6 +2302,13 @@ def create_app(db_path=None):
             (room['id'],match_number,round_number,key)).fetchone()
         if existing:
             return int(existing['id']),False,dict(existing)
+        active_tasks=db.execute("""SELECT COUNT(*) FROM model_operation_tasks
+            WHERE room_id=? AND match_number=? AND round_number=?
+              AND purpose IN ('judge_question','ai_answer')
+              AND state IN ('queued','requesting')""",
+            (room['id'],match_number,round_number)).fetchone()[0]
+        if active_tasks:
+            raise HTTPException(409,'本轮已有独立模型任务正在处理；请等待其结束后再创建服务端工作流。')
         active=db.execute('''SELECT * FROM round_workflows
             WHERE room_id=? AND match_number=? AND round_number=?
               AND state IN ('queued','generating_questions','starting_round','generating_answers',
