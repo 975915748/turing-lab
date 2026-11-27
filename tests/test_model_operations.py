@@ -383,8 +383,10 @@ def test_batch_idempotency_is_per_seat_and_failed_replay_does_not_retry(operatio
 
     replay = post_with_idempotency_key(admin, base + '/ai-judges/questions/generate', 'judge-batch-once')
     assert replay['generated'] == 0
-    assert len(replay['failed']) == 1
-    assert replay['failed'][0]['status'] == 'failed'
+    assert replay['failed'] == []
+    assert len(replay['results']) == 1
+    assert replay['results'][0]['status'] == 'failed'
+    assert replay['results'][0]['replayed'] is True
     assert lab['state']['calls'] == 2, '失败任务的相同键重放不能再次请求模型'
 
     third = TestClient(lab['app'])
