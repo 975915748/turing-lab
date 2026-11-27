@@ -137,6 +137,10 @@ def test_persona_api_freezes_and_allows_preparation_reset(tmp_path):
     info = admin.get(base).json()
     assert info["ais"][0]["persona"]["preset_id"] == "analytical"
     assert next(x for x in info["judges"] if x["id"] == judge["id"])["persona"]["preset_id"] == "language_detail"
+    player_view = player_a.get(base).json()
+    assert player_view["personas_revealed"] is False
+    assert not player_view.get("seat_personas")
+    assert all(seat.get("persona") is None for seat in player_view["ais"])
 
     # A preparation attempt freezes both seat configs even if the AI judge is manual.
     request(admin, "POST", base + "/ai-judges/questions/generate")
