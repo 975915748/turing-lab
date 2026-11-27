@@ -854,7 +854,7 @@ def test_ai_question_is_not_saved_if_model_profile_changes_during_generation(tmp
             result = response.json()
             assert result['generated'] == 0
             assert result['skipped'] == 1
-            assert '模型配置发生变化' in result['results'][0]['reason']
+            assert '模型配置或凭据已变化' in result['results'][0]['reason']
             with db_open(path) as db:
                 assert db.execute(
                     'SELECT COUNT(*) FROM ai_judge_questions WHERE room_id=?',
@@ -1066,7 +1066,7 @@ def test_ai_question_is_not_saved_if_participant_roster_changes_during_generatio
             assert result['generated'] == 0
             assert result['skipped'] == 1
             assert result['failed'] == []
-            assert '参赛名单发生变化' in result['results'][0]['reason']
+            assert '参赛名单已变化' in result['results'][0]['reason']
             assert provider_calls == [judge.json()['id']]
             with db_open(path) as db:
                 assert db.execute(

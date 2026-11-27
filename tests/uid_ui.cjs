@@ -729,6 +729,7 @@ async function logout(page) {
         await questionGate;
         await route.fulfill({ response, body });
       });
+      page.once('dialog', dialog => dialog.accept());
       await page.locator('[data-action="start-round"]').click();
       await questionRequestStarted;
       await page.locator('[data-action="back"]').click();

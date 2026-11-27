@@ -338,6 +338,39 @@ def post_with_idempotency_key(client, path, key, body=None, expected=200):
     return response.json() if response.content else {}
 
 
+def test_connection_test_same_key_concurrent_replay_does_not_duplicate(operation_lab):
+    lab = operation_lab
+    admin, profile_id = lab['admin'], lab['profile_id']
+    path = f'/api/me/models/{profile_id}/test'
+    key = 'connection-test-concurrent'
+    block = {'started': threading.Event(), 'release': threading.Event()}
+    lab['state']['block'] = block
+    second_admin = TestClient(lab['app'])
+    post(second_admin, '/api/login', {'username': 'ops_admin', 'password': 'ops-admin-password'})
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(post_with_idempotency_key, admin, path, key)
+        try:
+            assert block['started'].wait(5), '首个同键请求没有进入模型调用阶段'
+            me = second_admin.get('/api/me').json()
+            response = second_admin.post(path, headers={
+                'X-CSRF-Token': me['user']['csrf'],
+                'Idempotency-Key': key,
+            })
+            assert response.status_code == 409, response.text
+            assert lab['state']['calls'] == 1, '同键并发请求不能重复调用服务商'
+        finally:
+            block['release'].set()
+        first = future.result(timeout=15)
+
+    lab['state']['block'] = None
+    assert first['ok'] is True
+    replay = post_with_idempotency_key(admin, path, key)
+    assert replay['replayed'] is True
+    assert replay['state'] == 'completed'
+    assert lab['state']['calls'] == 1, '并发结束后的终态重放不能再次调用服务商'
+
+
 def test_connection_test_idempotency_replays_completion_and_rejects_changed_input(operation_lab):
     lab = operation_lab
     admin, profile_id = lab['admin'], lab['profile_id']

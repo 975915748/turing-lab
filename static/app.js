@@ -33,8 +33,14 @@ function newIdempotencyKey(){return globalThis.crypto?.randomUUID?.()||('op-'+Da
 async function idempotentApi(scope,path,options={}){
  const key=state.pendingIdempotencyKeys[scope]||newIdempotencyKey();
  state.pendingIdempotencyKeys[scope]=key;
- try{const result=await api(path,{...options,idempotencyKey:key});delete state.pendingIdempotencyKeys[scope];return result;}
- catch(error){if(!error.networkFailure)delete state.pendingIdempotencyKeys[scope];throw error;}
+ try{
+  const result=await api(path,{...options,idempotencyKey:key});
+  if(state.pendingIdempotencyKeys[scope]===key)delete state.pendingIdempotencyKeys[scope];
+  return result;
+ }catch(error){
+  if(!error.networkFailure&&state.pendingIdempotencyKeys[scope]===key)delete state.pendingIdempotencyKeys[scope];
+  throw error;
+ }
 }
 function captureRoomOperationContext(){
  const room=state.room;
@@ -297,6 +303,7 @@ function nextPersonalModelTestVersion(id){
 }
 function invalidatePersonalModelTest(id){
  const key=String(id);nextPersonalModelTestVersion(key);
+ delete state.pendingIdempotencyKeys['profile:'+key+':connection_test'];
  delete state.personalModelTestPending[key];delete state.modelTestResults[key];
  const result=app.querySelector('[data-model-test-result="'+Number(id)+'"]');
  if(result){result.textContent='';result.className='model-test-result';}
@@ -829,26 +836,22 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
   if(action==='start-round'){
    const context=captureRoomOperationContext(),roomId=context.roomId,matchNumber=context.matchNumber,roundNumber=context.roundNumber;
    if(!isCurrentRoomContext(context))throw new Error('房间状态已变化，请刷新后重试。');
-   const round=state.room?.rounds?.find(x=>x.number===roundNumber);
-   const pendingAuto=(state.room?.judges||[]).filter(j=>j.kind==='ai'&&j.model_profile?.credential_status==='ok'&&!round?.questions?.some(q=>q.kind==='ai'&&q.judge_id===j.id));
-   const blocker=startRoundBlocker(state.room,round,pendingAuto);if(blocker)throw new Error(blocker);
+   const readiness=state.room?.readiness;
+   if(!readiness||(!readiness.can_start&&!readiness.can_generate_and_start)){
+    const reasons=(readiness?.blockers||[]).filter(Boolean);
+    throw new Error(reasons.join('；')||'本轮尚未满足开局条件，请刷新后重试。');
+   }
    if(confirm('确认向所有参赛者开放作答？模型 AI 裁判会先自动出题，开局后模型 AI 参赛者会自动回答。')){
     const base=`/api/rooms/${roomId}`,originalText=b.textContent;b.disabled=true;b.textContent='正在准备模型…';
     try{
      const q=await idempotentApi(`room:${roomId}:match:${matchNumber}:round:${roundNumber}:judge_question`,
       base+'/ai-judges/questions/generate',{method:'POST',matchNumber,roundNumber});
      if(!isCurrentRoomContext(context))return;
-     const refreshed=await refreshRoom(context);
-     if(!refreshed||!isCurrentRoomContext(context))return;
      const questionFailures=q.failed?.map(x=>(x.label||x.judge_id||'AI裁判')+'：'+x.error).filter(Boolean)||[];
      const questionSkips=q.results?.filter(x=>x.status==='skipped'&&x.reason).map(x=>(x.label||x.judge_id||'AI裁判')+'：'+x.reason)||[];
-     if(questionFailures.length){const failureDetails=[questionFailures.length?'失败：'+questionFailures.join('；'):'',questionSkips.length?'跳过：'+questionSkips.join('；'):''].filter(Boolean).join('；');throw new Error('AI 裁判出题未完成：'+failureDetails)}
-     const refreshedRound=state.room?.rounds?.find(x=>x.number===roundNumber);
-     if(!(refreshedRound?.questions?.length)){throw new Error(questionSkips.length?'AI 裁判未能出题：'+questionSkips.join('；'):(q.message||'当前没有可用于开局的裁判问题，请先录入问题或绑定可用模型配置。'))}
+     if(questionFailures.length){const failureDetails=['失败：'+questionFailures.join('；'),questionSkips.length?'跳过：'+questionSkips.join('；'):''].filter(Boolean).join('；');throw new Error('AI 裁判出题未完成：'+failureDetails)}
      await api(base+'/start',{method:'POST',matchNumber,roundNumber});
      if(!isCurrentRoomContext(context))return;
-     const started=await refreshRoom(context);
-     if(!started||!isCurrentRoomContext(context))return;
      const a=await idempotentApi(`room:${roomId}:match:${matchNumber}:round:${roundNumber}:ai_answer`,
       base+'/ai/answers/generate',{method:'POST',matchNumber,roundNumber});
      if(!isCurrentRoomContext(context))return;
@@ -860,7 +863,6 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
     }finally{if(b.isConnected){b.disabled=false;b.textContent=originalText}}
    }
   }
-
   if(action==='packet'){await api(`/api/rooms/${state.roomId}/packets`,{method:'POST'});await refreshRoom();toast('已生成匿名裁判包快照')}
   if(action==='view-packet'){const pack=await api(`/api/rooms/${state.roomId}/packets/${b.dataset.id}`);const win=window.open('','_blank');if(win){win.document.title='裁判匿名消息包';const pre=win.document.createElement('pre');pre.style.cssText='white-space:pre-wrap;overflow-wrap:anywhere;font:15px/1.7 sans-serif;padding:24px';pre.textContent=pack.content;win.document.body.appendChild(pre);}else{await navigator.clipboard.writeText(pack.content);toast('弹窗被阻止，已复制裁判包');}}
   if(action==='mark-sent'){if(confirm('确认已亲自发送此版本到裁判窗口？标记并不代表系统已自动发送。')){await api(`/api/rooms/${state.roomId}/packets/${b.dataset.id}/sent`,{method:'POST'});await refreshRoom();toast('已记录手动发送时间')}}
