@@ -297,19 +297,20 @@ def test_persona_api_freezes_and_allows_preparation_reset(tmp_path):
     # entered AI judge question based on the old roster must not start the round.
     request(admin, "POST", base + f"/ai-judges/{judge['id']}/questions",
             {"text": "请描述一次你修正错误判断的经历。"})
-    prepared = request(admin, "POST", base + "/round-workflows", {
-        "match_number": admin.get(base).json()["match_number"], "round_number": 1,
-        "mode": "prepare_only", "include_ai_questions": False,
-    }, expected=202, extra_headers={"Idempotency-Key": "persona-completed-preparation"})
-    workflow_id = prepared["workflow"]["id"]
-    workflow_state = None
-    for _ in range(200):
-        current = admin.get(base).json()
-        workflow_state = (current.get("round_workflow") or {}).get("state")
-        if workflow_state == "completed":
-            break
-        time.sleep(0.01)
-    assert workflow_state == "completed", "已有人工 AI 裁判问题时，prepare-only 工作流应完成"
+    with TestClient(app) as _worker_lifespan:
+        prepared = request(admin, "POST", base + "/round-workflows", {
+            "match_number": admin.get(base).json()["match_number"], "round_number": 1,
+            "mode": "prepare_only", "include_ai_questions": False,
+        }, expected=202, extra_headers={"Idempotency-Key": "persona-completed-preparation"})
+        workflow_id = prepared["workflow"]["id"]
+        workflow_state = None
+        for _ in range(200):
+            current = admin.get(base).json()
+            workflow_state = (current.get("round_workflow") or {}).get("state")
+            if workflow_state == "completed":
+                break
+            time.sleep(0.01)
+        assert workflow_state == "completed", "已有人工 AI 裁判问题时，prepare-only 工作流应完成"
 
     late_player = TestClient(app)
     request(late_player, "POST", "/api/register", {
