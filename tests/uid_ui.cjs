@@ -714,8 +714,13 @@ async function logout(page) {
         assert.equal(joined.status(), 200, await joined.text());
       }
 
+      await page.locator('[data-action="sync"]').click();
       await page.locator('[data-action="room-view"][data-view="admin"]').click();
-      const participantPersona = page.locator('form[data-form="seat-persona"][data-seat-type="participant"]');
+      const participantDetails = page.locator('details.persona-editor').filter({
+        has: page.locator('form[data-form="seat-persona"][data-seat-type="participant"]'),
+      });
+      await participantDetails.locator('summary').click();
+      const participantPersona = participantDetails.locator('form[data-form="seat-persona"]');
       await participantPersona.waitFor();
       await participantPersona.locator('[name="preset_id"]').selectOption('analytical');
       await participantPersona.locator('[name="output_length"]').selectOption('medium');
@@ -727,7 +732,11 @@ async function logout(page) {
       assert.equal(participantSaveResponse.status(), 200, await participantSaveResponse.text());
 
       await page.locator('[data-action="room-view"][data-view="ai-judges"]').click();
-      const judgePersona = page.locator('form[data-form="seat-persona"][data-seat-type="judge"]');
+      const judgeDetails = page.locator('details.persona-editor').filter({
+        has: page.locator('form[data-form="seat-persona"][data-seat-type="judge"]'),
+      });
+      await judgeDetails.locator('summary').click();
+      const judgePersona = judgeDetails.locator('form[data-form="seat-persona"]');
       await judgePersona.waitFor();
       await judgePersona.locator('[name="preset_id"]').selectOption('language_detail');
       await judgePersona.locator('[name="output_length"]').selectOption('short');
@@ -764,6 +773,7 @@ async function logout(page) {
       frozenRoom = await (await context.request.get(site + base)).json();
       assert.equal(frozenRoom.personas_frozen, false);
       assert.equal(frozenRoom.rounds[0].questions.length, 0);
+      await participantDetails.locator('summary').click();
       await participantPersona.locator('[name="preset_id"]').waitFor({ state: 'visible' });
       assert.equal(await participantPersona.locator('[name="preset_id"]').isDisabled(), false);
 
