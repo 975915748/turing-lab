@@ -1088,11 +1088,11 @@ def require_persona_editable(db, room):
         raise HTTPException(409,'本场准备已冻结；请先执行“取消准备并编辑”，再修改席位配置。')
 
 
-def ensure_roster_unlocked(db, room):
+def ensure_roster_unlocked(db, room, *, allow_frozen=False):
     if room['status'] != 'open':
         raise HTTPException(409, '比赛已结束。')
     recovery=needs_roster_recovery(db,room)
-    if is_match_persona_frozen(db,room['id'],room['match_number']) and not recovery:
+    if is_match_persona_frozen(db,room['id'],room['match_number']) and not recovery and not allow_frozen:
         raise HTTPException(409,'本场 AI 席位配置已冻结；如首轮尚未开始，请先取消准备并重置配置。')
     if recovery:
         return
@@ -3180,7 +3180,7 @@ def create_app(db_path=None):
                 room=db.execute('SELECT * FROM rooms WHERE code=?',(body.code.strip().upper(),)).fetchone()
                 if not room:
                     raise HTTPException(404,'邀请码无效。')
-                ensure_roster_unlocked(db,room)
+                ensure_roster_unlocked(db,room,allow_frozen=True)
             username=norm_text(body.username,40)
             try:
                 pw_hash=hash_password(body.password)
