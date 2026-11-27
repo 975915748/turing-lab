@@ -1063,6 +1063,23 @@ def workflow_roster_revision(db, room_id):
     return hashlib.sha256(json.dumps(payload,ensure_ascii=False,separators=(',',':')).encode('utf-8')).hexdigest()
 
 
+def participant_roster_revision(db, room_id):
+    """Fingerprint contestant identities, excluding per-seat model bindings.
+
+    Independent batch calls revalidate each target seat's binding separately:
+    changing one queued seat must not invalidate requests already running for
+    other seats. Durable workflows still use workflow_roster_revision().
+    """
+    humans=[tuple(row) for row in db.execute('''SELECT 'human' AS kind,m.alias,m.user_id
+        FROM members m JOIN users u ON u.id=m.user_id
+        WHERE m.room_id=? AND m.removed_at IS NULL AND u.deleted_at IS NULL
+        ORDER BY m.alias,m.user_id''',(room_id,)).fetchall()]
+    ais=[tuple(row) for row in db.execute('''SELECT 'ai' AS kind,alias,name
+        FROM ai_players WHERE room_id=? ORDER BY alias''',(room_id,)).fetchall()]
+    payload=humans+ais
+    return hashlib.sha256(json.dumps(payload,ensure_ascii=False,separators=(',',':')).encode('utf-8')).hexdigest()
+
+
 def round_question_rows(db, room_id, round_number):
     rows=db.execute('''SELECT q.text,q.created_at,j.label,'human' AS kind,q.id
         FROM judge_questions q JOIN room_judges j
@@ -2158,7 +2175,7 @@ def create_app(db_path=None):
             match_number=room['match_number']
             round_number=rnd['number']
             history=anonymous_match_packet(db,room_id,round_number-1)
-            roster_revision=workflow_roster_revision(db,room_id)
+            roster_revision=participant_roster_revision(db,room_id)
             results=[]
             profiles=[]
             for raw in rows:
@@ -2190,7 +2207,7 @@ def create_app(db_path=None):
                 current_rnd=current_round(db,current)
                 if current_rnd['number']!=round_number or current_rnd['status']!='draft':
                     return '当前轮次已变化或开始作答；未向服务商发送请求。'
-                if aliases(db,room_id)[2]!=roster or workflow_roster_revision(db,room_id)!=roster_revision:
+                if aliases(db,room_id)[2]!=roster or participant_roster_revision(db,room_id)!=roster_revision:
                     return '参赛名单已变化；请取消准备并重新入队。'
                 if anonymous_match_packet(db,room_id,round_number-1)!=history:
                     return '历史匿名资料已变化；请刷新房间后重新生成问题。'
@@ -2273,7 +2290,7 @@ def create_app(db_path=None):
             profiles=[dict(row) for row in rows]
             history_by_alias={row['alias']:anonymous_player_history(db,room_id,row['alias'],round_number-1)
                               for row in rows}
-            roster_revision=workflow_roster_revision(db,room_id)
+            roster_revision=participant_roster_revision(db,room_id)
         results=[]
         async def generate_one(profile):
             alias=profile['alias']
@@ -2287,7 +2304,7 @@ def create_app(db_path=None):
                 if (current_rnd['number']!=round_number or current_rnd['status']!='collecting' or
                         current_rnd['question']!=question or round_deadline_expired(current_rnd)):
                     return '当前轮次、问题或答题期限已变化；未向服务商发送请求。'
-                if workflow_roster_revision(db,room_id)!=roster_revision:
+                if participant_roster_revision(db,room_id)!=roster_revision:
                     return '参赛名单已变化；旧回答不能写入当前比赛。'
                 current_history=anonymous_player_history(db,room_id,alias,round_number-1)
                 if current_history!=history:
