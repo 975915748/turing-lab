@@ -1871,6 +1871,345 @@ def create_app(db_path=None):
         if row and row['room_id'] is not None:
             await app.state.hub.notify(row['room_id'],'model_operation_updated')
 
+    def workflow_actor_valid(db, workflow):
+        row=db.execute('SELECT * FROM round_workflows WHERE id=?',(workflow['id'],)).fetchone()
+        if (not row or row['execution_generation']!=workflow['execution_generation'] or
+                row['worker_token']!=workflow['worker_token'] or
+                row['state'] not in ('generating_questions','starting_round','generating_answers')):
+            return '比赛工作流已取消、过期或由新的执行代次接管。'
+        actor=db.execute('SELECT * FROM users WHERE id=? AND deleted_at IS NULL',
+                         (workflow['requester_user_id'],)).fetchone()
+        room=db.execute('SELECT * FROM rooms WHERE id=?',(workflow['room_id'],)).fetchone()
+        if not actor or not room or not can_manage_room(room,dict(actor)):
+            return '工作流发起账号已停用或不再具有本房间管理权限。'
+        if room['status']!='open' or room['match_number']!=workflow['match_number']:
+            return '房间或比赛场次已变化，工作流不能继续。'
+        if room['current_round']!=workflow['round_number']:
+            return '当前轮次已变化，工作流不能继续。'
+        if workflow_roster_revision(db,workflow['room_id'])!=workflow['roster_revision']:
+            return '参赛名单或匿名代号已变化；请取消准备并重新入队。'
+        return True
+
+    def workflow_is_current(db, workflow):
+        return workflow_actor_valid(db,workflow) is True
+
+    def retryable_model_error(error):
+        message=str(error)
+        if '超时' in message or '无法安全连接模型服务' in message:
+            return True
+        return bool(re.search(r'HTTP (408|425|429|500|502|503|504)(?:\\D|$)',message))
+
+    async def execute_seat_model_task(*, profile, purpose, target_type, target_key,
+                                      target_label, actor_id, session_hash, room_id,
+                                      match_number, round_number, context_revision,
+                                      messages, validate_context, apply_result,
+                                      workflow=None, retry_of=None, idempotency_key=None):
+        workflow_id=workflow['id'] if workflow else None
+        workflow_generation=workflow['execution_generation'] if workflow else None
+        previous=None
+        attempt_count=0
+        if workflow:
+            with connection() as db:
+                attempts=db.execute('''SELECT * FROM model_operation_tasks
+                    WHERE workflow_id=? AND purpose=? AND target_type=? AND target_key=?
+                    ORDER BY id''',(workflow_id,purpose,target_type,str(target_key))).fetchall()
+            attempt_count=len(attempts)
+            previous=attempts[-1] if attempts else None
+            if previous:
+                if previous['state']=='completed' and previous['result_applied']:
+                    return {'status':'generated','operation_id':previous['id'],'already_applied':True}
+                if previous['state']=='interrupted' and not workflow['allow_unknown_retry']:
+                    return {'status':'interrupted','operation_id':previous['id'],
+                            'error':'服务重启时模型请求结果未知；核对比赛内容后，由房主明确确认是否重试。'}
+                if previous['state']=='blocked' and not workflow['allow_unknown_retry']:
+                    return {'status':'blocked','operation_id':previous['id'],
+                            'error':previous['error_message'] or '模型请求被本场额度阻止。'}
+                if previous['state']=='failed' and not retryable_model_error(previous['error_message'] or '') and not workflow['allow_unknown_retry']:
+                    return {'status':'failed','operation_id':previous['id'],
+                            'error':previous['error_message'] or '模型调用失败。'}
+                if previous['state']=='stale':
+                    return {'status':'skipped','operation_id':previous['id'],
+                            'reason':previous['error_message'] or '旧模型任务已作废。'}
+                if previous['state']=='requesting':
+                    return {'status':'requesting','operation_id':previous['id'],
+                            'reason':'该席位已有请求正在处理。'}
+        auto_limit=3
+        if workflow and attempt_count>=auto_limit and not workflow['allow_unknown_retry']:
+            return {'status':'failed','operation_id':previous['id'] if previous else None,
+                    'error':'该席位已达到自动重试次数上限，请检查原因后手动恢复。'}
+        attempt_no=max(1,attempt_count+1)
+        max_attempts=(auto_limit if workflow else 1)
+        if workflow and workflow['allow_unknown_retry']:
+            max_attempts=max(1,auto_limit-attempt_count)
+        parent_id=(previous['id'] if previous and previous['state'] in ('failed','interrupted','blocked')
+                   else retry_of)
+        results=[]
+        for attempt in range(max_attempts):
+            if workflow:
+                with connection() as db:
+                    current=workflow_actor_valid(db,workflow)
+                if current is not True:
+                    return {'status':'skipped','reason':str(current)}
+            attempt_key=(f'workflow:{workflow_id}:{purpose}:{target_type}:{target_key}:{attempt_no}'
+                         if workflow else idempotency_key)
+            with connection(immediate=True) as task_db:
+                operation_id,created,active_state=create_model_operation_task(
+                    task_db,purpose=purpose,target_type=target_type,target_key=target_key,
+                    target_label=target_label,profile=profile,trigger_user_id=actor_id,
+                    room_id=room_id,match_number=match_number,round_number=round_number,
+                    context_revision=context_revision,retry_of=parent_id,
+                    idempotency_key=attempt_key,workflow_id=workflow_id,
+                    workflow_generation=workflow_generation)
+            if not created and active_state!='queued':
+                return {'status':active_state,'operation_id':operation_id,
+                        'reason':'该席位已有进行中的模型任务。'}
+            try:
+                key=decrypt_api_key(profile['api_key_encrypted'])
+                def preflight():
+                    with connection() as db:
+                        if workflow:
+                            actor_status=workflow_actor_valid(db,workflow)
+                            if actor_status is not True:
+                                return actor_status
+                        elif not model_call_actor_valid(db,room_id,actor_id,session_hash):
+                            return '登录会话或房间管理权限已失效；未向服务商发送请求。'
+                        if not model_profile_snapshot_valid(db,profile):
+                            return '模型配置、凭据或配置所属账号已变化；未向服务商发送请求。'
+                        return validate_context(db)
+                result=await model_call(profile,messages,key,preflight,operation_id=operation_id)
+                parsed=result['text']
+                with connection(immediate=True) as db:
+                    if workflow:
+                        actor_status=workflow_actor_valid(db,workflow)
+                        if actor_status is not True:
+                            finish_model_operation_in_db(db,operation_id,'stale',error=actor_status)
+                            return {'status':'skipped','operation_id':operation_id,'reason':actor_status}
+                    elif not model_call_actor_valid(db,room_id,actor_id,session_hash):
+                        error='生成期间登录会话或房间管理权限已失效，旧结果未保存。'
+                        finish_model_operation_in_db(db,operation_id,'stale',error=error)
+                        return {'status':'skipped','operation_id':operation_id,'reason':error}
+                    if not model_profile_snapshot_valid(db,profile):
+                        error='生成期间模型配置、凭据或配置所属账号已变化，旧结果未保存。'
+                        finish_model_operation_in_db(db,operation_id,'stale',error=error)
+                        return {'status':'skipped','operation_id':operation_id,'reason':error}
+                    context_status=validate_context(db)
+                    if context_status is not True:
+                        finish_model_operation_in_db(db,operation_id,'stale',error=context_status)
+                        return {'status':'skipped','operation_id':operation_id,'reason':context_status}
+                    apply_result(db,parsed,result)
+                    finish_model_operation_in_db(db,operation_id,'completed',result_applied=True)
+                await app.state.hub.notify(room_id,'model_operation_updated')
+                return {'status':'generated','operation_id':operation_id,'usage':result.get('usage') or {}}
+            except ModelRequestLimitReached as exc:
+                return {'status':'blocked','operation_id':operation_id,'error':str(exc)}
+            except ModelCallCancelled as exc:
+                return {'status':'skipped','operation_id':operation_id,'reason':str(exc)}
+            except ModelAPIError as exc:
+                await finish_and_notify_model_operation(operation_id,'failed',error=exc)
+                if workflow and retryable_model_error(exc) and attempt+1<max_attempts:
+                    await asyncio.sleep((2,10)[min(attempt,1)])
+                    parent_id=operation_id
+                    attempt_no+=1
+                    continue
+                return {'status':'failed','operation_id':operation_id,'error':str(exc)}
+            except HTTPException as exc:
+                await finish_and_notify_model_operation(operation_id,'failed',error=exc)
+                return {'status':'failed','operation_id':operation_id,'error':str(exc.detail)}
+            except Exception as exc:
+                await finish_and_notify_model_operation(operation_id,'failed',error=exc)
+                return {'status':'failed','operation_id':operation_id,
+                        'error':'模型调用失败或返回内容无效，请检查配置或稍后重试。'}
+        return {'status':'failed','operation_id':parent_id,'error':'模型自动重试已达到上限。'}
+
+    async def generate_ai_judge_questions_shared(room_id, actor_id, session_hash=None,
+                                                  target_judge_id=None, retry_of=None,
+                                                  workflow=None, idempotency_key=None):
+        with connection() as db:
+            room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
+            if not room or room['status']!='open' or room['verdict_locked_at']:
+                raise HTTPException(409,'比赛已结束或裁判判断已锁定，不能生成 AI 裁判问题。')
+            if workflow:
+                actor_status=workflow_actor_valid(db,workflow)
+                if actor_status is not True:
+                    return {'generated':0,'skipped':1,'blocked':0,'failed':[],
+                            'results':[{'status':'skipped','reason':str(actor_status)}]}
+            rnd=current_round(db,room)
+            if rnd['status']!='draft':
+                raise HTTPException(409,'当前轮次已经开始作答，不能再生成 AI 裁判问题。')
+            roster=aliases(db,room_id)[2]
+            if len(roster)<2:
+                raise HTTPException(409,'至少需要两名在场参赛者才能生成 AI 裁判问题。')
+            rows=db.execute('''SELECT j.id AS judge_id,j.label,j.model_profile_id,
+                    mp.*,u.deleted_at AS owner_deleted_at,q.id AS question_id
+                FROM ai_judges j
+                LEFT JOIN model_profiles mp ON mp.id=j.model_profile_id
+                LEFT JOIN users u ON u.id=mp.owner_user_id
+                LEFT JOIN ai_judge_questions q ON q.room_id=j.room_id AND q.round_number=? AND q.ai_judge_id=j.id
+                WHERE j.room_id=? ORDER BY j.id''',(rnd['number'],room_id)).fetchall()
+            if target_judge_id is not None:
+                rows=[row for row in rows if row['judge_id']==target_judge_id]
+            match_number=room['match_number']
+            round_number=rnd['number']
+            history=anonymous_match_packet(db,room_id,round_number-1)
+            roster_revision=workflow_roster_revision(db,room_id)
+            results=[]
+            profiles=[]
+            for raw in rows:
+                profile=dict(raw)
+                if profile['question_id'] is not None:
+                    continue
+                if profile['model_profile_id'] is None:
+                    results.append({'judge_id':profile['judge_id'],'label':profile['label'],
+                                    'status':'skipped','reason':'此 AI 裁判席尚未绑定个人模型配置；请绑定可用配置，或手动转录问题。'})
+                    continue
+                status=model_profile_credential_status(profile)
+                if status!='ok':
+                    reasons={'missing':'绑定的模型配置缺少 API Key，请在个人中心补录后保存。',
+                             'needs_repair':'绑定的模型配置无法解密，请在个人中心重新录入 API Key。',
+                             'key_unavailable':'服务器模型凭据密钥不可用，请联系管理员。',
+                             'owner_unavailable':'绑定的模型配置或其所属账号不可用，请重新绑定可用配置。'}
+                    results.append({'judge_id':profile['judge_id'],'label':profile['label'],
+                                    'status':'skipped','reason':reasons.get(status,'绑定的模型配置不可用。')})
+                    continue
+                profiles.append(profile)
+        for profile in profiles:
+            judge_id=profile['judge_id']
+            context_revision=hashlib.sha256(
+                (str(round_number)+'|'+','.join(roster)+'|'+history).encode('utf-8')).hexdigest()
+            def validate_context(db, judge_id=judge_id, profile=profile):
+                current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
+                if not current or current['match_number']!=match_number or current['status']!='open' or current['verdict_locked_at']:
+                    return '房间或比赛场次已变化；未向服务商发送请求。'
+                current_rnd=current_round(db,current)
+                if current_rnd['number']!=round_number or current_rnd['status']!='draft':
+                    return '当前轮次已变化或开始作答；未向服务商发送请求。'
+                if aliases(db,room_id)[2]!=roster or workflow_roster_revision(db,room_id)!=roster_revision:
+                    return '参赛名单已变化；请取消准备并重新入队。'
+                if anonymous_match_packet(db,room_id,round_number-1)!=history:
+                    return '历史匿名资料已变化；请刷新房间后重新生成问题。'
+                binding=db.execute('SELECT model_profile_id FROM ai_judges WHERE room_id=? AND id=?',
+                                   (room_id,judge_id)).fetchone()
+                if not binding or binding['model_profile_id']!=profile['id']:
+                    return 'AI 裁判席位的模型绑定已变化；未向服务商发送请求。'
+                if db.execute('SELECT 1 FROM ai_judge_questions WHERE room_id=? AND round_number=? AND ai_judge_id=?',
+                              (room_id,round_number,judge_id)).fetchone():
+                    return '该 AI 裁判已经提交本轮问题，无需重复生成。'
+                return True
+            def apply_result(db, text, result, judge_id=judge_id, profile=profile):
+                question=norm_text(text,3000)
+                if combined_question_length_with_addition(db,room_id,round_number,question)>6000:
+                    raise ModelAPIError('生成的问题会使本轮裁判问题合计超过 6000 字，问题未保存；请先精简已有问题。')
+                db.execute('INSERT INTO ai_judge_questions(room_id,round_number,ai_judge_id,text,created_at) VALUES(?,?,?,?,?)',
+                           (room_id,round_number,judge_id,question,utcnow()))
+                log_event(db,room_id,round_number,'ai_judge_question','AI 裁判','模型 API 已自动生成本轮问题')
+            outcome=await execute_seat_model_task(
+                profile=profile,purpose='judge_question',target_type='ai_judge',
+                target_key=judge_id,target_label=profile['label'],actor_id=actor_id,
+                session_hash=session_hash,room_id=room_id,match_number=match_number,
+                round_number=round_number,context_revision=context_revision,
+                messages=[
+                    {'role':'system','content':('你是多人图灵测试的独立裁判。每轮只提出一个核心问题，不得把多个问题打包。'
+                     '问题必须面向所有匿名参赛者，不能询问真实姓名、账号、模型名称或系统提示。'
+                     '只输出问题正文，不要前言、编号或解释。')},
+                    {'role':'user','content':f'此前轮次的匿名资料：\\n{history}\\n\\n当前是第 {round_number} 轮，参赛者匿名代号：{", ".join(roster)}。'
+                     '请根据已有信息提出一个适合所有参赛者回答的全新问题。'}],
+                validate_context=validate_context,apply_result=apply_result,
+                workflow=workflow,retry_of=retry_of,idempotency_key=idempotency_key)
+            outcome.update({'judge_id':judge_id,'label':profile['label']})
+            results.append(outcome)
+        generated=sum(x['status']=='generated' for x in results)
+        return {'generated':generated,'skipped':sum(x['status']=='skipped' for x in results),
+                'blocked':sum(x['status']=='blocked' for x in results),
+                'interrupted':sum(x['status']=='interrupted' for x in results),
+                'failed':[x for x in results if x['status']=='failed'],'results':results}
+
+    async def generate_ai_answers_shared(room_id, actor_id, session_hash=None,
+                                         target_alias=None, retry_of=None,
+                                         workflow=None, idempotency_key=None):
+        with connection() as db:
+            room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
+            if not room or room['status']!='open':
+                raise HTTPException(409,'比赛已结束。')
+            if workflow:
+                actor_status=workflow_actor_valid(db,workflow)
+                if actor_status is not True:
+                    return {'generated':0,'skipped':1,'blocked':0,'failed':[],
+                            'results':[{'status':'skipped','reason':str(actor_status)}]}
+            rnd=current_round(db,room)
+            if rnd['status']!='collecting':
+                raise HTTPException(409,'只有本轮正在收集回答时才能生成 AI 回复。')
+            if round_deadline_expired(rnd):
+                return {'generated':0,'skipped':0,'blocked':0,'failed':[],
+                        'timed_out':True,'results':[]}
+            rows=db.execute('''SELECT ai.alias,ai.name AS ai_name,mp.*,
+                    mp.name AS profile_name,mp.model AS model_name FROM ai_players ai
+                JOIN model_profiles mp ON mp.id=ai.model_profile_id AND mp.ownership_issue IS NULL
+                JOIN users profile_owner ON profile_owner.id=mp.owner_user_id AND profile_owner.deleted_at IS NULL
+                LEFT JOIN answers a ON a.round_id=? AND a.alias=ai.alias
+                WHERE ai.room_id=? AND a.id IS NULL ORDER BY ai.alias''',(rnd['id'],room_id)).fetchall()
+            if target_alias is not None:
+                rows=[row for row in rows if row['alias']==target_alias.upper()]
+            match_number=room['match_number']
+            round_number=rnd['number']
+            question=rnd['question']
+            profiles=[dict(row) for row in rows]
+            history_by_alias={row['alias']:anonymous_player_history(db,room_id,row['alias'],round_number-1)
+                              for row in rows}
+            roster_revision=workflow_roster_revision(db,room_id)
+        results=[]
+        for profile in profiles:
+            alias=profile['alias']
+            history=history_by_alias.get(alias,'（此前没有已完成轮次。）')
+            context_revision=hashlib.sha256((question+'\\0'+history).encode('utf-8')).hexdigest()
+            def validate_context(db, alias=alias, profile=profile, history=history):
+                current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
+                if not current or current['match_number']!=match_number or current['status']!='open':
+                    return '房间或比赛场次已变化；未向服务商发送请求。'
+                current_rnd=current_round(db,current)
+                if (current_rnd['number']!=round_number or current_rnd['status']!='collecting' or
+                        current_rnd['question']!=question or round_deadline_expired(current_rnd)):
+                    return '当前轮次、问题或答题期限已变化；未向服务商发送请求。'
+                if workflow_roster_revision(db,room_id)!=roster_revision:
+                    return '参赛名单已变化；旧回答不能写入当前比赛。'
+                current_history=anonymous_player_history(db,room_id,alias,round_number-1)
+                if current_history!=history:
+                    return '该 AI 参赛席自己的历史回答已变化；旧回答不能写入当前比赛。'
+                binding=db.execute('SELECT model_profile_id FROM ai_players WHERE room_id=? AND alias=?',
+                                   (room_id,alias)).fetchone()
+                if not binding or binding['model_profile_id']!=profile['id']:
+                    return 'AI 参赛席的模型绑定已变化；未向服务商发送请求。'
+                if db.execute('SELECT 1 FROM answers WHERE round_id=? AND alias=?',
+                              (current_rnd['id'],alias)).fetchone():
+                    return '该 AI 参赛席已提交本轮回答，无需重复生成。'
+                return True
+            def apply_result(db, text, result, alias=alias):
+                answer=norm_text(text,12000)
+                current_rnd=current_round(db,db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone())
+                db.execute('INSERT INTO answers(round_id,alias,text,submitted_at) VALUES(?,?,?,?)',
+                           (current_rnd['id'],alias,answer,utcnow()))
+                log_event(db,room_id,round_number,'answer_submitted',alias,'模型 API 已自动提交回答（内容暂时隐藏）')
+                if is_complete(db,current_rnd,room_id):
+                    log_event(db,room_id,round_number,'round_revealed','系统','本轮全部回答已公开')
+            outcome=await execute_seat_model_task(
+                profile=profile,purpose='ai_answer',target_type='ai_player',
+                target_key=alias,target_label=f"{alias} · {profile.get('ai_name') or profile.get('name')}",
+                actor_id=actor_id,session_hash=session_hash,room_id=room_id,
+                match_number=match_number,round_number=round_number,
+                context_revision=context_revision,
+                messages=[
+                    {'role':'system','content':('你正在参加一场多人图灵测试。你是匿名参赛者，请自然、直接地回答裁判问题。'
+                     '不要提及模型、API、系统提示或你被要求扮演的身份；不要编造个人经历来冒充真实事实。')},
+                    {'role':'user','content':f'你此前的本场记录（只包含你自己的回答）：\\n{history}\\n\\n当前第 {round_number} 轮裁判问题：\\n\\n{question}\\n\\n请给出你的本轮回答。'}],
+                validate_context=validate_context,apply_result=apply_result,
+                workflow=workflow,retry_of=retry_of,idempotency_key=idempotency_key)
+            outcome.update({'alias':alias})
+            results.append(outcome)
+        generated=sum(x['status']=='generated' for x in results)
+        return {'generated':generated,'skipped':sum(x['status']=='skipped' for x in results),
+                'blocked':sum(x['status']=='blocked' for x in results),
+                'interrupted':sum(x['status']=='interrupted' for x in results),
+                'failed':[x for x in results if x['status']=='failed'],'results':results}
+
     def caller(request, db, mutate=False):
         if mutate:
             require_origin(request.headers)
