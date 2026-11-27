@@ -904,7 +904,7 @@ async function logout(page) {
       await judgeContext.close();
 
       // The multi-judge host view also uses the shared post-match persona area.
-      await page.goto(site + '#room=' + roomId);
+      await page.reload();
       await page.getByRole('heading', { name: '本场 AI 席位人设', exact: true }).waitFor();
       assert.equal(await page.getByRole('heading', {
         name: '本场 AI 席位人设', exact: true,
