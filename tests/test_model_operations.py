@@ -388,18 +388,14 @@ def test_batch_idempotency_is_per_seat_and_failed_replay_does_not_retry(operatio
     assert lab['state']['calls'] == 2, '失败任务的相同键重放不能再次请求模型'
 
     third = TestClient(lab['app'])
-    joined = post(third, '/api/register', {
+    with db_open(lab['path']) as db:
+        room_code = db.execute('SELECT code FROM rooms WHERE id=?', (lab['room_id'],)).fetchone()['code']
+    post(third, '/api/register', {
         'username': 'idempotency_changed_roster',
         'display_name': '新增参赛者',
         'password': 'idempotency-player-password',
-        'code': admin.get('/api/me').json()['rooms'][0]['invite_code']
-            if 'invite_code' in admin.get('/api/me').json()['rooms'][0]
-            else '',
-    }, expected=404) if False else None
-    # Change the frozen request input without changing the remaining judge target.
-    with db_open(lab['path']) as db:
-        db.execute("UPDATE members SET removed_at=? WHERE room_id=? AND user_id=(SELECT MIN(user_id) FROM members WHERE room_id=?)",
-                   ('2026-11-27T00:00:00+00:00', lab['room_id'], lab['room_id']))
+        'code': room_code,
+    })
     changed = admin.post(base + '/ai-judges/questions/generate', headers={
         'X-CSRF-Token': admin.get('/api/me').json()['user']['csrf'],
         'Idempotency-Key': 'judge-batch-once',
