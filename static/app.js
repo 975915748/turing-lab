@@ -639,7 +639,7 @@ function personaEditor(type,key,p,disabled){
  return '<details class="persona-editor" data-persona-editor data-key="'+esc(editorKey)+'" '+(expanded?'open':'')+'><summary>人设与回答策略 · '+esc(presetLabel)+' · '+(disabled?'已冻结 / 锁定':'可编辑')+'</summary><form data-form="seat-persona" data-seat-type="'+type+'" data-seat-key="'+esc(key)+'" class="stack spaced">'+
  '<label class="field">人设预设</label><select name="preset_id" '+(disabled?'disabled':'')+'>'+opts+'</select>'+
  '<p class="hint" data-preset-description>'+esc(selectedPreset[2])+'</p>'+
- '<div class="persona-custom-prompt" data-custom-prompt-field '+(customSelected?'':'hidden')+'><label class="field">自定义 System Prompt（最多 8000 字；选择自定义时必填）</label><textarea name="custom_system_prompt" maxlength="8000" '+(disabled?'disabled':'')+'>'+esc(p.custom_system_prompt||'')+'</textarea></div>'+
+ '<div class="persona-custom-prompt" data-custom-prompt-field '+(customSelected?'':'hidden')+'><label class="field">自定义 System Prompt（最多 8000 字；选择自定义时必填）</label><textarea name="custom_system_prompt" maxlength="8000" '+(customSelected?'required ':'')+(disabled?'disabled':'')+'>'+esc(p.custom_system_prompt||'')+'</textarea></div>'+
  '<div class="grid2"><div><label class="field">输出长度</label><select name="output_length" '+(disabled?'disabled':'')+'>'+lens+'</select></div><div><label class="field">'+(type==='participant'?'回答历史轮数':'出题历史轮数')+'（0～100）</label><input name="history_rounds" type="number" min="0" max="100" required value="'+esc(p.history_rounds??5)+'" '+(disabled?'disabled':'')+'></div></div>'+
  '<p class="tiny muted">短 / 中 / 长的 Token 上限分别为 256 / 768 / 2048，实际不超过绑定模型上限；最终裁判 JSON 始终沿用冻结模型上限。历史轮数只影响回答和出题；正式揭晓后会展示自定义提示词，请勿填写密钥。</p><button class="small" type="submit" '+(disabled?'disabled':'')+'>保存人设</button></form></details>';
 }
@@ -936,7 +936,7 @@ app.addEventListener('change',e=>{
   const customPrompt=personaPreset.form.elements.namedItem('custom_system_prompt');
   const customField=personaPreset.form.querySelector('[data-custom-prompt-field]');
   const customSelected=personaPreset.value==='custom';
-  if(customPrompt&&!customSelected)customPrompt.value='';
+  if(customPrompt){if(!customSelected)customPrompt.value='';customPrompt.required=customSelected;}
   if(customField)customField.hidden=!customSelected;
   const description=personaPreset.selectedOptions[0]?.dataset.description||'';
   const descriptionField=personaPreset.form.querySelector('[data-preset-description]');

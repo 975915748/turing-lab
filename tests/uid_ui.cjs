@@ -746,11 +746,13 @@ async function logout(page) {
         '非自定义预设不应展示可编辑的自定义提示词');
       await participantPersona.locator('[name="preset_id"]').selectOption('custom');
       assert.equal(await participantPersona.locator('[data-custom-prompt-field]').isVisible(), true);
+      assert.equal(await participantPersona.locator('[name="custom_system_prompt"]').isRequired(), true);
       await participantPersona.locator('[name="custom_system_prompt"]').fill('临时自定义风格');
       await participantPersona.locator('[name="preset_id"]').selectOption('analytical');
       assert.equal(await participantPersona.locator('[name="custom_system_prompt"]').inputValue(), '',
         '切换到预设人设时应清空不适用的自定义提示词');
       assert.equal(await participantPersona.locator('[data-custom-prompt-field]').isVisible(), false);
+      assert.equal(await participantPersona.locator('[name="custom_system_prompt"]').isRequired(), false);
       assert.equal(await participantPersona.locator('[data-preset-description]').innerText(),
         '表达结构清晰，重视逻辑关系、事实依据和具体细节；区分事实、推测与不确定之处。');
       await participantPersona.locator('[name="output_length"]').selectOption('medium');
