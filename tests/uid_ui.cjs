@@ -702,8 +702,8 @@ async function logout(page) {
       const addJudge = await context.request.post(site + base + '/ai-judges', {
         headers, data: { name: 'Persona Judge', model_profile_id: profile.id },
       });
-      assert.equal(addJudge.status(), 200, await addJudge.text());
       const judgeSeat = await addJudge.json();
+      assert.equal(addJudge.status(), 200, JSON.stringify(judgeSeat));
 
       const playerContexts = [];
       for (const username of ['persona_ui_human_a', 'persona_ui_human_b']) {
@@ -727,6 +727,12 @@ async function logout(page) {
         data: { code: room.invite_code, role: 'judge' },
       });
       assert.equal(judgeJoin.status(), 200, await judgeJoin.text());
+      const judgePage = await judgeContext.newPage();
+      await judgePage.goto(site + '#room=' + roomId);
+      await judgePage.locator('h1').waitFor();
+      assert.equal(await judgePage.getByRole('heading', {
+        name: '本场 AI 席位人设', exact: true,
+      }).count(), 0, '正式揭晓前真人裁判界面不得展示 AI 人设');
 
       await page.locator('[data-action="sync"]').click();
       await page.locator('[data-action="room-view"][data-view="admin"]').click();
@@ -844,8 +850,7 @@ async function logout(page) {
       const revealed = await context.request.post(site + base + '/reveal', { headers });
       assert.equal(revealed.status(), 200, await revealed.text());
 
-      const judgePage = await judgeContext.newPage();
-      await judgePage.goto(site + '#room=' + roomId);
+      await judgePage.reload();
       await judgePage.getByRole('heading', { name: '本场 AI 席位人设', exact: true }).waitFor();
       assert((await judgePage.locator('#app').innerText()).includes(customStyle));
       await judgePage.close();
