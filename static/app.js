@@ -604,11 +604,22 @@ function renderHumanJudgeAdminPanel(r){
  return '<section class="card compact"><div class="label-line"><h2>真人裁判管理</h2><span class="pill">'+judges.length+' 位真人裁判</span></div>'+
  '<div class="feed">'+judges.map(j=>'<div class="feed-item"><div class="label-line"><strong>'+esc(j.label)+'</strong><span class="pill '+(j.locked?'ok':'')+'">'+(j.locked?'✓ 已锁定':'未锁定')+'</span></div><div class="tiny muted">UID：'+esc(j.uid||'不可用')+'</div><button class="small spaced" data-action="copy-uid" data-uid="'+esc(j.uid||'')+'">复制 UID</button></div>').join('')+'</div></section>';
 }
+function personaEditor(type,key,p,disabled){
+ p=p||{};const presets=type==='participant'?[['default','默认风格'],['minimal','极简交流者'],['casual','日常闲聊者'],['analytical','严谨分析者'],['emotional','情绪表达者'],['custom','自定义']]:[['balanced','默认均衡'],['language_detail','语言细节'],['cross_round','跨轮一致性'],['custom','自定义']];
+ const lengths=[['default','沿用模型上限'],['short','短'],['medium','中'],['long','长']];
+ const opts=presets.map(x=>'<option value="'+x[0]+'" '+((p.preset_id||presets[0][0])===x[0]?'selected':'')+'>'+x[1]+'</option>').join('');
+ const lens=lengths.map(x=>'<option value="'+x[0]+'" '+((p.output_length||'default')===x[0]?'selected':'')+'>'+x[1]+'</option>').join('');
+ return '<details class="persona-editor"><summary>人设与回答策略 · '+esc(p.display_name||p.preset_id||'默认风格')+'</summary><form data-form="seat-persona" data-seat-type="'+type+'" data-seat-key="'+esc(key)+'" class="stack spaced">'+
+ '<label class="field">人设预设</label><select name="preset_id" '+(disabled?'disabled':'')+'>'+opts+'</select>'+
+ '<label class="field">自定义 System Prompt（最多 8000 字；选择自定义时必填）</label><textarea name="custom_system_prompt" maxlength="8000" '+(disabled?'disabled':'')+'>'+esc(p.custom_system_prompt||'')+'</textarea>'+
+ '<div class="grid2"><div><label class="field">输出长度</label><select name="output_length" '+(disabled?'disabled':'')+'>'+lens+'</select></div><div><label class="field">出题历史轮数（0～100）</label><input name="history_rounds" type="number" min="0" max="100" value="'+esc(p.history_rounds??5)+'" '+(disabled?'disabled':'')+'></div></div>'+
+ '<p class="tiny muted">历史轮数只影响回答和出题；最终裁判判断仍读取完整匿名资料。正式揭晓后会展示自定义提示词，请勿填写密钥。</p><button class="small" type="submit" '+(disabled?'disabled':'')+'>保存人设</button></form></details>';
+}
 function renderAIBindingControls(r){
  if(!r.ais?.length)return '';
  const disabled=r.status!=='open'||r.verdict_locked||(r.judges||[]).some(j=>j.locked);
  return '<div class="divider"></div><h3>AI 参赛席模型绑定</h3><p class="hint">更换或解除绑定不会删除 AI 席位及其匿名代号、历史回答。你只能选择自己拥有的配置；其他账号授权的现有绑定可以保留或解除。</p>'+
- r.ais.map(a=>'<form class="binding-row" data-form="bind-ai-player-model" data-alias="'+esc(a.alias)+'"><div><strong>'+esc(a.alias)+' · '+esc(a.name)+'</strong><div class="tiny muted">当前：'+esc(bindingLabel(a))+'</div></div><select name="model_profile_id">'+modelBindingOptions(a)+'</select><button class="small" type="submit" '+(disabled?'disabled':'')+'>更新绑定</button></form>').join('');
+ r.ais.map(a=>'<form class="binding-row" data-form="bind-ai-player-model" data-alias="'+esc(a.alias)+'"><div><strong>'+esc(a.alias)+' · '+esc(a.name)+'</strong><div class="tiny muted">当前：'+esc(bindingLabel(a))+'</div></div><select name="model_profile_id" '+(disabled?'disabled':'')+'>'+modelBindingOptions(a)+'</select><button class="small" type="submit" '+(disabled?'disabled':'')+'>更新绑定</button></form>'+personaEditor('participant',a.alias,a.persona,disabled)).join('');
 }
 function aiQuestionFeedback(result){
  const details=(result.results||[]).filter(x=>x.status==='failed'||x.status==='skipped'||x.status==='blocked').map(x=>{
@@ -636,7 +647,7 @@ function judgeAdminPanel(r){
  '<p class="hint">AI 裁判可绑定你自己的个人模型配置自动出题和判断，也可手动转录。绑定后，本房间房主和全站管理员可通过比赛操作触发该配置的模型调用，服务商可能按实际调用量计费。绑定他人配置时，只能看到当前席位的必要摘要，不能读取或编辑对方的个人配置。</p>';
  if(judges.length){
   html+=judges.map(j=>'<div class="feed-item"><div class="label-line"><strong>'+esc(j.label)+'</strong><span class="pill '+(j.locked?'ok':'')+'">'+(j.locked?'✓ 已锁定':'未锁定')+'</span></div>'+
-   '<div class="tiny muted">当前绑定：'+esc(bindingLabel(j))+'</div><form data-form="bind-ai-judge-model" data-id="'+j.id+'" class="binding-row"><select name="model_profile_id">'+modelBindingOptions(j)+'</select><button class="small" type="submit" '+(canEdit?'':'disabled')+'>更新绑定</button></form></div>').join('');
+   '<div class="tiny muted">当前绑定：'+esc(bindingLabel(j))+'</div><form data-form="bind-ai-judge-model" data-id="'+j.id+'" class="binding-row"><select name="model_profile_id" '+(canEdit?'':'disabled')+'>'+modelBindingOptions(j)+'</select><button class="small" type="submit" '+(canEdit?'':'disabled')+'>更新绑定</button></form>'+personaEditor('judge',j.id,j.persona,!canEdit)+'</div>').join('');
  }else html+=D('尚无 AI 裁判席。');
  if(r.model_request_limit!==null&&r.model_request_limit!==undefined&&
     Number(r.model_request_count)>=Number(r.model_request_limit)){
@@ -1186,6 +1197,13 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
    // The user may have typed another message while the authoritative refresh was pending.
    if(state.room?.status==='open'&&state.chatDraft===requestDraft){state.chatDraft='';const chatInput=$('[data-form="chat"] [name="text"]');if(chatInput)chatInput.value='';}
    toast('消息已发送');return;
+  }
+  if(type==='seat-persona'){
+   const payload={preset_id:data.preset_id,custom_system_prompt:data.custom_system_prompt||'',output_length:data.output_length,history_rounds:Number(data.history_rounds)};
+   if(!Number.isSafeInteger(payload.history_rounds)||payload.history_rounds<0||payload.history_rounds>100)throw new Error('出题历史轮数必须为 0～100 的整数');
+   if(form.dataset.seatType==='participant')await api('/api/rooms/'+id+'/ai/'+encodeURIComponent(form.dataset.seatKey)+'/persona',{method:'PUT',body:payload});
+   else await api('/api/rooms/'+id+'/ai-judges/'+Number(form.dataset.seatKey)+'/persona',{method:'PUT',body:payload});
+   await refreshRoom();toast('席位人设已保存');return;
   }
   if(type==='bind-ai-player-model'||type==='bind-ai-judge-model'){
    const keep=data.model_profile_id==='__unchanged__';
