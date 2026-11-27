@@ -364,6 +364,16 @@ def init_db(path):
         CREATE UNIQUE INDEX IF NOT EXISTS idx_model_operations_active_profile_test
             ON model_operation_tasks(profile_owner_user_id,profile_id)
             WHERE purpose='connection_test' AND state IN ('queued','requesting');
+        CREATE TABLE IF NOT EXISTS model_operation_idempotency (
+            scope_key TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            request_fingerprint TEXT NOT NULL,
+            operation_id INTEGER NOT NULL REFERENCES model_operation_tasks(id) ON DELETE CASCADE,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(scope_key,idempotency_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_model_operation_idempotency_operation
+            ON model_operation_idempotency(operation_id);
         ''')
         if 'model_profile_id' not in {x['name'] for x in db.execute('PRAGMA table_info(ai_players)')}:
             db.execute('ALTER TABLE ai_players ADD COLUMN model_profile_id INTEGER REFERENCES model_profiles(id) ON DELETE SET NULL')
@@ -1134,6 +1144,11 @@ def clear_match_records(db, room_id):
 def check_match_number(room, number):
     if str(room['match_number']) != str(number):
         raise HTTPException(409, '房间已开始另一场比赛，请刷新后重试。')
+
+
+def check_round_number(room, number):
+    if str(room['current_round']) != str(number):
+        raise HTTPException(409, '房间当前轮次已变化，请刷新后重试。')
 
 
 def name_change_status(db, user_id):
@@ -1927,6 +1942,7 @@ def create_app(db_path=None):
                 outcome=None
                 outcome_reason=''
                 room_id=None
+                cancel_reason=''
                 with connection(immediate=True) as db:
                     task=db.execute('SELECT * FROM model_operation_tasks WHERE id=?',(operation_id,)).fetchone()
                     if not task or task['state']!='queued':
@@ -2058,46 +2074,57 @@ def create_app(db_path=None):
                                     profile, trigger_user_id, room_id=None, match_number=None,
                                     round_number=None, context_revision=None, retry_of=None,
                                     idempotency_key=None, workflow_id=None, workflow_generation=None):
-        normalized_key=(str(idempotency_key)[:128] if idempotency_key else None)
-        if normalized_key:
-            if room_id is None:
-                existing=db.execute("""SELECT id,state FROM model_operation_tasks
-                    WHERE purpose='connection_test' AND profile_owner_user_id=? AND profile_id=?
-                      AND target_type=? AND target_key=? AND idempotency_key=?
-                    ORDER BY id DESC LIMIT 1""",
-                    (profile['owner_user_id'],profile['id'],target_type,str(target_key),normalized_key)).fetchone()
-            else:
-                existing=db.execute('''SELECT id,state FROM model_operation_tasks
-                    WHERE room_id=? AND match_number=? AND round_number=? AND purpose=?
-                      AND target_type=? AND target_key=? AND idempotency_key=?
-                    ORDER BY id DESC LIMIT 1''',
-                    (room_id,match_number,round_number,purpose,target_type,str(target_key),normalized_key)).fetchone()
-            if existing:
-                return int(existing['id']),False,existing['state']
-        if room_id is None:
-            active=db.execute("""SELECT id,state FROM model_operation_tasks
-                WHERE purpose='connection_test' AND profile_owner_user_id=? AND profile_id=?
+        raw_key=str(idempotency_key or '').strip()
+        if len(raw_key)>128: raise HTTPException(422,'Idempotency-Key 长度不能超过 128 个字符。')
+        supplied_key=raw_key or None
+        profile_hash=model_profile_snapshot_hash(profile)
+        scope_key=json.dumps([int(trigger_user_id),purpose,target_type,str(target_key),
+            int(room_id) if room_id is not None else None,
+            int(match_number) if match_number is not None else None,
+            int(round_number) if round_number is not None else None],
+            ensure_ascii=False,separators=(',',':'))
+        persona_snapshot_id=profile.get('_persona_snapshot_id')
+        fingerprint_payload=[int(profile['id']),profile_hash,context_revision,
+            int(retry_of) if retry_of is not None else None,workflow_id,workflow_generation,persona_snapshot_id]
+        request_fingerprint=hashlib.sha256(json.dumps(
+            fingerprint_payload,ensure_ascii=False,separators=(',',':')).encode('utf-8')).hexdigest()
+        if supplied_key:
+            previous=db.execute("""SELECT i.request_fingerprint,t.id,t.state
+                FROM model_operation_idempotency i JOIN model_operation_tasks t ON t.id=i.operation_id
+                WHERE i.scope_key=? AND i.idempotency_key=?""",(scope_key,supplied_key)).fetchone()
+            if previous:
+                if previous['request_fingerprint']!=request_fingerprint:
+                    raise HTTPException(409,'同一 Idempotency-Key 已用于不同的模型请求输入；请为新的尝试生成新键。')
+                return int(previous['id']),False,previous['state'],True
+        if purpose=='connection_test':
+            active=db.execute("""SELECT id,state,profile_id,profile_snapshot_hash,context_revision,retry_of
+                FROM model_operation_tasks WHERE purpose='connection_test'
+                  AND profile_owner_user_id=? AND profile_id=?
                   AND state IN ('queued','requesting') ORDER BY id DESC LIMIT 1""",
                 (profile['owner_user_id'],profile['id'])).fetchone()
         else:
-            active=db.execute("""SELECT id,state FROM model_operation_tasks
-                WHERE room_id=? AND match_number=? AND round_number=? AND purpose=?
+            active=db.execute("""SELECT id,state,profile_id,profile_snapshot_hash,context_revision,retry_of
+                FROM model_operation_tasks WHERE room_id=? AND match_number=? AND round_number=? AND purpose=?
                   AND target_type=? AND target_key=? AND state IN ('queued','requesting')
                 ORDER BY id DESC LIMIT 1""",
                 (room_id,match_number,round_number,purpose,target_type,str(target_key))).fetchone()
         if active:
-            return int(active['id']),False,active['state']
+            same_input=(active['profile_id']==profile['id'] and active['profile_snapshot_hash']==profile_hash
+                and active['context_revision']==context_revision and active['retry_of']==retry_of)
+            if supplied_key and same_input:
+                db.execute('''INSERT OR IGNORE INTO model_operation_idempotency(
+                    scope_key,idempotency_key,request_fingerprint,operation_id,created_at)
+                    VALUES(?,?,?,?,?)''',(scope_key,supplied_key,request_fingerprint,int(active['id']),operation_timestamp()))
+            return int(active['id']),False,active['state'],False
         now=operation_timestamp()
         profile_name=profile.get('profile_name') or profile.get('name') or '个人模型配置'
         model_name=profile.get('model_name') or profile.get('model') or '未知模型'
-        persona_snapshot_id=profile.get('_persona_snapshot_id')
         credential_version_hash=(hashlib.sha256(profile['api_key_encrypted'].encode('utf-8')).hexdigest()
-                                  if persona_snapshot_id is not None and profile.get('api_key_encrypted') else None)
+            if persona_snapshot_id is not None and profile.get('api_key_encrypted') else None)
         previous_credential=db.execute('''SELECT credential_version_hash FROM model_operation_tasks
             WHERE persona_snapshot_id=? AND credential_version_hash IS NOT NULL ORDER BY id DESC LIMIT 1''',
             (persona_snapshot_id,)).fetchone() if persona_snapshot_id is not None else None
-        credential_version_changed=bool(previous_credential and
-            previous_credential['credential_version_hash']!=credential_version_hash)
+        credential_version_changed=bool(previous_credential and previous_credential['credential_version_hash']!=credential_version_hash)
         cur=db.execute('''INSERT INTO model_operation_tasks(
             room_id,match_number,round_number,purpose,target_type,target_key,target_label,
             profile_id,profile_owner_user_id,trigger_user_id,profile_name,model_name,
@@ -2107,10 +2134,33 @@ def create_app(db_path=None):
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'queued',?,?,?,?,?,?,?,?,?)''',
             (room_id,match_number,round_number,purpose,target_type,str(target_key),target_label,
              profile['id'],profile['owner_user_id'],trigger_user_id,profile_name,model_name,
-             model_profile_snapshot_hash(profile),context_revision,retry_of,workflow_id,
-             workflow_generation,persona_snapshot_id,credential_version_hash,
-             1 if credential_version_changed else 0,normalized_key or secrets.token_urlsafe(18),now,now))
-        return int(cur.lastrowid),True,'queued'
+             profile_hash,context_revision,retry_of,workflow_id,workflow_generation,
+             persona_snapshot_id,credential_version_hash,1 if credential_version_changed else 0,
+             (supplied_key or secrets.token_urlsafe(18))[:128],now,now))
+        operation_id=int(cur.lastrowid)
+        if supplied_key:
+            db.execute('''INSERT INTO model_operation_idempotency(
+                scope_key,idempotency_key,request_fingerprint,operation_id,created_at)
+                VALUES(?,?,?,?,?)''',(scope_key,supplied_key,request_fingerprint,operation_id,now))
+        return operation_id,True,'queued',False
+
+    def replay_model_operation_result(db, operation_id, profile):
+        task=db.execute('SELECT * FROM model_operation_tasks WHERE id=?',(operation_id,)).fetchone()
+        if not task: raise HTTPException(409,'原模型任务已不存在；请确认当前比赛状态后重新操作。')
+        if task['state']=='failed':
+            raise HTTPException(502,task['error_message'] or '原模型请求失败；如需再次尝试，请发起新的操作。')
+        if task['state'] in ('queued','requesting'):
+            raise HTTPException(409,'该幂等请求仍在处理中；请查看模型调用记录，不要发起新的模型请求。')
+        if task['state'] in ('blocked','stale','interrupted'):
+            raise HTTPException(409,task['error_message'] or '原模型任务未完成；如需再次尝试，请发起新的操作。')
+        if task['state']!='completed' or not task['request_succeeded']:
+            raise HTTPException(502,task['error_message'] or '原模型请求未成功；如需再次尝试，请发起新的操作。')
+        usage={}
+        if task['usage_known']:
+            usage={'prompt_tokens':task['prompt_tokens'],'completion_tokens':task['completion_tokens'],'total_tokens':task['total_tokens']}
+        return {'ok':True,'state':task['state'],'replayed':True,'operation_id':int(task['id']),
+                'model':profile.get('model_name') or profile.get('model'),'preview':'',
+                'latency_ms':task['duration_ms'],'usage':usage}
 
     def finish_model_operation_in_db(db, operation_id, state, *, error=None, result_applied=False):
         now=operation_timestamp()
@@ -2202,7 +2252,7 @@ def create_app(db_path=None):
                                       match_number, round_number, context_revision,
                                       messages, validate_context, apply_result,
                                       workflow=None, retry_of=None, idempotency_key=None,
-                                      request_max_tokens=None):
+                                      request_max_tokens=None, prequeued_task=None):
         workflow_id=workflow['id'] if workflow else None
         workflow_generation=workflow['execution_generation'] if workflow else None
         previous=None
@@ -2258,31 +2308,44 @@ def create_app(db_path=None):
                     return {'status':'skipped','reason':str(current)}
             attempt_key=(f'workflow:{workflow_id}:{purpose}:{target_type}:{target_key}:{attempt_no}'
                          if workflow else idempotency_key)
-            with connection(immediate=True) as task_db:
-                if workflow is None:
-                    active_workflow=task_db.execute("""SELECT 1 FROM round_workflows
-                        WHERE room_id=? AND match_number=? AND round_number=?
-                          AND state IN ('queued','generating_questions','starting_round','generating_answers',
-                                        'waiting_input','blocked','failed') LIMIT 1""",
-                        (room_id,match_number,round_number)).fetchone()
-                    if active_workflow:
-                        return {'status':'skipped','reason':'本轮已进入服务端工作流，独立模型任务不得绕过工作流。'}
-                operation_id,created,active_state=create_model_operation_task(
-                    task_db,purpose=purpose,target_type=target_type,target_key=target_key,
-                    target_label=target_label,profile=profile,trigger_user_id=actor_id,
-                    room_id=room_id,match_number=match_number,round_number=round_number,
-                    context_revision=context_revision,retry_of=parent_id,
-                    idempotency_key=attempt_key,workflow_id=workflow_id,
-                    workflow_generation=workflow_generation)
-            if not created and active_state=='completed':
+            if attempt==0 and prequeued_task is not None:
+                operation_id=prequeued_task['operation_id'];created=prequeued_task['created']
+                active_state=prequeued_task['state'];replayed=prequeued_task['replayed']
+            else:
+                with connection(immediate=True) as task_db:
+                    if workflow is None:
+                        active_workflow=task_db.execute("""SELECT 1 FROM round_workflows
+                            WHERE room_id=? AND match_number=? AND round_number=?
+                              AND state IN ('queued','generating_questions','starting_round','generating_answers',
+                                            'waiting_input','blocked','failed') LIMIT 1""",
+                            (room_id,match_number,round_number)).fetchone()
+                        if active_workflow:
+                            return {'status':'skipped','reason':'本轮已进入服务端工作流，独立模型任务不得绕过工作流。'}
+                    operation_id,created,active_state,replayed=create_model_operation_task(
+                        task_db,purpose=purpose,target_type=target_type,target_key=target_key,
+                        target_label=target_label,profile=profile,trigger_user_id=actor_id,
+                        room_id=room_id,match_number=match_number,round_number=round_number,
+                        context_revision=context_revision,retry_of=parent_id,
+                        idempotency_key=attempt_key,workflow_id=workflow_id,
+                        workflow_generation=workflow_generation)
+            if not created:
                 with connection() as db:
-                    row=db.execute('SELECT result_applied FROM model_operation_tasks WHERE id=?',
+                    row=db.execute('SELECT state,result_applied,error_message FROM model_operation_tasks WHERE id=?',
                                    (operation_id,)).fetchone()
-                if row and row['result_applied']:
-                    return {'status':'generated','operation_id':operation_id,'already_applied':True}
-            if not created and active_state!='queued':
-                return {'status':active_state,'operation_id':operation_id,
-                        'reason':'该席位已有相同幂等键或进行中的模型任务。'}
+                current_state=row['state'] if row else active_state
+                error=(row['error_message'] if row else None) or '该席位已有相同幂等键或进行中的模型任务。'
+                if replayed and current_state=='completed' and row and row['result_applied']:
+                    return {'status':'generated','operation_id':operation_id,'already_applied':True,'replayed':True}
+                if replayed and current_state=='failed':
+                    return {'status':'failed','operation_id':operation_id,'error':error,'replayed':True}
+                if replayed and current_state=='blocked':
+                    return {'status':'blocked','operation_id':operation_id,'error':error,'replayed':True}
+                if replayed and current_state=='interrupted':
+                    return {'status':'interrupted','operation_id':operation_id,'error':error,'replayed':True}
+                if replayed and current_state in ('stale','completed'):
+                    return {'status':'skipped','operation_id':operation_id,'reason':error,'replayed':True}
+                return {'status':current_state,'operation_id':operation_id,'reason':error,
+                        **({'replayed':True} if replayed else {})}
             try:
                 key=decrypt_api_key(profile['api_key_encrypted'])
                 def preflight():
@@ -2427,12 +2490,36 @@ def create_app(db_path=None):
                                     'status':'skipped','reason':reasons.get(status,'绑定的模型配置不可用。')})
                     continue
                 profiles.append(profile)
-        async def generate_one(profile):
-            judge_id=profile['judge_id']
+        for profile in profiles:
             persona=profile.get('_persona') or {}
             with connection() as history_db:
                 seat_history=anonymous_match_packet(history_db,room_id,round_number-1,persona.get('history_rounds',5))
-            context_revision=hashlib.sha256(
+            profile['_task_history']=seat_history
+            profile['_task_context_revision']=hashlib.sha256(
+                (str(round_number)+'|'+','.join(roster)+'|'+seat_history).encode('utf-8')).hexdigest()
+        if profiles and workflow is None:
+            with connection(immediate=True) as task_db:
+                active=task_db.execute("""SELECT 1 FROM round_workflows
+                    WHERE room_id=? AND match_number=? AND round_number=?
+                      AND state IN ('queued','generating_questions','starting_round','generating_answers',
+                                    'waiting_input','blocked','failed') LIMIT 1""",
+                    (room_id,match_number,round_number)).fetchone()
+                if active: raise HTTPException(409,'本轮已有服务端工作流，请使用工作流恢复或取消入口。')
+                for profile in profiles:
+                    operation_id,created,active_state,replayed=create_model_operation_task(
+                        task_db,purpose='judge_question',target_type='ai_judge',
+                        target_key=profile['judge_id'],target_label=profile['label'],
+                        profile=profile,trigger_user_id=actor_id,room_id=room_id,
+                        match_number=match_number,round_number=round_number,
+                        context_revision=profile['_task_context_revision'],retry_of=retry_of,
+                        idempotency_key=idempotency_key)
+                    profile['_prequeued_task']={'operation_id':operation_id,'created':created,
+                        'state':active_state,'replayed':replayed}
+        async def generate_one(profile):
+            judge_id=profile['judge_id']
+            persona=profile.get('_persona') or {}
+            seat_history=profile.get('_task_history')
+            context_revision=profile.get('_task_context_revision') or hashlib.sha256(
                 (str(round_number)+'|'+','.join(roster)+'|'+seat_history).encode('utf-8')).hexdigest()
             def validate_context(db, judge_id=judge_id, profile=profile):
                 current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
@@ -2471,7 +2558,8 @@ def create_app(db_path=None):
                      '请根据已有信息提出一个适合所有参赛者回答的全新问题。'}],
                 validate_context=validate_context,apply_result=apply_result,
                 workflow=workflow,retry_of=retry_of,idempotency_key=idempotency_key,
-                request_max_tokens=output_token_limit(persona,profile.get('max_tokens',2048)))
+                request_max_tokens=output_token_limit(persona,profile.get('max_tokens',2048)),
+                prequeued_task=profile.get('_prequeued_task'))
             outcome.update({'judge_id':judge_id,'label':profile['label']})
             return outcome
 
@@ -2481,7 +2569,7 @@ def create_app(db_path=None):
         return {'generated':generated,'skipped':sum(x['status']=='skipped' for x in results),
                 'blocked':sum(x['status']=='blocked' for x in results),
                 'interrupted':sum(x['status']=='interrupted' for x in results),
-                'failed':[x for x in results if x['status']=='failed'],'results':results}
+                'failed':[x for x in results if x['status']=='failed' and not x.get('replayed')],'results':results}
 
     async def generate_ai_answers_shared(room_id, actor_id, session_hash=None,
                                          target_alias=None, retry_of=None,
@@ -2547,11 +2635,33 @@ def create_app(db_path=None):
             history_by_alias={profile['alias']:anonymous_player_history(db,room_id,profile['alias'],round_number-1,
                 (profile.get('_persona') or {}).get('history_rounds',5)) for profile in profiles}
             roster_revision=participant_roster_revision(db,room_id)
+            for profile in profiles:
+                history=history_by_alias.get(profile['alias'],'（此前没有已完成轮次。）')
+                profile['_task_context_revision']=hashlib.sha256((question+'\0'+history).encode('utf-8')).hexdigest()
+            if profiles and workflow is None:
+                active=db.execute("""SELECT 1 FROM round_workflows
+                    WHERE room_id=? AND match_number=? AND round_number=?
+                      AND state IN ('queued','generating_questions','starting_round','generating_answers',
+                                    'waiting_input','blocked','failed') LIMIT 1""",
+                    (room_id,match_number,round_number)).fetchone()
+                if active:
+                    raise HTTPException(409,'本轮已有服务端工作流，请使用工作流恢复或取消入口。')
+                for profile in profiles:
+                    operation_id,created,active_state,replayed=create_model_operation_task(
+                        db,purpose='ai_answer',target_type='ai_player',target_key=profile['alias'],
+                        target_label=f"{profile['alias']} · {profile.get('ai_name') or profile.get('name')}",
+                        profile=profile,trigger_user_id=actor_id,room_id=room_id,
+                        match_number=match_number,round_number=round_number,
+                        context_revision=profile['_task_context_revision'],retry_of=retry_of,
+                        idempotency_key=idempotency_key)
+                    profile['_prequeued_task']={'operation_id':operation_id,'created':created,
+                        'state':active_state,'replayed':replayed}
+
         async def generate_one(profile):
             alias=profile['alias']
             history=history_by_alias.get(alias,'（此前没有已完成轮次。）')
             persona=profile.get('_persona') or {}
-            context_revision=hashlib.sha256((question+'\0'+history).encode('utf-8')).hexdigest()
+            context_revision=profile.get('_task_context_revision') or hashlib.sha256((question+'\0'+history).encode('utf-8')).hexdigest()
             def validate_context(db, alias=alias, profile=profile, history=history):
                 current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
                 if not current or current['match_number']!=match_number or current['status']!='open':
@@ -2593,7 +2703,8 @@ def create_app(db_path=None):
                     {'role':'user','content':f'你此前的本场记录（只包含你自己的回答）：\n{history}\n\n当前第 {round_number} 轮裁判问题：\n\n{question}\n\n请给出你的本轮回答。'}],
                 validate_context=validate_context,apply_result=apply_result,
                 workflow=workflow,retry_of=retry_of,idempotency_key=idempotency_key,
-                request_max_tokens=output_token_limit(persona,profile.get('max_tokens',2048)))
+                request_max_tokens=output_token_limit(persona,profile.get('max_tokens',2048)),
+                prequeued_task=profile.get('_prequeued_task'))
             outcome.update({'alias':alias})
             return outcome
 
@@ -2603,7 +2714,7 @@ def create_app(db_path=None):
         return {'generated':generated,'skipped':sum(x['status']=='skipped' for x in results),
                 'blocked':sum(x['status']=='blocked' for x in results),
                 'interrupted':sum(x['status']=='interrupted' for x in results),
-                'failed':[x for x in results if x['status']=='failed'],'results':results}
+                'failed':[x for x in results if x['status']=='failed' and not x.get('replayed')],'results':results}
 
     def workflow_input_revision(db, room_id, round_number):
         rows=round_question_rows(db,room_id,round_number)
@@ -2911,10 +3022,13 @@ def create_app(db_path=None):
         if mutate:
             check_csrf(request, u)
             match = re.match(r'^/api/rooms/(\d+)(?:/|$)', request.url.path)
-            if match and 'x-match-number' in request.headers:
+            if match and ('x-match-number' in request.headers or 'x-round-number' in request.headers):
                 room = db.execute('SELECT * FROM rooms WHERE id=?', (int(match[1]),)).fetchone()
                 if room:
-                    check_match_number(room, request.headers['x-match-number'])
+                    if 'x-match-number' in request.headers:
+                        check_match_number(room, request.headers['x-match-number'])
+                    if 'x-round-number' in request.headers:
+                        check_round_number(room, request.headers['x-round-number'])
             if match:
                 room=db.execute('SELECT status FROM rooms WHERE id=?',(int(match[1]),)).fetchone()
                 if room and room['status']=='closed' and request.method!='DELETE' and not request.url.path.endswith(('/leave','/restart')):
@@ -3056,11 +3170,13 @@ def create_app(db_path=None):
         with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             profile=require_owned_model_profile(db,profile_id,u['id'])
-            operation_id,created,_=create_model_operation_task(
+            operation_id,created,_,replayed=create_model_operation_task(
                 db,purpose='connection_test',target_type='model_profile',
                 target_key=profile_id,target_label=profile['name'],profile=profile,
                 trigger_user_id=u['id'],idempotency_key=request.headers.get('Idempotency-Key'))
             if not created:
+                if replayed:
+                    return replay_model_operation_result(db,operation_id,profile)
                 raise HTTPException(409,'该模型配置已有连接测试正在进行。')
         actor_id=u['id']
         session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
@@ -3617,11 +3733,13 @@ def create_app(db_path=None):
             u=caller(request,db,mutate=True)
             require_room_manager(db,room_id,u)
             profile=require_owned_model_profile(db,profile_id,u['id'])
-            operation_id,created,_=create_model_operation_task(
+            operation_id,created,_,replayed=create_model_operation_task(
                 db,purpose='connection_test',target_type='model_profile',
                 target_key=profile_id,target_label=profile['name'],profile=profile,
                 trigger_user_id=u['id'],idempotency_key=request.headers.get('Idempotency-Key'))
             if not created:
+                if replayed:
+                    return replay_model_operation_result(db,operation_id,profile)
                 raise HTTPException(409,'该模型配置已有连接测试正在进行。')
         actor_id=u['id']
         session_hash=hashlib.sha256(request.cookies.get(COOKIE,'').encode()).hexdigest()
@@ -3800,7 +3918,7 @@ def create_app(db_path=None):
     @app.post('/api/rooms/{room_id}/ai-judges/questions/generate')
     async def generate_ai_judge_questions(room_id:int,request:Request,
                                           target_judge_id:Optional[int]=Query(default=None,ge=1)):
-        with connection() as db:
+        with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
             if room['status']!='open' or room['verdict_locked_at']:
@@ -4388,7 +4506,7 @@ def create_app(db_path=None):
     @app.post('/api/rooms/{room_id}/ai/answers/generate')
     async def generate_ai_answers(room_id:int,request:Request,
                                   target_alias:Optional[str]=Query(default=None,min_length=1,max_length=8)):
-        with connection() as db:
+        with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
             if room['status']!='open':
@@ -4698,21 +4816,30 @@ def create_app(db_path=None):
                 profiles.append(profile)
         retry_of=getattr(request.state,'model_operation_retry_of',None)
         queued_profiles=[]
-        for profile in profiles:
-            with connection(immediate=True) as task_db:
-                operation_id,created,active_state=create_model_operation_task(
+        with connection(immediate=True) as task_db:
+            for profile in profiles:
+                operation_id,created,active_state,replayed=create_model_operation_task(
                     task_db,purpose='judge_verdict',target_type='ai_judge',
                     target_key=profile['judge_id'],target_label=profile['label'],
                     profile=profile,trigger_user_id=actor_id,room_id=room_id,
                     match_number=match_number,round_number=room['current_round'],
                     context_revision=evidence_revision,retry_of=retry_of,
                     idempotency_key=request.headers.get('Idempotency-Key'))
-            if created:
-                profile['_operation_id']=operation_id
-                queued_profiles.append(profile)
-            else:
-                results.append({'judge_id':profile['judge_id'],'status':active_state,
-                                'reason':'该席位已有进行中的模型任务。'})
+                if created:
+                    profile['_operation_id']=operation_id
+                    queued_profiles.append(profile)
+                else:
+                    task=task_db.execute('SELECT state,error_message,result_applied FROM model_operation_tasks WHERE id=?',
+                                         (operation_id,)).fetchone()
+                    current_state=task['state'] if task else active_state
+                    error=(task['error_message'] if task else None) or '该席位已有进行中的模型任务。'
+                    if replayed and current_state=='failed':
+                        results.append({'judge_id':profile['judge_id'],'status':'failed','error':error,'replayed':True})
+                    elif replayed and current_state=='completed' and task and task['result_applied']:
+                        results.append({'judge_id':profile['judge_id'],'status':'generated','replayed':True})
+                    else:
+                        results.append({'judge_id':profile['judge_id'],'status':current_state,
+                                        'reason':error,**({'replayed':True} if replayed else {})})
         profiles=queued_profiles
         if profiles:
             await app.state.hub.notify(room_id,'model_operation_updated')
@@ -4813,7 +4940,7 @@ def create_app(db_path=None):
         return {'generated':sum(x['status']=='generated' for x in results),
                 'skipped':sum(x['status']=='skipped' for x in results),
                 'blocked':sum(x['status']=='blocked' for x in results),
-                'failed':[x for x in results if x['status']=='failed'],'results':results}
+                'failed':[x for x in results if x['status']=='failed' and not x.get('replayed')],'results':results}
 
 
     @app.post('/api/rooms/{room_id}/model-operations/{operation_id}/retry')

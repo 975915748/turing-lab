@@ -158,7 +158,7 @@ def legacy_database(path):
 def snapshot(db):
     # Compare pre-existing application data, excluding later schema additions.
     schema_additions = (
-        'model_profiles', 'chat_messages', 'model_operation_tasks',
+        'model_profiles', 'chat_messages', 'model_operation_tasks', 'model_operation_idempotency',
         'account_points', 'match_settlements', 'points_ledger',
         'friend_requests', 'friendships', 'friend_notes',
         'dm_conversations', 'dm_messages', 'dm_read_positions', 'api_rate_limits',

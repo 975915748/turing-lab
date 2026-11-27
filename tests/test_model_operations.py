@@ -701,3 +701,259 @@ def test_startup_marks_unfinished_tasks_interrupted_without_replaying(operation_
     room = restarted_admin.get(base).json()
     assert room['model_operations'][0]['state'] == 'interrupted'
     assert lab['state']['calls'] == calls_before_restart
+
+
+def post_with_idempotency_key(client, path, key, body=None, expected=200):
+    me = client.get('/api/me')
+    headers = {'X-CSRF-Token': me.json()['user']['csrf'], 'Idempotency-Key': key}
+    response = client.post(path, json=body or {}, headers=headers)
+    assert response.status_code == expected, (path, response.status_code, response.text)
+    return response.json() if response.content else {}
+
+
+def test_connection_test_same_key_concurrent_replay_does_not_duplicate(operation_lab):
+    lab = operation_lab
+    admin, profile_id = lab['admin'], lab['profile_id']
+    path = f'/api/me/models/{profile_id}/test'
+    key = 'connection-test-concurrent'
+    block = {'started': threading.Event(), 'release': threading.Event()}
+    lab['state']['block'] = block
+    second_admin = TestClient(lab['app'])
+    post(second_admin, '/api/login', {'username': 'ops_admin', 'password': 'ops-admin-password'})
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(post_with_idempotency_key, admin, path, key)
+        try:
+            assert block['started'].wait(5), '首个同键请求没有进入模型调用阶段'
+            me = second_admin.get('/api/me').json()
+            response = second_admin.post(path, headers={
+                'X-CSRF-Token': me['user']['csrf'],
+                'Idempotency-Key': key,
+            })
+            assert response.status_code == 409, response.text
+            assert lab['state']['calls'] == 1, '同键并发请求不能重复调用服务商'
+        finally:
+            block['release'].set()
+        first = future.result(timeout=15)
+
+    lab['state']['block'] = None
+    assert first['ok'] is True
+    replay = post_with_idempotency_key(admin, path, key)
+    assert replay['replayed'] is True
+    assert replay['state'] == 'completed'
+    assert lab['state']['calls'] == 1, '并发结束后的终态重放不能再次调用服务商'
+
+
+def test_connection_test_idempotency_replays_completion_and_rejects_changed_input(operation_lab):
+    lab = operation_lab
+    admin, profile_id = lab['admin'], lab['profile_id']
+    path = f'/api/me/models/{profile_id}/test'
+
+    first = post_with_idempotency_key(admin, path, 'connection-test-once')
+    assert first['ok'] is True
+    assert lab['state']['calls'] == 1
+
+    replay = post_with_idempotency_key(admin, path, 'connection-test-once')
+    assert replay['replayed'] is True
+    assert replay['state'] == 'completed'
+    assert replay['ok'] is True
+    assert lab['state']['calls'] == 1, '终态幂等重放不能再次调用服务商'
+
+    updated = dict(lab['profile_body'])
+    updated['model'] = 'ops-test-model-changed'
+    updated['api_key'] = ''
+    put(admin, f'/api/me/models/{profile_id}', updated)
+    conflict = admin.post(path, headers={
+        'X-CSRF-Token': admin.get('/api/me').json()['user']['csrf'],
+        'Idempotency-Key': 'connection-test-once',
+    })
+    assert conflict.status_code == 409, conflict.text
+    assert lab['state']['calls'] == 1
+
+    new_attempt = post_with_idempotency_key(admin, path, 'connection-test-second-attempt')
+    assert new_attempt['ok'] is True
+    assert lab['state']['calls'] == 2
+
+
+def test_batch_idempotency_is_per_seat_and_failed_replay_does_not_retry(operation_lab):
+    lab = operation_lab
+    admin, base, profile_id = lab['admin'], lab['base'], lab['profile_id']
+    add_ai_judge(admin, base, '幂等批次裁判 A', profile_id)
+    add_ai_judge(admin, base, '幂等批次裁判 B', profile_id)
+    lab['state']['fail_next'] = 1
+
+    first = post_with_idempotency_key(admin, base + '/ai-judges/questions/generate', 'judge-batch-once')
+    assert first['generated'] == 1
+    assert len(first['failed']) == 1
+    assert lab['state']['calls'] == 2, '同一批次的相同键必须按席位分别创建任务'
+
+    replay = post_with_idempotency_key(admin, base + '/ai-judges/questions/generate', 'judge-batch-once')
+    assert replay['generated'] == 0
+    assert replay['failed'] == []
+    assert len(replay['results']) == 1
+    assert replay['results'][0]['status'] == 'failed'
+    assert replay['results'][0]['replayed'] is True
+    assert lab['state']['calls'] == 2, '失败任务的相同键重放不能再次请求模型'
+
+    updated = dict(lab['profile_body'])
+    updated['temperature'] = 0.5
+    updated['api_key'] = ''
+    put(admin, f'/api/me/models/{profile_id}', updated)
+    changed = admin.post(base + '/ai-judges/questions/generate', headers={
+        'X-CSRF-Token': admin.get('/api/me').json()['user']['csrf'],
+        'Idempotency-Key': 'judge-batch-once',
+    })
+    assert changed.status_code == 409, changed.text
+    assert lab['state']['calls'] == 2
+
+    retried = post_with_idempotency_key(admin, base + '/ai-judges/questions/generate', 'judge-batch-new-attempt')
+    assert retried['generated'] == 1
+    assert lab['state']['calls'] == 3
+
+    # The same key in another room is a separate logical operation.
+    second_room = post(admin, '/api/rooms', {'title': '另一房间幂等隔离'})
+    second_base = f"/api/rooms/{second_room['room_id']}"
+    for index in range(2):
+        player = TestClient(lab['app'])
+        post(player, '/api/register', {
+            'username': f'idempotency_room_two_{index}',
+            'display_name': f'第二房间参赛者 {index}',
+            'password': 'idempotency-player-password',
+            'code': second_room['code'],
+        })
+    add_ai_judge(admin, second_base, '另一房间裁判', profile_id)
+    isolated = post_with_idempotency_key(
+        admin, second_base + '/ai-judges/questions/generate', 'judge-batch-once')
+    assert isolated['generated'] == 1
+    assert lab['state']['calls'] == 4
+
+
+def test_batch_question_idempotency_conflict_rolls_back_all_queued_seats(operation_lab):
+    lab = operation_lab
+    admin, base, profile_id = lab['admin'], lab['base'], lab['profile_id']
+    judge_a = add_ai_judge(admin, base, '原先未绑定模型的裁判 A', None)
+    judge_b = add_ai_judge(admin, base, '先失败并留下幂等键的裁判 B', profile_id)
+    key = 'judge-batch-atomic-conflict'
+    lab['state']['fail_next'] = 1
+
+    first = post_with_idempotency_key(admin, base + '/ai-judges/questions/generate', key)
+    assert first['generated'] == 0
+    assert first['skipped'] == 1
+    assert len(first['failed']) == 1
+    assert first['failed'][0]['judge_id'] == judge_b['id']
+    assert lab['state']['calls'] == 1
+
+    with db_open(lab['path']) as db:
+        rows = db.execute("""SELECT target_key,state FROM model_operation_tasks
+            WHERE room_id=? AND purpose='judge_question' ORDER BY id""",
+            (lab['room_id'],)).fetchall()
+    assert [(row['target_key'], row['state']) for row in rows] == [
+        (str(judge_b['id']), 'failed')
+    ]
+
+    put(admin, f"{base}/ai-judges/{judge_a['id']}/model", {
+        'model_profile_id': profile_id,
+    })
+    updated = dict(lab['profile_body'])
+    updated['temperature'] = 0.5
+    updated['api_key'] = ''
+    put(admin, f"/api/me/models/{profile_id}", updated)
+
+    conflict = admin.post(base + '/ai-judges/questions/generate', headers={
+        'X-CSRF-Token': admin.get('/api/me').json()['user']['csrf'],
+        'Idempotency-Key': key,
+    })
+    assert conflict.status_code == 409, conflict.text
+    assert lab['state']['calls'] == 1
+
+    # The conflict on B must roll back the task tentatively created for A.
+    with db_open(lab['path']) as db:
+        rows = db.execute("""SELECT target_key,state FROM model_operation_tasks
+            WHERE room_id=? AND purpose='judge_question' ORDER BY id""",
+            (lab['room_id'],)).fetchall()
+        idempotency_count = db.execute("""SELECT COUNT(*) FROM model_operation_idempotency
+            WHERE idempotency_key=?""", (key,)).fetchone()[0]
+    assert [(row['target_key'], row['state']) for row in rows] == [
+        (str(judge_b['id']), 'failed')
+    ]
+    assert idempotency_count == 1
+
+    # A fresh key can now queue and execute both seats; no orphan queued task blocks A.
+    retried = post_with_idempotency_key(
+        admin, base + '/ai-judges/questions/generate', 'judge-batch-atomic-retry')
+    assert retried['generated'] == 2
+    assert retried['failed'] == []
+    assert lab['state']['calls'] == 3
+    with db_open(lab['path']) as db:
+        rows = db.execute("""SELECT target_key,state FROM model_operation_tasks
+            WHERE room_id=? AND purpose='judge_question' ORDER BY id""",
+            (lab['room_id'],)).fetchall()
+    by_target = {}
+    for row in rows:
+        by_target.setdefault(row['target_key'], []).append(row['state'])
+    assert by_target == {
+        str(judge_a['id']): ['completed'],
+        str(judge_b['id']): ['failed', 'completed'],
+    }
+
+
+def test_idempotency_key_is_scoped_to_triggering_account(operation_lab):
+    lab = operation_lab
+    admin, base, profile_id = lab['admin'], lab['base'], lab['profile_id']
+    judge = add_ai_judge(admin, base, '跨账号幂等裁判', profile_id)
+    key = 'same-room-same-target-different-account'
+
+    first = post_with_idempotency_key(admin, base + '/ai-judges/questions/generate', key)
+    assert first['generated'] == 1
+    assert lab['state']['calls'] == 1
+
+    # Remove only the generated question so the second authorized manager has
+    # the same logical target and input; the completed task and its key remain.
+    with db_open(lab['path']) as db:
+        db.execute('DELETE FROM ai_judge_questions WHERE room_id=? AND round_number=1 AND ai_judge_id=?',
+                   (lab['room_id'], judge['id']))
+
+    other = TestClient(lab['app'])
+    post(other, '/api/register', {
+        'username': 'idempotency_other_admin',
+        'display_name': '幂等隔离管理员',
+        'password': 'idempotency-other-admin-password',
+    })
+    with db_open(lab['path']) as db:
+        user = db.execute('SELECT id FROM users WHERE username=?',
+                          ('idempotency_other_admin',)).fetchone()
+        db.execute('UPDATE users SET is_admin=1 WHERE id=?', (user['id'],))
+
+    second = post_with_idempotency_key(other, base + '/ai-judges/questions/generate', key)
+    assert second['generated'] == 1, '另一授权账号使用同一键应创建自己的逻辑操作'
+    assert lab['state']['calls'] == 2, '不同触发账号不能重放另一账号的终态任务'
+
+    with db_open(lab['path']) as db:
+        rows = db.execute("""SELECT trigger_user_id,idempotency_key,state
+            FROM model_operation_tasks
+            WHERE room_id=? AND match_number=1 AND round_number=1
+              AND purpose='judge_question' AND target_type='ai_judge' AND target_key=?
+            ORDER BY id""", (lab['room_id'], str(judge['id']))).fetchall()
+    assert len(rows) == 2
+    assert rows[0]['trigger_user_id'] != rows[1]['trigger_user_id']
+    assert [row['idempotency_key'] for row in rows] == [key, key]
+
+
+def test_room_mutations_reject_stale_round_preconditions(operation_lab):
+    lab = operation_lab
+    admin, base = lab['admin'], lab['base']
+    room = admin.get(base).json()
+    headers = {
+        'X-CSRF-Token': admin.get('/api/me').json()['user']['csrf'],
+        'X-Match-Number': str(room['match_number']),
+        'X-Round-Number': str(room['current_round'] + 1),
+    }
+    start = admin.post(base + '/start', headers=headers)
+    assert start.status_code == 409
+    assert '轮次已变化' in start.json()['detail']
+    next_round = admin.post(base + '/next', headers=headers)
+    assert next_round.status_code == 409
+    assert '轮次已变化' in next_round.json()['detail']
+    after = admin.get(base).json()
+    assert after['current_round'] == room['current_round']
+    assert after['rounds'][0]['status'] == 'draft'
