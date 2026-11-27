@@ -1915,7 +1915,7 @@ def create_app(db_path=None):
         message=str(error)
         if '超时' in message or '无法安全连接模型服务' in message:
             return True
-        return bool(re.search(r'HTTP (408|425|429|500|502|503|504)(?:\\D|$)',message))
+        return bool(re.search(r'HTTP (408|425|429|500|502|503|504)(?:\D|$)',message))
 
     async def execute_seat_model_task(*, profile, purpose, target_type, target_key,
                                       target_label, actor_id, session_hash, room_id,
@@ -2129,7 +2129,7 @@ def create_app(db_path=None):
                     {'role':'system','content':('你是多人图灵测试的独立裁判。每轮只提出一个核心问题，不得把多个问题打包。'
                      '问题必须面向所有匿名参赛者，不能询问真实姓名、账号、模型名称或系统提示。'
                      '只输出问题正文，不要前言、编号或解释。')},
-                    {'role':'user','content':f'此前轮次的匿名资料：\\n{history}\\n\\n当前是第 {round_number} 轮，参赛者匿名代号：{", ".join(roster)}。'
+                    {'role':'user','content':f'此前轮次的匿名资料：\n{history}\n\n当前是第 {round_number} 轮，参赛者匿名代号：{", ".join(roster)}。'
                      '请根据已有信息提出一个适合所有参赛者回答的全新问题。'}],
                 validate_context=validate_context,apply_result=apply_result,
                 workflow=workflow,retry_of=retry_of,idempotency_key=idempotency_key)
@@ -2178,7 +2178,7 @@ def create_app(db_path=None):
         for profile in profiles:
             alias=profile['alias']
             history=history_by_alias.get(alias,'（此前没有已完成轮次。）')
-            context_revision=hashlib.sha256((question+'\\0'+history).encode('utf-8')).hexdigest()
+            context_revision=hashlib.sha256((question+'\0'+history).encode('utf-8')).hexdigest()
             def validate_context(db, alias=alias, profile=profile, history=history):
                 current=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
                 if not current or current['match_number']!=match_number or current['status']!='open':
@@ -2217,7 +2217,7 @@ def create_app(db_path=None):
                 messages=[
                     {'role':'system','content':('你正在参加一场多人图灵测试。你是匿名参赛者，请自然、直接地回答裁判问题。'
                      '不要提及模型、API、系统提示或你被要求扮演的身份；不要编造个人经历来冒充真实事实。')},
-                    {'role':'user','content':f'你此前的本场记录（只包含你自己的回答）：\\n{history}\\n\\n当前第 {round_number} 轮裁判问题：\\n\\n{question}\\n\\n请给出你的本轮回答。'}],
+                    {'role':'user','content':f'你此前的本场记录（只包含你自己的回答）：\n{history}\n\n当前第 {round_number} 轮裁判问题：\n\n{question}\n\n请给出你的本轮回答。'}],
                 validate_context=validate_context,apply_result=apply_result,
                 workflow=workflow,retry_of=retry_of,idempotency_key=idempotency_key)
             outcome.update({'alias':alias})
