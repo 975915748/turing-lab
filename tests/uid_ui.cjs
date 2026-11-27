@@ -996,8 +996,7 @@ async function logout(page) {
 
       await page.goto(site + '#room=' + externalRoom.room_id);
       // The completed-round reminder is modal and must be dismissed before navigation.
-      const judgeNoticeClose = page.locator('#judgeNoticeClose');
-      if (await judgeNoticeClose.isVisible()) await judgeNoticeClose.click();
+      await page.locator('#judgeNotice').evaluate(dialog => { if (dialog.open) dialog.close(); });
       // The owner deliberately remains on the participant-management tab.
       await page.locator('[data-action="room-view"][data-view="admin"]').click();
       await page.getByRole('heading', { name: '本场 AI 席位人设', exact: true }).waitFor();
