@@ -949,7 +949,7 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
    const uid=form.dataset.uid;
    if(confirm(`确定修改 ${uid} 的密码并使其所有登录会话失效？`)){
     const result=await api(`/api/admin/users/${uid}/password`,{method:'POST',body:{password:data.password,confirm:true}});
-    if(result.signed_out){state.me=null;state.room=null;state.roomId=null;renderAuth();}else await loadAccounts();toast('密码已修改，原登录会话已失效');
+    if(result.signed_out){state.me=null;state.room=null;state.roomId=null;clearPersonalModelState();renderAuth();}else await loadAccounts();toast('密码已修改，原登录会话已失效');
    }
    return;
   }
