@@ -455,6 +455,75 @@ def test_batch_idempotency_is_per_seat_and_failed_replay_does_not_retry(operatio
     assert lab['state']['calls'] == 4
 
 
+def test_batch_question_idempotency_conflict_rolls_back_all_queued_seats(operation_lab):
+    lab = operation_lab
+    admin, base, profile_id = lab['admin'], lab['base'], lab['profile_id']
+    judge_a = add_ai_judge(admin, base, '原先未绑定模型的裁判 A', None)
+    judge_b = add_ai_judge(admin, base, '先失败并留下幂等键的裁判 B', profile_id)
+    key = 'judge-batch-atomic-conflict'
+    lab['state']['fail_next'] = 1
+
+    first = post_with_idempotency_key(admin, base + '/ai-judges/questions/generate', key)
+    assert first['generated'] == 0
+    assert first['skipped'] == 1
+    assert len(first['failed']) == 1
+    assert first['failed'][0]['judge_id'] == judge_b['id']
+    assert lab['state']['calls'] == 1
+
+    with db_open(lab['path']) as db:
+        rows = db.execute("""SELECT target_key,state FROM model_operation_tasks
+            WHERE room_id=? AND purpose='judge_question' ORDER BY id""",
+            (lab['room_id'],)).fetchall()
+    assert [(row['target_key'], row['state']) for row in rows] == [
+        (str(judge_b['id']), 'failed')
+    ]
+
+    put(admin, f"{base}/ai-judges/{judge_a['id']}/model", {
+        'model_profile_id': profile_id,
+    })
+    updated = dict(lab['profile_body'])
+    updated['temperature'] = 0.5
+    updated['api_key'] = ''
+    put(admin, f"/api/me/models/{profile_id}", updated)
+
+    conflict = admin.post(base + '/ai-judges/questions/generate', headers={
+        'X-CSRF-Token': admin.get('/api/me').json()['user']['csrf'],
+        'Idempotency-Key': key,
+    })
+    assert conflict.status_code == 409, conflict.text
+    assert lab['state']['calls'] == 1
+
+    # The conflict on B must roll back the task tentatively created for A.
+    with db_open(lab['path']) as db:
+        rows = db.execute("""SELECT target_key,state FROM model_operation_tasks
+            WHERE room_id=? AND purpose='judge_question' ORDER BY id""",
+            (lab['room_id'],)).fetchall()
+        idempotency_count = db.execute("""SELECT COUNT(*) FROM model_operation_idempotency
+            WHERE idempotency_key=?""", (key,)).fetchone()[0]
+    assert [(row['target_key'], row['state']) for row in rows] == [
+        (str(judge_b['id']), 'failed')
+    ]
+    assert idempotency_count == 1
+
+    # A fresh key can now queue and execute both seats; no orphan queued task blocks A.
+    retried = post_with_idempotency_key(
+        admin, base + '/ai-judges/questions/generate', 'judge-batch-atomic-retry')
+    assert retried['generated'] == 2
+    assert retried['failed'] == []
+    assert lab['state']['calls'] == 3
+    with db_open(lab['path']) as db:
+        rows = db.execute("""SELECT target_key,state FROM model_operation_tasks
+            WHERE room_id=? AND purpose='judge_question' ORDER BY id""",
+            (lab['room_id'],)).fetchall()
+    by_target = {}
+    for row in rows:
+        by_target.setdefault(row['target_key'], []).append(row['state'])
+    assert by_target == {
+        str(judge_a['id']): ['completed'],
+        str(judge_b['id']): ['failed', 'completed'],
+    }
+
+
 def test_idempotency_key_is_scoped_to_triggering_account(operation_lab):
     lab = operation_lab
     admin, base, profile_id = lab['admin'], lab['base'], lab['profile_id']

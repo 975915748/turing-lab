@@ -2506,7 +2506,7 @@ def create_app(db_path=None):
     @app.post('/api/rooms/{room_id}/ai-judges/questions/generate')
     async def generate_ai_judge_questions(room_id:int,request:Request,
                                           target_judge_id:Optional[int]=Query(default=None,ge=1)):
-        with connection() as db:
+        with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
             if room['status']!='open' or room['verdict_locked_at']:
@@ -2559,14 +2559,13 @@ def create_app(db_path=None):
             retry_of=getattr(request.state,'model_operation_retry_of',None)
             queued_profiles=[]
             for profile in profiles:
-                with connection(immediate=True) as db:
-                    operation_id,created,active_state,replayed=create_model_operation_task(
-                        db,purpose='judge_question',target_type='ai_judge',
-                        target_key=profile['judge_id'],target_label=profile['label'],
-                        profile=profile,trigger_user_id=actor_id,room_id=room_id,
-                        match_number=match_number,round_number=round_number,
-                        context_revision=context_revision,retry_of=retry_of,
-                        idempotency_key=request.headers.get('Idempotency-Key'))
+                operation_id,created,active_state,replayed=create_model_operation_task(
+                    db,purpose='judge_question',target_type='ai_judge',
+                    target_key=profile['judge_id'],target_label=profile['label'],
+                    profile=profile,trigger_user_id=actor_id,room_id=room_id,
+                    match_number=match_number,round_number=round_number,
+                    context_revision=context_revision,retry_of=retry_of,
+                    idempotency_key=request.headers.get('Idempotency-Key'))
                 if created:
                     profile['_operation_id']=operation_id
                     queued_profiles.append(profile)
@@ -2908,7 +2907,7 @@ def create_app(db_path=None):
     @app.post('/api/rooms/{room_id}/ai/answers/generate')
     async def generate_ai_answers(room_id:int,request:Request,
                                   target_alias:Optional[str]=Query(default=None,min_length=1,max_length=8)):
-        with connection() as db:
+        with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
             if room['status']!='open':
@@ -2938,15 +2937,14 @@ def create_app(db_path=None):
             for profile in profiles:
                 context_revision=hashlib.sha256(
                     (question+'\0'+history_by_alias.get(profile['alias'],'')).encode('utf-8')).hexdigest()
-                with connection(immediate=True) as task_db:
-                    operation_id,created,active_state,replayed=create_model_operation_task(
-                        task_db,purpose='ai_answer',target_type='ai_player',
-                        target_key=profile['alias'],
-                        target_label=f"{profile['alias']} · {profile.get('ai_name') or profile.get('name')}",
-                        profile=profile,trigger_user_id=actor_id,room_id=room_id,
-                        match_number=match_number,round_number=round_number,
-                        context_revision=context_revision,retry_of=retry_of,
-                        idempotency_key=request.headers.get('Idempotency-Key'))
+                operation_id,created,active_state,replayed=create_model_operation_task(
+                    db,purpose='ai_answer',target_type='ai_player',
+                    target_key=profile['alias'],
+                    target_label=f"{profile['alias']} · {profile.get('ai_name') or profile.get('name')}",
+                    profile=profile,trigger_user_id=actor_id,room_id=room_id,
+                    match_number=match_number,round_number=round_number,
+                    context_revision=context_revision,retry_of=retry_of,
+                    idempotency_key=request.headers.get('Idempotency-Key'))
                 if created:
                     profile['_operation_id']=operation_id
                     queued_profiles.append(profile)
@@ -3271,7 +3269,7 @@ def create_app(db_path=None):
     @app.post('/api/rooms/{room_id}/ai-judges/verdicts/generate')
     async def generate_ai_judge_verdicts(room_id:int,request:Request,
                                          target_judge_id:Optional[int]=Query(default=None,ge=1)):
-        with connection() as db:
+        with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
             if room['status']!='open' or room['verdict_locked_at']:
@@ -3297,14 +3295,13 @@ def create_app(db_path=None):
             retry_of=getattr(request.state,'model_operation_retry_of',None)
             queued_profiles=[]
             for profile in profiles:
-                with connection(immediate=True) as task_db:
-                    operation_id,created,active_state,replayed=create_model_operation_task(
-                        task_db,purpose='judge_verdict',target_type='ai_judge',
-                        target_key=profile['judge_id'],target_label=profile['label'],
-                        profile=profile,trigger_user_id=actor_id,room_id=room_id,
-                        match_number=match_number,round_number=room['current_round'],
-                        context_revision=evidence_revision,retry_of=retry_of,
-                        idempotency_key=request.headers.get('Idempotency-Key'))
+                operation_id,created,active_state,replayed=create_model_operation_task(
+                    db,purpose='judge_verdict',target_type='ai_judge',
+                    target_key=profile['judge_id'],target_label=profile['label'],
+                    profile=profile,trigger_user_id=actor_id,room_id=room_id,
+                    match_number=match_number,round_number=room['current_round'],
+                    context_revision=evidence_revision,retry_of=retry_of,
+                    idempotency_key=request.headers.get('Idempotency-Key'))
                 if created:
                     profile['_operation_id']=operation_id
                     queued_profiles.append(profile)
