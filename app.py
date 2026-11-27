@@ -3595,11 +3595,17 @@ def create_app(db_path=None):
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
             check_match_number(room,body.match_number)
+            if room['status']!='open' or room['verdict_locked_at']:
+                raise HTTPException(409,'房间已关闭或比赛已结束，不能修改本轮状态。')
             if number!=room['current_round']:
                 raise HTTPException(409,'只能结束当前轮次。')
             rnd=current_round(db,room,number)
             if rnd['timeout_ended_at']:
-                return {'ok':True,'already_finished':True,'timed_out':timed_out_aliases(db,rnd['id'])}
+                return {'ok':True,'already_finished':True,'timeout':True,
+                        'revealed':True,'timed_out':timed_out_aliases(db,rnd['id'])}
+            if rnd['status']=='revealed':
+                return {'ok':True,'already_finished':True,'timeout':False,
+                        'revealed':True,'timed_out':timed_out_aliases(db,rnd['id'])}
             if rnd['status']!='collecting':
                 raise HTTPException(409,'当前轮次不在收集回答阶段，不能执行超时结束。')
             if not rnd['deadline_at']:
