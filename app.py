@@ -1046,7 +1046,7 @@ def workflow_roster_revision(db, room_id):
 
 
 def round_question_rows(db, room_id, round_number):
-    return db.execute('''SELECT q.text,q.created_at,j.label,'human' AS kind,q.id
+    rows=db.execute('''SELECT q.text,q.created_at,j.label,'human' AS kind,q.id
         FROM judge_questions q JOIN room_judges j
         ON j.room_id=q.room_id AND j.user_id=q.judge_user_id
         WHERE q.room_id=? AND q.round_number=?
@@ -1055,6 +1055,14 @@ def round_question_rows(db, room_id, round_number):
         FROM ai_judge_questions q JOIN ai_judges j ON j.id=q.ai_judge_id
         WHERE q.room_id=? AND q.round_number=?
         ORDER BY 2,4,5''',(room_id,round_number,room_id,round_number)).fetchall()
+    if rows:
+        return rows
+    legacy=db.execute('SELECT question,created_at FROM rounds WHERE room_id=? AND number=?',
+                      (room_id,round_number)).fetchone()
+    if legacy and legacy['question']:
+        return [{'text':legacy['question'],'created_at':legacy['created_at'],
+                 'label':'管理员','kind':'legacy','id':0}]
+    return []
 
 
 def combined_round_question(rows):
