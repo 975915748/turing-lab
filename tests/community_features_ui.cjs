@@ -160,7 +160,7 @@ async function createRoom(page, title, isPublic) {
     await visible(judge.locator('#communityQuestionBank'));
     await judge.locator('[data-community-question-category]').selectOption('logic');
     await judge.locator('[data-community-question-search]').fill('专家');
-    const fillButton = judge.locator('#communityQuestionResults [data-community-action="question-fill"]');
+    const fillButton = judge.locator('#communityQuestionResults [data-community-action="question-fill"]').first();
     await visible(fillButton);
     await fillButton.click();
     const draftArea = questionForm.locator('textarea[name="text"]');
