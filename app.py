@@ -3598,7 +3598,7 @@ def create_app(db_path=None):
                 title,code,judge,created_at,owner_id,public_listing,public_description
             ) VALUES(?,?,?,?,?,?,?)''',
                 (norm_text(body.title,80),code,norm_text(body.judge,40),utcnow(),u['id'],
-                 1 if body.public_listing else 0,norm_text(body.public_description,160)))
+                 1 if body.public_listing else 0,(norm_text(body.public_description,160) if body.public_description.strip() else '')))
             room_id=cur.lastrowid
             db.execute('INSERT INTO rounds(room_id,number,created_at) VALUES(?,?,?)',(room_id,1,utcnow()))
             log_event(db,room_id,1,'created','管理员','创建比赛')
@@ -3718,7 +3718,7 @@ def create_app(db_path=None):
                 raise HTTPException(409,'首轮问题已提交，不能修改公开状态。')
             if body.public_listing:
                 validate_discovery_room(db,room)
-            description=norm_text(body.public_description,160)
+            description=norm_text(body.public_description,160) if body.public_description.strip() else ''
             db.execute('UPDATE rooms SET public_listing=?,public_description=? WHERE id=?',
                        (1 if body.public_listing else 0,description,room_id))
             log_event(db,room_id,1,'visibility_updated','房主','更新公开大厅展示设置')
