@@ -4052,15 +4052,20 @@ def create_app(db_path=None):
 
     @app.delete('/api/rooms/{room_id}')
     async def delete_room(room_id:int,body:MatchActionData,request:Request):
+        invite_notifications={}
         with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
             check_match_number(room,body.match_number)
             name_lock_user_ids=room_lock_user_ids(db,room_id)
+            # Notify invite participants before the room's cascading delete removes the rows.
+            invite_notifications=cancel_room_invites(db,room_id)
             db.execute('DELETE FROM rooms WHERE id=?',(room_id,))
         app.state.hub.typing.pop(room_id,None)
         await app.state.hub.notify(room_id,'room_deleted')
         await app.state.hub.notify_accounts(name_lock_user_ids, {'type':'name_lock_updated'})
+        if invite_notifications:
+            await notify_room_invite_updates(app.state.hub,invite_notifications)
         return {'ok':True}
 
     @app.delete('/api/rooms/{room_id}/records')
