@@ -185,6 +185,8 @@ def ensure_app_schema(db, now):
             ON room_invites(invitee_user_id,status,created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_room_invites_outgoing
             ON room_invites(inviter_user_id,status,created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_room_invites_room_status
+            ON room_invites(room_id,status,created_at DESC);
         """
     )
     room_columns = {row["name"] for row in db.execute("PRAGMA table_info(rooms)")}
