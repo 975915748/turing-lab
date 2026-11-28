@@ -155,3 +155,33 @@ main{min-height:calc(100vh - 170px);padding:32px 0 44px}.card{background:var(--p
  #dmPanel .form-actions button{width:100%}
  .roster-person [data-action="friend-from-room"]{font-size:11px;padding:5px 7px}
 }
+
+
+/* Friend invitations, public room discovery and judge question bank */
+#communityLobbyPanels{display:flex;flex-direction:column;gap:14px}
+.community-list{display:flex;flex-direction:column;gap:9px}
+.community-public-list{display:flex;flex-direction:column;gap:12px}
+.community-public-room{display:flex;flex-direction:column;gap:9px;min-width:0}
+.community-public-room h3{margin:3px 0 0;overflow-wrap:anywhere}
+.community-public-description{white-space:pre-wrap;overflow-wrap:anywhere;margin:0}
+.community-tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:3px}
+.community-friend-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin:10px 0}
+.community-friend-list .check-row{display:flex;align-items:center;gap:8px;min-width:0;padding:8px;border:1px solid var(--line);border-radius:9px;overflow-wrap:anywhere}
+.community-friend-list .check-row input{flex:0 0 auto}
+.community-room-controls{margin-top:12px;min-width:0}
+.community-room-controls form{display:flex;flex-direction:column;gap:8px}
+.community-room-controls textarea{width:100%;min-width:0;resize:vertical}
+.community-room-invite-notice{display:flex;align-items:center;justify-content:space-between;gap:14px;margin:0 0 14px}
+.community-room-invite-notice p{margin:4px 0 0}
+.community-question-bank{display:flex;flex-direction:column;gap:10px;margin:10px 0;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--pane)}
+.community-question-filters{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr);gap:8px}
+.community-question-filters input,.community-question-filters select{width:100%;min-width:0}
+.community-question-item{min-width:0}
+.community-question-text{white-space:pre-wrap;overflow-wrap:anywhere;margin:8px 0;line-height:1.65}
+#communityQuestionResults{display:flex;flex-direction:column;gap:8px;max-height:420px;overflow:auto}
+@media(max-width:740px){
+ .community-friend-list{grid-template-columns:1fr}
+ .community-room-invite-notice{align-items:stretch;flex-direction:column}
+ .community-question-filters{grid-template-columns:1fr}
+ #communityQuestionResults{max-height:55vh}
+}
