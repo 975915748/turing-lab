@@ -1355,8 +1355,12 @@ def public_room_listing_item(db, room, user):
 
 def cancel_pending_room_invites(db, room_id, now=None):
     now = now or utcnow()
+    rows=db.execute('''SELECT inviter_user_id,invitee_user_id FROM room_invites
+        WHERE room_id=? AND status='pending' ''',(room_id,)).fetchall()
     db.execute('''UPDATE room_invites SET status='cancelled',responded_at=COALESCE(responded_at,?),
         updated_at=? WHERE room_id=? AND status='pending' ''', (now, now, room_id))
+    return sorted({int(value) for row in rows
+                   for value in (row['inviter_user_id'],row['invitee_user_id'])})
 
 
 def consume_api_rate_limit(db, user_id, action, limit, window_seconds):
@@ -1487,8 +1491,9 @@ def start_round_record(db, room, rnd, question):
         raise HTTPException(409,'本轮状态已变化，请刷新后重试。')
     db.execute('UPDATE rooms SET match_started_at=COALESCE(match_started_at,?) WHERE id=?',
                (started_at,room['id']))
-    cancel_pending_room_invites(db, room['id'], started_at)
-    return {'started_at':started_at,'duration_seconds':duration,'deadline_at':deadline}
+    cancelled_invite_user_ids=cancel_pending_room_invites(db, room['id'], started_at)
+    return {'started_at':started_at,'duration_seconds':duration,'deadline_at':deadline,
+            'cancelled_invite_user_ids':cancelled_invite_user_ids}
 
 
 def inspect_round_start(db, room):
@@ -3151,6 +3156,7 @@ def create_app(db_path=None):
                 update_workflow_state(workflow,'starting_round',keep_worker=True)
                 start_error=None
                 name_lock_user_ids=[]
+                cancelled_invite_user_ids=[]
                 with connection(immediate=True) as db:
                     current=db.execute('SELECT * FROM round_workflows WHERE id=?',(workflow_id,)).fetchone()
                     if (not current or current['execution_generation']!=workflow['execution_generation'] or
@@ -3166,7 +3172,8 @@ def create_app(db_path=None):
                         if validation['reason']:
                             start_error=validation['reason']
                         else:
-                            start_round_record(db,room,rnd,validation['question'])
+                            start_result=start_round_record(db,room,rnd,validation['question'])
+                            cancelled_invite_user_ids=start_result.get('cancelled_invite_user_ids',[])
                             name_lock_user_ids=room_lock_user_ids(db,room_id)
                             log_event(db,room_id,rnd['number'],'judge_question','独立裁判组','主持人已开启统一作答')
                 if start_error:
@@ -3181,6 +3188,7 @@ def create_app(db_path=None):
                     return
                 await app.state.hub.notify(room_id,'judge_question')
                 await app.state.hub.notify_accounts(name_lock_user_ids, {'type':'name_lock_updated'})
+                await app.state.hub.notify_accounts(cancelled_invite_user_ids, {'type':'room_invite_updated'})
 
             update_workflow_state(workflow,'generating_answers',keep_worker=True)
             answer_result=await generate_ai_answers_shared(
@@ -3968,12 +3976,14 @@ def create_app(db_path=None):
                 raise HTTPException(403,'仅房主或管理员可使用管理台退赛。')
             closed=room['status']=='closed'
             affected=[u['id']]
+            invite_user_ids=[]
             # Departing a terminal room never rewrites its roster, ballots or settlement.
             if room['status']=='open':
                 now=utcnow()
                 if room['owner_id']==u['id'] and not withdraw_only:
                     closed=True
                     affected=room_lock_user_ids(db,room_id)
+                    invite_user_ids=cancel_pending_room_invites(db,room_id,now)
                     db.execute("UPDATE rooms SET status='closed',closed_at=? WHERE id=?",(now,room_id))
                     db.execute("""UPDATE model_operation_tasks SET state='stale',error_message=?,
                         finished_at=?,updated_at=?,result_applied=0 WHERE room_id=? AND match_number=?
@@ -4001,6 +4011,7 @@ def create_app(db_path=None):
         app.state.hub.typing.pop(room_id,None)
         await app.state.hub.notify(room_id,'room_closed' if closed else 'member_left')
         await app.state.hub.notify_accounts(affected,{'type':'name_lock_updated'})
+        await app.state.hub.notify_accounts(invite_user_ids,{'type':'room_invite_updated'})
         return {'ok':True,'closed':closed,'match_number':room['match_number']}
 
     @app.post('/api/rooms/{room_id}/leave')
@@ -4659,11 +4670,13 @@ def create_app(db_path=None):
                 validation=inspect_round_start(db,room)
                 if validation['reason']:
                     raise HTTPException(409,validation['reason'])
-            start_round_record(db,room,rnd,validation['question'])
+            start_result=start_round_record(db,room,rnd,validation['question'])
+            cancelled_invite_user_ids=start_result.get('cancelled_invite_user_ids',[])
             name_lock_user_ids=room_lock_user_ids(db,room_id)
             log_event(db,room_id,rnd['number'],'judge_question','独立裁判组','主持人已开启统一作答')
         await app.state.hub.notify(room_id,'judge_question')
         await app.state.hub.notify_accounts(name_lock_user_ids, {'type':'name_lock_updated'})
+        await app.state.hub.notify_accounts(cancelled_invite_user_ids, {'type':'room_invite_updated'})
         return {'ok':True}
     @app.post('/api/rooms/{room_id}/ai')
     async def add_ai(room_id:int,body:AIData,request:Request):
@@ -4858,7 +4871,8 @@ def create_app(db_path=None):
                 name_lock_user_ids=[]
                 queued_for_workflow=True
             else:
-                start_round_record(db,room,rnd,question)
+                start_result=start_round_record(db,room,rnd,question)
+                cancelled_invite_user_ids=start_result.get('cancelled_invite_user_ids',[])
                 name_lock_user_ids=room_lock_user_ids(db,room_id)
                 log_event(db,room_id,rnd['number'],'judge_question',room['judge'],question)
                 queued_workflows=[]
@@ -4868,6 +4882,8 @@ def create_app(db_path=None):
         await app.state.hub.notify(room_id,'judge_question_proposed' if queued_for_workflow else 'judge_question')
         if name_lock_user_ids:
             await app.state.hub.notify_accounts(name_lock_user_ids, {'type':'name_lock_updated'})
+        if not queued_for_workflow:
+            await app.state.hub.notify_accounts(cancelled_invite_user_ids, {'type':'room_invite_updated'})
         return {'ok':True,'workflow_pending':queued_for_workflow}
 
     @app.post('/api/rooms/{room_id}/suggestions')
