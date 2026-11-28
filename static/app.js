@@ -421,68 +421,104 @@ async function refreshSocialUi(){
  if(state.me?.user?.uid!==accountUid||state.me?.user?.csrf!==accountCsrf||state.personalModelEpoch!==accountEpoch)return;
  if(location.hash.startsWith('#profile'))refreshSocialPanel();
 }
-function connectDmWs(){
- stopDmWs();const uid=state.me?.user?.uid;if(!uid||!location.hash.startsWith('#profile'))return;
+async function loadRoomInvites(){
+ const uid=state.me?.user?.uid,csrf=state.me?.user?.csrf,epoch=state.personalModelEpoch,
+  version=++state.roomInviteRequestVersion;
+ if(!uid)return state.roomInvites;
+ const data=await api('/api/me/room-invites');
+ if(state.roomInviteRequestVersion!==version||state.me?.user?.uid!==uid||
+    state.me?.user?.csrf!==csrf||state.personalModelEpoch!==epoch)return state.roomInvites;
+ state.roomInvites=data;
+ renderLobbyInvites();renderRoomInviteNotice();
+ return state.roomInvites;
+}
+function currentAccountSocket(ws,uid,csrf,epoch){
+ return state.accountSocket===ws&&state.accountSocketUid===uid&&state.accountSocketCsrf===csrf&&
+  state.accountSocketEpoch===epoch&&state.me?.user?.uid===uid&&state.me?.user?.csrf===csrf&&
+  state.personalModelEpoch===epoch;
+}
+async function refreshAccountPanels(ws,uid,csrf,epoch){
+ await loadSocial();
+ if(!currentAccountSocket(ws,uid,csrf,epoch))return;
+ await loadRoomInvites();
+ if(!currentAccountSocket(ws,uid,csrf,epoch))return;
+ if(location.hash.startsWith('#profile'))refreshSocialPanel();
+ else {renderLobbyInvites();renderRoomInviteNotice();}
+}
+function connectAccountSocket(){
+ const uid=state.me?.user?.uid,csrf=state.me?.user?.csrf,epoch=state.personalModelEpoch;
+ if(!uid||!csrf)return;
+ if(state.accountSocket&&state.accountSocketUid===uid&&state.accountSocketCsrf===csrf&&state.accountSocketEpoch===epoch)return;
+ stopAccountSocket();
  const proto=location.protocol==='https:'?'wss:':'ws:';
- const ws=new WebSocket(`${proto}//${location.host}/ws/messages`);state.dmSocket=ws;
+ const ws=new WebSocket(proto+'//'+location.host+'/ws/messages');
+ state.accountSocket=ws;state.accountSocketUid=uid;state.accountSocketCsrf=csrf;state.accountSocketEpoch=epoch;
  ws.onopen=async()=>{
-  if(state.dmSocket!==ws||state.me?.user?.uid!==uid)return;
-  try{
-   await loadSocial();
-   if(state.dmSocket!==ws||state.me?.user?.uid!==uid)return;
-   if(state.dmUid)await openDm(state.dmUid);else refreshSocialPanel();
-  }catch{}
+  if(!currentAccountSocket(ws,uid,csrf,epoch))return;
+  try{await refreshAccountPanels(ws,uid,csrf,epoch);}catch{}
  };
  ws.onmessage=async event=>{
-  if(state.dmSocket!==ws||state.me?.user?.uid!==uid)return;
+  if(!currentAccountSocket(ws,uid,csrf,epoch))return;
   let message;try{message=JSON.parse(event.data)}catch{return;}
-  if(message.type==='social_updated'){await refreshSocialUi();return;}
+  if(message.type==='social_updated'){
+   await refreshAccountPanels(ws,uid,csrf,epoch);return;
+  }
   if(message.type==='points_updated'){
-   await refreshSocialUi();
-   if(state.pointsLedgerLoaded)await loadPointsLedger({reset:true});
+   await refreshAccountPanels(ws,uid,csrf,epoch);
+   if(currentAccountSocket(ws,uid,csrf,epoch)&&state.pointsLedgerLoaded)await loadPointsLedger({reset:true});
    return;
   }
   if(message.type==='name_lock_updated'){
-   const context=capturePersonalSessionContext(ws);
    try{
     const refreshedMe=await api('/api/me');
-    if(!isCurrentPersonalSessionContext(context)||refreshedMe.user?.uid!==context.uid)return;
-    state.me=refreshedMe;renderPersonalCenter();
+    if(!currentAccountSocket(ws,uid,csrf,epoch)||refreshedMe.user?.uid!==uid||refreshedMe.user?.csrf!==csrf)return;
+    state.me=refreshedMe;
+    if(location.hash.startsWith('#profile'))renderPersonalCenter();
+    else if(state.roomId)await refreshRoom();
    }catch{}
    return;
   }
   if(message.type==='dm_message'){
    const otherUid=message.other_uid,entry=message.message;
    if(!otherUid||!entry)return;
-   if(state.dmUid===otherUid){
+   const conversationVisible=location.hash.startsWith('#profile')&&state.dmUid===otherUid&&!!$('#dmPanel');
+   if(conversationVisible){
     state.dmMessages=mergeDmMessages(state.dmMessages,[entry]);renderDmPanel();
     if(!entry.mine)await markDmRead(otherUid,entry.id,{refresh:false,accountUid:uid}).catch(()=>{});
    }
-   await refreshSocialUi();
+   await loadSocial();
+   if(!currentAccountSocket(ws,uid,csrf,epoch))return;
+   if(location.hash.startsWith('#profile'))refreshSocialPanel();
+   return;
+  }
+  if(message.type==='room_invite_created'||message.type==='room_invite_updated'){
+   await loadRoomInvites();
+   if(!currentAccountSocket(ws,uid,csrf,epoch))return;
+   if(message.type==='room_invite_created'&&state.roomId)toast('收到房间邀请，可在大厅查看。');
   }
  };
  ws.onclose=async event=>{
-  if(state.dmSocket!==ws)return;
-  const context=capturePersonalCenterContext();
-  state.dmSocket=null;
-  if(context.uid!==uid)return;
+  if(state.accountSocket!==ws)return;
+  state.accountSocket=null;state.accountSocketUid=null;state.accountSocketCsrf=null;state.accountSocketEpoch=0;
+  if(state.me?.user?.uid!==uid||state.me?.user?.csrf!==csrf||state.personalModelEpoch!==epoch)return;
   if(event.code===1008){
    try{
     const current=await api('/api/me');
-    if(!isCurrentPersonalModelAccountContext(context))return;
-    if(current.user?.uid!==uid){state.me=current;clearPersonalModelState();await init();}
-    else{
-     state.me=current;
-     state.dmReconnect=setTimeout(()=>{if(location.hash.startsWith('#profile')&&state.me?.user?.uid===uid)connectDmWs();},1000);
+    if(state.me?.user?.uid!==uid||state.me?.user?.csrf!==csrf||state.personalModelEpoch!==epoch)return;
+    if(current.user?.uid!==uid||current.user?.csrf!==csrf){
+     stopAccountSocket();state.me=current;clearPersonalModelState();await init();return;
     }
    }catch{
-    if(!isCurrentPersonalModelAccountContext(context))return;
-    state.me=null;clearPersonalModelState();renderAuth();
+    if(state.me?.user?.uid===uid&&state.me?.user?.csrf===csrf&&state.personalModelEpoch===epoch){
+     stopAccountSocket();state.me=null;clearPersonalModelState();renderAuth();
+    }
+    return;
    }
-   return;
   }
-  if(!location.hash.startsWith('#profile')||state.me?.user?.uid!==uid)return;
-  state.dmReconnect=setTimeout(()=>{if(location.hash.startsWith('#profile')&&state.me?.user?.uid===uid)connectDmWs();},3000);
+  state.accountReconnect=setTimeout(()=>{
+   state.accountReconnect=null;
+   if(state.me?.user?.uid===uid&&state.me?.user?.csrf===csrf&&state.personalModelEpoch===epoch)connectAccountSocket();
+  },event.code===1008?1000:3000);
  };
  ws.onerror=()=>{};
 }
@@ -498,11 +534,11 @@ function isCurrentPersonalCenterContext(context){
  return isCurrentPersonalModelAccountContext(context)&&
   state.roomContextEpoch===context.pageEpoch&&location.hash.startsWith('#profile');
 }
-function capturePersonalSessionContext(socket=state.dmSocket){
+function capturePersonalSessionContext(socket=state.accountSocket){
  return {...capturePersonalCenterContext(),socket};
 }
 function isCurrentPersonalSessionContext(context){
- return isCurrentPersonalCenterContext(context)&&state.dmSocket===context.socket;
+ return isCurrentPersonalModelAccountContext(context)&&state.accountSocket===context.socket;
 }
 async function openPersonalCenter(options={}){
  const epoch=++state.roomContextEpoch,uid=state.me?.user?.uid,csrf=state.me?.user?.csrf;
@@ -516,7 +552,7 @@ async function openPersonalCenter(options={}){
   await loadPersonalModels();if(!isCurrentPersonalCenterContext(context))return;
   await loadModelOperationRecords();if(!isCurrentPersonalCenterContext(context))return;
   await loadSocial();if(!isCurrentPersonalCenterContext(context))return;
-  renderPersonalCenter();connectDmWs();
+  renderPersonalCenter();connectAccountSocket();
  }catch(error){if(!isCurrentPersonalCenterContext(context))return;throw error;}
 }
 async function returnFromPersonalCenter(){
@@ -1121,7 +1157,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
    const uid=b.dataset.uid;
    if(confirm(`确定删除账号 ${uid}？该账号将立即退出登录且无法再使用，未完赛参与者将退赛；已有比赛历史署名保留。`)){
     const result=await api(`/api/admin/users/${uid}`,{method:'DELETE',body:{confirm:true}});
-    if(result.signed_out){state.me=null;state.room=null;state.roomId=null;clearPersonalModelState();renderAuth();}else await loadAccounts();toast('账号已删除');
+    if(result.signed_out){stopAccountSocket();state.me=null;state.room=null;state.roomId=null;clearPersonalModelState();renderAuth();}else await loadAccounts();toast('账号已删除');
    }
   }
   if(action==='delete-room'){
@@ -1389,7 +1425,7 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
    if(data.new_password!==data.confirm_password)throw new Error('两次输入的新密码不一致。');
    if(!confirm('修改密码后，当前账号的所有登录会话都会失效。确定继续？'))return;
    const result=await api('/api/me/password',{method:'POST',body:data});
-   if(result.signed_out){state.me=null;state.room=null;state.roomId=null;state.personalModels=[];clearPersonalModelState();state.chat=[];state.chatDraft='';state.drafts={};state.personalReturn=null;stopWs();history.replaceState(null,'',location.pathname);renderAuth();toast('密码已修改，请重新登录。');return;}
+   if(result.signed_out){stopAccountSocket();state.me=null;state.room=null;state.roomId=null;state.personalModels=[];clearPersonalModelState();state.chat=[];state.chatDraft='';state.drafts={};state.personalReturn=null;stopWs();history.replaceState(null,'',location.pathname);renderAuth();toast('密码已修改，请重新登录。');return;}
   }
   if(type==='model-operation-filters'){
     const context=capturePersonalCenterContext();
@@ -1442,7 +1478,7 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
    const uid=form.dataset.uid;
    if(confirm(`确定修改 ${uid} 的密码并使其所有登录会话失效？`)){
     const result=await api(`/api/admin/users/${uid}/password`,{method:'POST',body:{password:data.password,confirm:true}});
-    if(result.signed_out){state.me=null;state.room=null;state.roomId=null;clearPersonalModelState();renderAuth();}else await loadAccounts();toast('密码已修改，原登录会话已失效');
+    if(result.signed_out){stopAccountSocket();state.me=null;state.room=null;state.roomId=null;clearPersonalModelState();renderAuth();}else await loadAccounts();toast('密码已修改，原登录会话已失效');
    }
    return;
   }
