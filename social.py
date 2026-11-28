@@ -2,7 +2,7 @@
 
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
 from fastapi import HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -247,7 +247,7 @@ def cleanup_deleted_account(db, user_id):
     ).fetchall()
     for row in invite_rows:
         friend_ids.add(int(row["invitee_user_id"] if row["inviter_user_id"] == user_id else row["inviter_user_id"]))
-    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     db.execute(
         """UPDATE room_invites SET status='cancelled',responded_at=?,updated_at=?
            WHERE status='pending' AND (inviter_user_id=? OR invitee_user_id=?)""",
@@ -520,11 +520,23 @@ def register_social_routes(
                 ).fetchone():
                     results.append({"uid": normalized_uid, "status": "skipped", "reason": "对方已经是本房间参赛者。"})
                     continue
+                if body.role == "player" and db.execute(
+                    """SELECT 1 FROM room_judges WHERE room_id=? AND user_id=? AND left_at IS NULL""",
+                    (room_id, target_id),
+                ).fetchone():
+                    results.append({"uid": normalized_uid, "status": "skipped", "reason": "对方已经是本房间裁判，不能同时担任参赛者。"})
+                    continue
                 if body.role == "judge" and db.execute(
                     """SELECT 1 FROM room_judges WHERE room_id=? AND user_id=? AND left_at IS NULL""",
                     (room_id, target_id),
                 ).fetchone():
                     results.append({"uid": normalized_uid, "status": "skipped", "reason": "对方已经是本房间裁判。"})
+                    continue
+                if body.role == "judge" and db.execute(
+                    """SELECT 1 FROM members WHERE room_id=? AND user_id=?""",
+                    (room_id, target_id),
+                ).fetchone():
+                    results.append({"uid": normalized_uid, "status": "skipped", "reason": "对方已有本房间参赛记录，不能同时担任裁判。"})
                     continue
                 db.execute(
                     """UPDATE room_invites SET status='expired',responded_at=?,updated_at=?
