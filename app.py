@@ -3959,6 +3959,19 @@ def create_app(db_path=None):
         await app.state.hub.notify_accounts([u['id'],invitee_id],{'type':'room_invite_updated'})
         return {'ok':True}
 
+    @app.get('/api/question-bank')
+    def get_question_bank(request:Request,category:Optional[str]=Query(default=None,max_length=30),
+                          q:Optional[str]=Query(default=None,max_length=120),
+                          limit:int=Query(default=50,ge=1,le=100)):
+        with connection() as db:
+            caller(request,db)
+        try:
+            questions=list_questions(category=category,query=q,limit=limit)
+        except ValueError as exc:
+            raise HTTPException(422,str(exc))
+        return {'version':BANK_VERSION,'categories':list(QUESTION_BANK_CATEGORIES),
+                'questions':questions}
+
     @app.get('/api/admin/users')
     def list_users(request:Request):
         with connection() as db:
