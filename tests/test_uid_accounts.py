@@ -192,7 +192,7 @@ def snapshot(db):
                 row.pop(column,None)
         # Exit, timer and workflow migrations add nullable columns.
         added_columns={
-            'rooms':('closed_at','round_duration_seconds','public_listing','public_description'),
+            'rooms':('closed_at','round_duration_seconds'),
             'members':('leave_reason',),
             'room_judges':('left_at',),
             'rounds':('started_at','duration_seconds','deadline_at','timeout_ended_at'),
@@ -200,6 +200,10 @@ def snapshot(db):
         for column in added_columns:
             for row in rows:
                 assert row.pop(column,None) is None
+        if name == 'rooms':
+            for row in rows:
+                assert row.pop('public_listing',0) == 0
+                assert row.pop('public_description','') == ''
         result[name] = rows
     return result
 
