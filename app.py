@@ -4073,7 +4073,7 @@ def create_app(db_path=None):
             db.execute('''DELETE FROM room_judges WHERE room_id=? AND (left_at IS NOT NULL OR user_id IN
                 (SELECT id FROM users WHERE deleted_at IS NOT NULL))''',(room_id,))
             db.execute('''UPDATE rooms SET status='open',current_round=1,records_deleted=0,
-                match_started_at=NULL,closed_at=NULL,match_number=match_number+1 WHERE id=?''',(room_id,))
+                match_started_at=NULL,closed_at=NULL,public_listing=0,match_number=match_number+1 WHERE id=?''',(room_id,))
             db.execute('INSERT INTO rounds(room_id,number,created_at) VALUES(?,?,?)',(room_id,1,utcnow()))
             new_match_number=room['match_number']+1
             log_event(db,room_id,1,'match_restarted','主持人','重新开赛，上一场比赛记录已清空')
