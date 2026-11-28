@@ -174,15 +174,20 @@ def test_public_room_discovery_join_whitelist_and_auto_unlisting(env):
     rooms = response.json()['rooms']
     assert private['room_id'] not in {room['room_id'] for room in rooms}
     item = next(room for room in rooms if room['room_id'] == public['room_id'])
-    assert item['description'] == '公开简介只允许展示房间信息。'
+    assert item['public_description'] == '公开简介只允许展示房间信息。'
+    assert item['max_players'] == 8
+    assert item['max_judges'] == 12
     assert item['can_join_player'] is True
     assert item['can_join_judge'] is True
     assert set(item) == {
-        'room_id', 'title', 'description', 'owner_display_name', 'created_at',
-        'player_count', 'human_judge_count', 'ai_judge_count', 'ai_player_count',
+        'room_id', 'title', 'public_description', 'owner_display_name', 'created_at',
+        'player_count', 'max_players', 'human_judge_count', 'ai_judge_count', 'max_judges', 'ai_player_count',
         'has_model_ai', 'round_duration_seconds', 'tags', 'can_join_player', 'can_join_judge',
     }
     assert 'invite_code' not in item and 'uid' not in str(item).lower() and 'api_key' not in str(item).lower()
+    searched = player.get('/api/public/rooms?q=大厅').json()['rooms']
+    assert public['room_id'] in {room['room_id'] for room in searched}
+    assert private['room_id'] not in {room['room_id'] for room in searched}
 
     joined = post(player, f"/api/rooms/{public['room_id']}/join", {'role': 'player'})
     assert joined['role'] == 'player'
@@ -219,6 +224,8 @@ def test_invite_code_join_keeps_legacy_frozen_roster_recovery_but_discovery_join
     assert legacy['alias']
     replay = post(legacy_player, '/api/join', {'code': room['code'], 'role': 'player'})
     assert replay['alias'] == legacy['alias']
+    public_replay = post(legacy_player, f"/api/rooms/{room['room_id']}/join", {'role': 'player'})
+    assert public_replay['already_joined'] is True
     post(discovery_player, f"/api/rooms/{room['room_id']}/join", {'role': 'player'}, status=409)
     listed = discovery_player.get('/api/public/rooms').json()['rooms']
     assert room['room_id'] not in {item['room_id'] for item in listed}
