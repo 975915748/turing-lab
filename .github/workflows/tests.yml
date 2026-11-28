@@ -39,7 +39,9 @@ jobs:
           node --check tests/host_ui.cjs
           node --check tests/model_config_ui.cjs
           node --check tests/social_points_ui.cjs
+          node --check tests/community_features_ui.cjs
           node --check tests/room_delete_ui.cjs
+          node tests/community_features_ui.cjs
           node --check tests/model_operations_ui.cjs
       - name: Run regression tests
         run: python -m pytest -q
