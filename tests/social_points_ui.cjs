@@ -398,10 +398,6 @@ function friendDmButton(page, uid) {
     await pageA.unroute('**/api/me/profile');
 
     // A delayed name_lock_updated refresh must not overwrite the account logged in afterward.
-    const lockRoom = await api(pageA, 'POST', '/api/rooms', { title: '账号切换迟到锁名通知' });
-    const lockBase = '/api/rooms/' + lockRoom.room_id;
-    await api(pageA, 'POST', '/api/join', { code: lockRoom.code, role: 'player' });
-    await api(pageB, 'POST', '/api/join', { code: lockRoom.code, role: 'player' });
     if (!(await pageB.locator('form[data-form="profile-name"]').count())) {
       await openPersonalCenter(pageB);
     }
@@ -458,7 +454,6 @@ function friendDmButton(page, uid) {
     await pageB.unroute('**/api/me');
 
     // A delayed successful /api/me response from an old 1008 close must not replace the next account.
-    await switchAccount(pageA, uidA);
     await openPersonalCenter(pageA);
     await pageA.waitForFunction(() => state.dmSocket?.readyState === WebSocket.OPEN);
     let releaseCloseSuccessResponse;
