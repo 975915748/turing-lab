@@ -164,6 +164,7 @@ def snapshot(db):
         'dm_conversations', 'dm_messages', 'dm_read_positions', 'api_rate_limits',
         'round_workflows', 'round_timeouts',
         'match_persona_freezes', 'match_seat_persona_snapshots',
+        'room_invites',
     )
     placeholders = ','.join('?' for _ in schema_additions)
     tables = [r[0] for r in db.execute(
@@ -180,6 +181,8 @@ def snapshot(db):
             for row in rows:
                 row.pop('model_request_limit', None)
                 row.pop('match_started_at', None)
+                assert row.pop('public_listing', 0) == 0
+                assert row.pop('public_description', '') == ''
         # Persona migration adds non-null defaults, which are not legacy data.
         persona_columns={
             'ai_players':('persona_preset_id','persona_preset_version','persona_custom_prompt',
@@ -209,6 +212,7 @@ def test_legacy_migration_preserves_all_records_backup_and_passwords(tmp_path):
     before = legacy_database(path)
     app = create_app(path)
     with db_open(path) as db:
+        assert db.execute('SELECT COUNT(*) FROM room_invites').fetchone()[0] == 0
         after = snapshot(db)
         for row in after['users']:
             assert row.pop('legacy_username') == row['username']
@@ -219,12 +223,12 @@ def test_legacy_migration_preserves_all_records_backup_and_passwords(tmp_path):
             assert row.pop('records_deleted') == 0
         assert after == before
         assert db.execute('PRAGMA foreign_key_check').fetchall() == []
-    backups = list(tmp_path.glob('legacy.pre-v1_12-*.sqlite3'))
+    backups = list(tmp_path.glob('legacy.pre-v1_13-*.sqlite3'))
     assert len(backups) == 1
     with db_open(backups[0]) as db:
         assert snapshot(db) == before
     create_app(path)
-    assert len(list(tmp_path.glob('legacy.pre-v1_12-*.sqlite3'))) == 1
+    assert len(list(tmp_path.glob('legacy.pre-v1_13-*.sqlite3'))) == 1
     assert seed_admin(path, 'legacy_admin', '不覆盖', 'new-password') is False
     # All original identities retain their IDs; old username login is explicit.
     for old_name, uid in (('legacy_admin', 'TL00000007'), ('legacy_player', 'TL00000023'), ('TL00000023', 'TL00000030')):

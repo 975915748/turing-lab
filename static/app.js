@@ -9,7 +9,7 @@ const val = (id) => document.getElementById(id)?.value??'';
 const D = (txt='暂无记录') => `<p class="muted hint">${esc(txt)}</p>`;
 let toastTimer;
 function clearPersonalModelState(){
- stopDmWs();state.social=null;state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;state.dmOtherName='';state.dmCanSend=false;state.dmPending=null;state.dmDraft='';state.dmLoadVersion++;state.socialEpoch++;state.pointsLedgerEntries=[];state.pointsLedgerBeforeId=null;state.pointsLedgerHasMore=false;state.pointsLedgerLoaded=false;
+ stopAccountSocket();state.social=null;state.roomInvites={received:[],sent:[],pending_count:0};state.communityPublicRooms=[];state.communityPublicBeforeId=null;state.communityPublicHasMore=false;state.communityPublicLoading=false;state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;state.dmOtherName='';state.dmCanSend=false;state.dmPending=null;state.dmDraft='';state.dmLoadVersion++;state.socialEpoch++;state.pointsLedgerEntries=[];state.pointsLedgerBeforeId=null;state.pointsLedgerHasMore=false;state.pointsLedgerLoaded=false;
  state.personalModelEpoch=(state.personalModelEpoch||0)+1;state.personalModelListRequestVersion=(state.personalModelListRequestVersion||0)+1;state.modelOperationRequestVersion=(state.modelOperationRequestVersion||0)+1;state.roomContextEpoch=(state.roomContextEpoch||0)+1;state.roomRefreshVersion=(state.roomRefreshVersion||0)+1;state.pendingIdempotencyKeys={};
  state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};state.personalModelTestVersions={};state.personalModelTestPending={};state.personalModelSavePending={};state.modelOperationRecords=[];state.modelOperationStats={};state.modelOperationProfileOptions=[];state.modelOperationTotal=0;state.modelOperationOffset=0;state.modelOperationFilters={profile_id:'',purpose:'',status:''};state.modelOperationsExpanded=false;state.modelOperationHistoryPanels={};state.personaDrafts={};state.personaEditorOpen={};
 }
@@ -102,9 +102,9 @@ async function refreshRoom(expectedContext=null){
   return false;
  }
 }
-async function init(){applyPrefs();try{const previousUid=state.me?.user?.uid;state.me=await api('/api/me');if(previousUid&&previousUid!==state.me?.user?.uid)clearPersonalModelState();$('#logoutBtn').classList.remove('hide');const q=/^#room=(\d+)$/.exec(location.hash);if(location.hash.startsWith('#profile')){state.personalReturn=profileReturnFromHash();await openPersonalCenter({fromHash:true});}else if(q){await openRoom(Number(q[1]));}else renderLobby()}catch(e){state.me=null;state.roomId=null;state.personalModels=[];state.chat=[];$('#logoutBtn').classList.add('hide');renderAuth();}}
+async function init(){applyPrefs();try{const previousUid=state.me?.user?.uid,previousCsrf=state.me?.user?.csrf;state.me=await api('/api/me');if(previousUid&&(previousUid!==state.me?.user?.uid||previousCsrf!==state.me?.user?.csrf))clearPersonalModelState();connectDmWs();$('#logoutBtn').classList.remove('hide');const q=/^#room=(\d+)$/.exec(location.hash);if(location.hash.startsWith('#profile')){state.personalReturn=profileReturnFromHash();await openPersonalCenter({fromHash:true});}else if(q){await openRoom(Number(q[1]));}else renderLobby()}catch(e){state.me=null;state.roomId=null;state.personalModels=[];state.chat=[];$('#logoutBtn').classList.add('hide');renderAuth();}}
 function renderAuth(){
- clearDmState();state.social=null;stopWs();$('#logoutBtn').classList.add('hide');setConnection('未登录',false);
+ clearDmState();state.social=null;state.roomInvites={received:[],sent:[],pending_count:0};state.communityPublicRooms=[];state.communityPublicBeforeId=null;state.communityPublicHasMore=false;stopAccountSocket();stopWs();$('#logoutBtn').classList.add('hide');setConnection('未登录',false);
  const reg=state.tab==='register',legacy=!!state.legacyLogin;
  app.innerHTML=`<div class="auth"><div class="intro"><div class="hero-mark">T.</div><div class="overline">HUMAN × AI / ANONYMOUS JUDGING</div><h1>在同一个房间里，<br>验证谁更像人类。</h1><p class="muted">支持真人裁判独立登录与 AI 裁判由房主手动转录；各裁判独立判断。AI 回答仍由房主手动录入；全部参赛者提交后统一公布回答。</p><div class="stat-row"><div class="stat">◈ 自由注册</div><div class="stat">◈ 匿名裁判包</div><div class="stat">◈ 完整轮次日志</div></div></div>
  <section class="card"><div class="overline">欢迎加入</div><h2 style="margin:7px 0 0">${reg?'创建你的账号':'登录图灵实验室'}</h2>
@@ -190,7 +190,9 @@ async function loadLobby(){
  state.roomRefreshVersion=(state.roomRefreshVersion||0)+1;
  const me=await api('/api/me');
  if(state.roomContextEpoch!==epoch||state.personalModelEpoch!==accountEpoch||state.me?.user?.uid!==uid||state.me?.user?.csrf!==csrf)return;
- state.me=me;state.chat=[];state.chatDraft='';state.personalReturn=null;renderLobby();
+ state.me=me;state.chat=[];state.chatDraft='';state.personalReturn=null;connectDmWs();renderLobby();
+ if(typeof loadRoomInvites==='function')loadRoomInvites().catch(()=>{});
+ if(typeof loadPublicRooms==='function')loadPublicRooms().catch(()=>{});
 }
 
 async function loadPersonalModels(){
@@ -300,18 +302,19 @@ function makeRoster(r){
  return people.map(p=>`<div class="roster-person"><div class="person-left"><span class="alias">${esc(p.alias)}</span><div style="min-width:0"><span class="person-name" title="${esc(p.label)}">${esc(p.label)}</span><span class="roster-role">${p.role==='人类'?'人类 · '+esc(p.uid):'AI 参赛位'}${p.alias===r.mine?' · 我':''}</span></div></div><span class="pill ${submitted.has(p.alias)?'ok':''}" ${p.role==='人类'&&p.alias===r.mine?`data-typing-alias="${esc(p.alias)}"`:''} title="本轮提交状态">${submitted.has(p.alias)?'√':p.role==='人类'&&p.alias===r.mine?(state.selectedRound===r.current_round&&state.typing[p.alias]?'....':'X'):'—'}</span>${p.role==='人类'&&p.alias!==r.mine?`<button class="small" data-action="friend-from-room" data-uid="${esc(p.uid)}">加好友</button>`:''}</div>`).join('')||D('等待人类玩家加入');
 }
 function profileReturnFromHash(){const m=/^#profile\?room=(\d+)&view=([^&]+)&round=(\d+)(?:&match=(\d+))?$/.exec(location.hash);return m?{roomId:Number(m[1]),view:decodeURIComponent(m[2]),round:Number(m[3]),matchNumber:m[4]?Number(m[4]):null}:null;}
-function stopDmWs(){
+function stopAccountSocket(){
  if(state.dmReconnect)clearTimeout(state.dmReconnect);state.dmReconnect=null;
  if(state.dmSocket){const ws=state.dmSocket;state.dmSocket=null;ws.onclose=null;try{ws.close();}catch{}}
 }
+function stopDmWs(){stopAccountSocket();}
 function clearDmState(){
- stopDmWs();state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;
+ state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;
  state.dmOtherName='';state.dmCanSend=false;state.dmPending=null;state.dmDraft='';state.dmLoadVersion++;
 }
 async function loadSocial(){
- const uid=state.me?.user?.uid,version=++state.socialEpoch;
+ const uid=state.me?.user?.uid,csrf=state.me?.user?.csrf,epoch=state.personalModelEpoch,version=++state.socialEpoch;
  const data=await api('/api/me/social');
- if(state.socialEpoch!==version||state.me?.user?.uid!==uid)return state.social;
+ if(state.socialEpoch!==version||state.personalModelEpoch!==epoch||state.me?.user?.uid!==uid||state.me?.user?.csrf!==csrf)return state.social;
  state.social=data;
  if(state.dmUid){
   const conv=state.social.conversations?.find(x=>x.uid===state.dmUid);
@@ -421,67 +424,81 @@ async function refreshSocialUi(){
  if(location.hash.startsWith('#profile'))refreshSocialPanel();
 }
 function connectDmWs(){
- stopDmWs();const uid=state.me?.user?.uid;if(!uid||!location.hash.startsWith('#profile'))return;
+ const uid=state.me?.user?.uid,csrf=state.me?.user?.csrf,epoch=state.personalModelEpoch;
+ if(!uid)return;
+ if(state.dmSocket&&state.dmSocket.__accountUid===uid&&state.dmSocket.__accountCsrf===csrf&&state.dmSocket.__accountEpoch===epoch&&state.dmSocket.readyState!==WebSocket.CLOSED)return;
+ stopAccountSocket();
  const proto=location.protocol==='https:'?'wss:':'ws:';
  const ws=new WebSocket(`${proto}//${location.host}/ws/messages`);state.dmSocket=ws;
+ ws.__accountUid=uid;ws.__accountCsrf=csrf;ws.__accountEpoch=epoch;
+ const current=()=>state.dmSocket===ws&&state.me?.user?.uid===uid&&state.me?.user?.csrf===csrf&&state.personalModelEpoch===epoch;
  ws.onopen=async()=>{
-  if(state.dmSocket!==ws||state.me?.user?.uid!==uid)return;
-  try{
-   await loadSocial();
-   if(state.dmSocket!==ws||state.me?.user?.uid!==uid)return;
-   if(state.dmUid)await openDm(state.dmUid);else refreshSocialPanel();
-  }catch{}
+  if(!current())return;
+  try{await loadSocial();}catch{}
+  if(!current())return;
+  try{if(typeof loadRoomInvites==='function')await loadRoomInvites();}catch{}
+  if(!current())return;
+  if(location.hash.startsWith('#profile')){
+   try{if(state.dmUid)await openDm(state.dmUid);else refreshSocialPanel();}catch{}
+  }
  };
  ws.onmessage=async event=>{
-  if(state.dmSocket!==ws||state.me?.user?.uid!==uid)return;
+  if(!current())return;
   let message;try{message=JSON.parse(event.data)}catch{return;}
-  if(message.type==='social_updated'){await refreshSocialUi();return;}
+  if(message.type==='social_updated'){
+   await refreshSocialUi();
+   if(!current())return;
+   if(typeof loadRoomInvites==='function')await loadRoomInvites().catch(()=>{});
+   if(!current())return;
+   if(typeof refreshCommunityRoomControls==='function')refreshCommunityRoomControls();
+   return;
+  }
+  if(message.type==='room_invite_created'||message.type==='room_invite_updated'){
+   if(typeof loadRoomInvites==='function')await loadRoomInvites().catch(()=>{});
+   if(!current())return;
+   if(typeof loadPublicRooms==='function')await loadPublicRooms().catch(()=>{});
+   if(!current())return;
+   if(message.type==='room_invite_created')toast('收到新的好友房间邀请，可在大厅查看。');
+   return;
+  }
   if(message.type==='points_updated'){
    await refreshSocialUi();
+   if(!current())return;
    if(state.pointsLedgerLoaded)await loadPointsLedger({reset:true});
    return;
   }
   if(message.type==='name_lock_updated'){
-   const context=capturePersonalSessionContext(ws);
+   const pageContext=capturePersonalCenterContext();
+   if(!isCurrentPersonalCenterContext(pageContext))return;
    try{
     const refreshedMe=await api('/api/me');
-    if(!isCurrentPersonalSessionContext(context)||refreshedMe.user?.uid!==context.uid)return;
-    state.me=refreshedMe;renderPersonalCenter();
+    if(!current()||!isCurrentPersonalCenterContext(pageContext)||refreshedMe.user?.uid!==uid)return;
+    state.me=refreshedMe;
+    renderPersonalCenter();
    }catch{}
    return;
   }
   if(message.type==='dm_message'){
-   const otherUid=message.other_uid,entry=message.message;
-   if(!otherUid||!entry)return;
-   if(state.dmUid===otherUid){
+   const otherUid=message.other_uid,entry=message.message;if(!otherUid||!entry)return;
+   if(location.hash.startsWith('#profile')&&state.dmUid===otherUid){
     state.dmMessages=mergeDmMessages(state.dmMessages,[entry]);renderDmPanel();
     if(!entry.mine)await markDmRead(otherUid,entry.id,{refresh:false,accountUid:uid}).catch(()=>{});
+    if(!current())return;
    }
    await refreshSocialUi();
+   if(!current())return;
   }
  };
  ws.onclose=async event=>{
   if(state.dmSocket!==ws)return;
-  const context=capturePersonalCenterContext();
-  state.dmSocket=null;
-  if(context.uid!==uid)return;
+  const context=capturePersonalCenterContext();state.dmSocket=null;
+  if(context.uid!==uid||state.me?.user?.uid!==uid||state.me?.user?.csrf!==csrf||state.personalModelEpoch!==epoch)return;
   if(event.code===1008){
-   try{
-    const current=await api('/api/me');
-    if(!isCurrentPersonalModelAccountContext(context))return;
-    if(current.user?.uid!==uid){state.me=current;clearPersonalModelState();await init();}
-    else{
-     state.me=current;
-     state.dmReconnect=setTimeout(()=>{if(location.hash.startsWith('#profile')&&state.me?.user?.uid===uid)connectDmWs();},1000);
-    }
-   }catch{
-    if(!isCurrentPersonalModelAccountContext(context))return;
-    state.me=null;clearPersonalModelState();renderAuth();
-   }
+   try{const currentMe=await api('/api/me');if(state.me?.user?.uid!==uid||state.personalModelEpoch!==epoch)return;if(currentMe.user?.uid!==uid){state.me=currentMe;clearPersonalModelState();await init();}else{state.me=currentMe;state.dmReconnect=setTimeout(()=>{if(state.me?.user?.uid===uid&&state.personalModelEpoch===epoch)connectDmWs();},1000);}}
+   catch{if(state.me?.user?.uid!==uid||state.personalModelEpoch!==epoch)return;state.me=null;clearPersonalModelState();renderAuth();}
    return;
   }
-  if(!location.hash.startsWith('#profile')||state.me?.user?.uid!==uid)return;
-  state.dmReconnect=setTimeout(()=>{if(location.hash.startsWith('#profile')&&state.me?.user?.uid===uid)connectDmWs();},3000);
+  state.dmReconnect=setTimeout(()=>{if(state.me?.user?.uid===uid&&state.me?.user?.csrf===csrf&&state.personalModelEpoch===epoch)connectDmWs();},3000);
  };
  ws.onerror=()=>{};
 }
