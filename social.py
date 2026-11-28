@@ -492,7 +492,7 @@ def register_social_routes(
     async def send_room_invites(room_id: int, body: RoomInviteBatchData, request: Request):
         if len(set(body.uids)) != len(body.uids):
             raise HTTPException(422, "邀请 UID 不能重复。")
-        notifications = set()
+        notifications = {}
         results = []
         with connection(immediate=True) as db:
             user = caller(request, db, mutate=True)
@@ -502,8 +502,11 @@ def register_social_routes(
             now = utcnow()
             expires_at = (datetime.fromisoformat(now) + timedelta(minutes=30)).isoformat(timespec="seconds")
             for raw_uid in body.uids:
-                target = lookup_account(db, uid=raw_uid)
-                if not target:
+                try:
+                    target = lookup_account(db, uid=raw_uid)
+                except HTTPException:
+                    target = None
+                if not target or target["deleted_at"] is not None:
                     results.append({"uid": raw_uid, "status": "skipped", "reason": "账号不存在或已删除。"})
                     continue
                 target_id = int(target["id"])
@@ -513,30 +516,6 @@ def register_social_routes(
                     continue
                 if not friendship_exists(db, user["id"], target_id):
                     results.append({"uid": normalized_uid, "status": "skipped", "reason": "对方不是你的好友。"})
-                    continue
-                if body.role == "player" and db.execute(
-                    """SELECT 1 FROM members WHERE room_id=? AND user_id=? AND removed_at IS NULL""",
-                    (room_id, target_id),
-                ).fetchone():
-                    results.append({"uid": normalized_uid, "status": "skipped", "reason": "对方已经是本房间参赛者。"})
-                    continue
-                if body.role == "player" and db.execute(
-                    """SELECT 1 FROM room_judges WHERE room_id=? AND user_id=? AND left_at IS NULL""",
-                    (room_id, target_id),
-                ).fetchone():
-                    results.append({"uid": normalized_uid, "status": "skipped", "reason": "对方已经是本房间裁判，不能同时担任参赛者。"})
-                    continue
-                if body.role == "judge" and db.execute(
-                    """SELECT 1 FROM room_judges WHERE room_id=? AND user_id=? AND left_at IS NULL""",
-                    (room_id, target_id),
-                ).fetchone():
-                    results.append({"uid": normalized_uid, "status": "skipped", "reason": "对方已经是本房间裁判。"})
-                    continue
-                if body.role == "judge" and db.execute(
-                    """SELECT 1 FROM members WHERE room_id=? AND user_id=?""",
-                    (room_id, target_id),
-                ).fetchone():
-                    results.append({"uid": normalized_uid, "status": "skipped", "reason": "对方已有本房间参赛记录，不能同时担任裁判。"})
                     continue
                 db.execute(
                     """UPDATE room_invites SET status='expired',responded_at=?,updated_at=?
@@ -553,7 +532,7 @@ def register_social_routes(
                         invite_id = int(pending["id"])
                         results.append({"uid": normalized_uid, "invite_id": invite_id,
                                         "status": "sent", "reused": True})
-                        notifications.add(target_id)
+                        notifications[target_id] = invite_id
                     else:
                         results.append({"uid": normalized_uid, "status": "skipped",
                                         "reason": "已有不同身份的待处理邀请，请先撤回。"})
@@ -565,10 +544,10 @@ def register_social_routes(
                     (room_id, user["id"], target_id, body.role, now, expires_at, now),
                 )
                 invite_id = int(cur.lastrowid)
-                notifications.add(target_id)
+                notifications[target_id] = invite_id
                 results.append({"uid": normalized_uid, "invite_id": invite_id, "status": "sent", "reused": False})
-        for target_id in sorted(notifications):
-            await hub.notify_account(target_id, {"type": "room_invite_created"})
+        for target_id, invite_id in sorted(notifications.items()):
+            await hub.notify_account(target_id, {"type": "room_invite_created", "invite_id": invite_id})
         return {"results": results}
 
     @app.post("/api/room-invites/{invite_id}/accept")
@@ -644,7 +623,7 @@ def register_social_routes(
             raise HTTPException(409, "好友关系已解除，邀请已失效。")
         await hub.notify(room_id, "judge_added" if joined["role"] == "judge" else "joined")
         for target_id in sorted(notify_users):
-            await hub.notify_account(target_id, {"type": "room_invite_updated"})
+            await hub.notify_account(target_id, {"type": "room_invite_updated", "invite_id": invite_id})
         return {"ok": True, **joined}
 
     @app.post("/api/room-invites/{invite_id}/reject")
@@ -678,8 +657,8 @@ def register_social_routes(
                 )
         if expired:
             raise HTTPException(409, "邀请已过期。")
-        await hub.notify_account(inviter_id, {"type": "room_invite_updated"})
-        await hub.notify_account(user["id"], {"type": "room_invite_updated"})
+        await hub.notify_account(inviter_id, {"type": "room_invite_updated", "invite_id": invite_id})
+        await hub.notify_account(user["id"], {"type": "room_invite_updated", "invite_id": invite_id})
         return {"ok": True}
 
     @app.post("/api/room-invites/{invite_id}/cancel")
@@ -715,8 +694,8 @@ def register_social_routes(
                 )
         if expired:
             raise HTTPException(409, "邀请已过期。")
-        await hub.notify_account(invitee_id, {"type": "room_invite_updated"})
-        await hub.notify_account(user["id"], {"type": "room_invite_updated"})
+        await hub.notify_account(invitee_id, {"type": "room_invite_updated", "invite_id": invite_id})
+        await hub.notify_account(user["id"], {"type": "room_invite_updated", "invite_id": invite_id})
         return {"ok": True}
 
     @app.get("/api/me/social")
