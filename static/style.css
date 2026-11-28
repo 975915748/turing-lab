@@ -119,3 +119,39 @@ main{min-height:calc(100vh - 170px);padding:32px 0 44px}.card{background:var(--p
  .operation-filters{grid-template-columns:1fr}
  .operation-stats{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
+
+/* Friends, private messages and account points */
+.social-stat-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
+#dmPanel{margin-top:16px;min-width:0}
+#dmPanel .feed{max-height:420px;overflow:auto}
+#dmPanel textarea{min-height:84px}
+#friendSearchResult{margin-top:12px}
+@media(max-width:740px){
+ .social-stat-grid{grid-template-columns:1fr 1fr}
+ #dmPanel .feed{max-height:55vh}
+}
+
+/* Private-message and account-points refinements */
+#dmPanel .feed{display:flex;flex-direction:column;gap:8px;min-width:0}
+#dmPanel .dm-message{max-width:100%;overflow-wrap:anywhere}
+#dmPanel .dm-message.mine{align-self:flex-end;width:fit-content;max-width:88%;background:var(--pane)}
+#dmPanel .feed-text{white-space:pre-wrap;overflow-wrap:anywhere}
+#dmPanel textarea{display:block;width:100%;min-width:0;resize:vertical}
+#dmPanel .form-actions{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+#dmPanel .form-actions .hint{margin:0}
+#friendSearchResult .feed-item{min-width:0;overflow-wrap:anywhere}
+.account-points-result{border-left:4px solid var(--brand)}
+.account-points-result .stat{flex:1;min-width:0;overflow-wrap:anywhere}
+.account-points-result .stat strong{overflow-wrap:anywhere}
+.roster-person{flex-wrap:wrap;gap:7px}
+.roster-person [data-action="friend-from-room"]{margin-left:auto}
+@media(max-width:740px){
+ #dmPanel .dm-message.mine{max-width:94%}
+ .account-points-result .stat-row{gap:8px}
+}
+@media(max-width:420px){
+ #dmPanel .feed{max-height:52vh}
+ #dmPanel .form-actions{align-items:stretch}
+ #dmPanel .form-actions button{width:100%}
+ .roster-person [data-action="friend-from-room"]{font-size:11px;padding:5px 7px}
+}

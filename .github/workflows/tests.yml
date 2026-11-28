@@ -37,6 +37,8 @@ jobs:
           node --check static/app.js
           node --check tests/uid_ui.cjs
           node --check tests/host_ui.cjs
+          node --check tests/model_config_ui.cjs
+          node --check tests/social_points_ui.cjs
           node --check tests/room_delete_ui.cjs
           node --check tests/model_operations_ui.cjs
       - name: Run regression tests

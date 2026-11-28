@@ -1,33 +1,40 @@
 'use strict';
 const $ = (selector) => document.querySelector(selector);
 const app = $('#app');
-const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelSavePending:{},personalModelEpoch:0,modelOperationRecords:[],modelOperationStats:{},modelOperationProfileOptions:[],modelOperationTotal:0,modelOperationOffset:0,modelOperationFilters:{profile_id:'',purpose:'',status:''},modelOperationsExpanded:false,modelOperationRequestVersion:0,modelOperationHistoryPanels:{},roomContextEpoch:0,roomRefreshVersion:0,personalModelListRequestVersion:0,pendingIdempotencyKeys:{}};
+const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelSavePending:{},social:null,dmMessages:[],dmBeforeId:null,dmHasMore:false,dmSocket:null,personalModelEpoch:0,modelOperationRecords:[],modelOperationStats:{},modelOperationProfileOptions:[],modelOperationTotal:0,modelOperationOffset:0,modelOperationFilters:{profile_id:'',purpose:'',status:''},modelOperationsExpanded:false,modelOperationRequestVersion:0,modelOperationHistoryPanels:{},personaDrafts:{},personaEditorOpen:{},serverTimeOffset:0,dmUid:null,dmOtherName:'',dmCanSend:false,dmPending:null,dmDraft:'',dmReconnect:null,dmLoadVersion:0,socialEpoch:0,pointsLedgerEntries:[],pointsLedgerBeforeId:null,pointsLedgerHasMore:false,pointsLedgerLoaded:false,roomContextEpoch:0,roomRefreshVersion:0,personalModelListRequestVersion:0,pendingIdempotencyKeys:{}};
+;
 const esc = (v) => String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const shortDate = s => s ? new Date(s).toLocaleString('zh-CN',{hour12:false}) : '';
 const val = (id) => document.getElementById(id)?.value??'';
 const D = (txt='暂无记录') => `<p class="muted hint">${esc(txt)}</p>`;
 let toastTimer;
-function clearPersonalModelState(){state.personalModelEpoch=(state.personalModelEpoch||0)+1;state.personalModelListRequestVersion=(state.personalModelListRequestVersion||0)+1;state.modelOperationRequestVersion=(state.modelOperationRequestVersion||0)+1;state.roomContextEpoch=(state.roomContextEpoch||0)+1;state.roomRefreshVersion=(state.roomRefreshVersion||0)+1;state.pendingIdempotencyKeys={};state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};state.personalModelTestVersions={};state.personalModelTestPending={};state.personalModelSavePending={};state.modelOperationRecords=[];state.modelOperationStats={};state.modelOperationProfileOptions=[];state.modelOperationTotal=0;state.modelOperationOffset=0;state.modelOperationFilters={profile_id:'',purpose:'',status:''};state.modelOperationsExpanded=false;state.modelOperationHistoryPanels={};}
+function clearPersonalModelState(){
+ stopDmWs();state.social=null;state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;state.dmOtherName='';state.dmCanSend=false;state.dmPending=null;state.dmDraft='';state.dmLoadVersion++;state.socialEpoch++;state.pointsLedgerEntries=[];state.pointsLedgerBeforeId=null;state.pointsLedgerHasMore=false;state.pointsLedgerLoaded=false;
+ state.personalModelEpoch=(state.personalModelEpoch||0)+1;state.personalModelListRequestVersion=(state.personalModelListRequestVersion||0)+1;state.modelOperationRequestVersion=(state.modelOperationRequestVersion||0)+1;state.roomContextEpoch=(state.roomContextEpoch||0)+1;state.roomRefreshVersion=(state.roomRefreshVersion||0)+1;state.pendingIdempotencyKeys={};
+ state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};state.personalModelTestVersions={};state.personalModelTestPending={};state.personalModelSavePending={};state.modelOperationRecords=[];state.modelOperationStats={};state.modelOperationProfileOptions=[];state.modelOperationTotal=0;state.modelOperationOffset=0;state.modelOperationFilters={profile_id:'',purpose:'',status:''};state.modelOperationsExpanded=false;state.modelOperationHistoryPanels={};state.personaDrafts={};state.personaEditorOpen={};
+}
 function toast(message){const el=$('#toast');el.textContent=message;el.classList.add('visible');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('visible'),4200)}
 function setConnection(txt,online){const el=$('#connection');el.textContent=(online?'● ':'○ ')+txt;el.className='connection'+(online?' online':'')}
 function applyPrefs(){let theme=localStorage.getItem('turing_theme')||'light';document.body.dataset.theme=theme;$('#themeBtn').textContent=theme==='light'?'☾ 深色':'☀ 日间';let f=Number(localStorage.getItem('turing_font')||15);if(f<12||f>22)f=15;document.documentElement.style.setProperty('--font',f+'px');$('#fontSize').value=f;$('#fontValue').textContent=f;}
 $('#themeBtn').addEventListener('click',()=>{localStorage.setItem('turing_theme',document.body.dataset.theme==='light'?'dark':'light');applyPrefs()});
 $('#fontSize').addEventListener('input',e=>{localStorage.setItem('turing_font',e.target.value);applyPrefs()});
 $('#logoutBtn').addEventListener('click',async()=>{try{await api('/api/logout',{method:'POST'});}catch(e){toast(e.message)} state.me=null;state.room=null;state.roomId=null;state.personalModels=[];clearPersonalModelState();state.chat=[];state.chatDraft='';state.drafts={};state.personalReturn=null;state.tab='login';state.legacyLogin=false;stopWs();history.replaceState(null,'',location.pathname);await init()});
-async function api(path,{method='GET',body,raw=false,matchNumber,roundNumber,idempotencyKey}={}){
- const requestAccountEpoch=state.personalModelEpoch,requestUid=state.me?.user?.uid,requestCsrf=state.me?.user?.csrf;
- const opts={method,headers:{}};
+async function api(path,{method='GET',body,raw=false,headers:extraHeaders={},matchNumber,roundNumber,idempotencyKey}={}){
+ const requestAccountEpoch=state.personalModelEpoch??0,requestUid=state.me?.user?.uid??null,requestCsrf=state.me?.user?.csrf??null;
+ const opts={method,headers:{...extraHeaders}};
  if(body!==undefined){opts.headers['Content-Type']='application/json';opts.body=JSON.stringify(body)}
  if(method!=='GET'&&state.me?.user?.csrf)opts.headers['X-CSRF-Token']=state.me.user.csrf;
  if(method!=='GET'&&matchNumber!==undefined)opts.headers['X-Match-Number']=String(matchNumber);
- if(method!=='GET'&&roundNumber!==undefined)opts.headers['X-Round-Number']=String(roundNumber);
  else if(method!=='GET'&&state.room&&path.startsWith(`/api/rooms/${state.room.id}/`))opts.headers['X-Match-Number']=String(state.room.match_number);
+ if(method!=='GET'&&roundNumber!==undefined)opts.headers['X-Round-Number']=String(roundNumber);
  if(method!=='GET'&&idempotencyKey)opts.headers['Idempotency-Key']=idempotencyKey;
- let response;
- try{response=await fetch(path,opts)}catch(error){error.networkFailure=true;throw error}
+ let response;try{response=await fetch(path,opts)}catch(error){error.networkFailure=true;throw error}
  if(raw){if(!response.ok){const error=new Error('下载失败');error.status=response.status;throw error;}return response.blob()}
  const data=await response.json().catch(()=>({detail:'网络连接错误'}));
- if(!response.ok){if(response.status===401&&state.me&&state.personalModelEpoch===requestAccountEpoch&&state.me?.user?.uid===requestUid&&state.me?.user?.csrf===requestCsrf){state.me=null;state.room=null;state.roomId=null;state.personalModels=[];clearPersonalModelState();state.chat=[];state.chatDraft='';state.drafts={};stopWs();renderAuth();}const error=new Error(typeof data.detail==='string'?data.detail:'请求失败');error.status=response.status;throw error;}
+ if(!response.ok){
+  if(response.status===401&&state.me&&state.personalModelEpoch===requestAccountEpoch&&state.me?.user?.uid===requestUid&&state.me?.user?.csrf===requestCsrf){state.me=null;state.room=null;state.roomId=null;state.personalModels=[];clearPersonalModelState();state.chat=[];state.chatDraft='';state.drafts={};stopWs();renderAuth();}
+  const error=new Error(typeof data.detail==='string'?data.detail:'请求失败');error.status=response.status;throw error;
+ }
  return data;
 }
 function newIdempotencyKey(){return globalThis.crypto?.randomUUID?.()||('op-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2));}
@@ -58,24 +65,28 @@ function stopWs(){state.lastTyping=null;if(state.reconnect)clearTimeout(state.re
 function connectWs(roomId){stopWs();if(state.roomId!==roomId)return;
  const proto=location.protocol==='https:'?'wss:':'ws:';
  const ws=new WebSocket(`${proto}//${location.host}/ws/rooms/${roomId}`);state.ws=ws;
- ws.onopen=()=>{setConnection('实时同步中',true);sendTypingFromDraft();if(!state.room?.is_judge)loadRoomChat().catch(()=>{})};
- ws.onmessage=async e=>{let m;try{m=JSON.parse(e.data)}catch{return}
- if(m.type==='room_updated' && state.roomId===roomId){await refreshRoom();}
+ ws.onopen=()=>{setConnection('在线',true);sendTypingFromDraft();if(!state.room?.is_judge)loadRoomChat().catch(()=>{})};
+ ws.onmessage=async e=>{if(state.exitingRoom)return;let m;try{m=JSON.parse(e.data)}catch{return}
+ if(m.type==='room_updated' && state.roomId===roomId){
+  if(m.reason==='room_closed'){await loadLobby();toast('房主已关闭房间，记录已保留。');return;}
+  await refreshRoom();
+ }
  if(m.type==='chat_message'&&state.roomId===roomId&&!state.room?.is_judge&&m.match_number===state.room?.match_number&&state.room?.status==='open'){addChatMessage(m.message)}
  if(m.type==='chat_cleared'&&state.roomId===roomId&&m.match_number===state.room?.match_number){state.chat=[];state.chatDraft='';renderRoom()}
  if(m.type==='typing_status'&&state.roomId===roomId){state.typing=m.round===state.room?.current_round&&m.match_number===state.room?.match_number?(m.states||{}):{};updateTypingBadges()}};
- ws.onclose=e=>{if(state.roomId!==roomId||state.ws!==ws)return;if(e.code===1008){state.roomId=null;state.room=null;state.typing={};history.replaceState(null,'',location.pathname);loadLobby().then(()=>toast(e.reason==='房间已删除'?'房间已删除':'房间访问权限已失效或你已被移出')).catch(err=>toast(err.message));return;}setConnection('重连中',false);state.reconnect=setTimeout(()=>connectWs(roomId),3000)};
+ ws.onclose=e=>{if(state.exitingRoom||state.roomId!==roomId||state.ws!==ws)return;if(e.code===1008){state.roomId=null;state.room=null;state.typing={};history.replaceState(null,'',location.pathname);loadLobby().then(()=>toast(e.reason==='房间已删除'?'房间已删除':'房间访问权限已失效或你已被移出')).catch(err=>toast(err.message));return;}setConnection('重连中',false);state.reconnect=setTimeout(()=>connectWs(roomId),3000)};
  ws.onerror=()=>setConnection('连接异常',false);
 }
 async function refreshRoom(expectedContext=null){
  const roomId=expectedContext?.roomId??state.roomId;
  if(!roomId||location.hash.startsWith('#profile'))return false;
  const context=expectedContext||captureRoomOperationContext(),requestVersion=++state.roomRefreshVersion;
- const current=()=>state.roomId===roomId&&state.room?.id===roomId&&state.roomContextEpoch===context.epoch&&
+ const current=()=>!state.exitingRoom&&state.roomId===roomId&&state.room?.id===roomId&&state.roomContextEpoch===context.epoch&&
   state.me?.user?.uid===context.uid&&state.me?.user?.csrf===context.csrf&&state.roomRefreshVersion===requestVersion;
  try{
   const r=await api(`/api/rooms/${roomId}`);
   if(!current())return false;
+  state.serverTimeOffset=Date.parse(r.server_now||new Date().toISOString())-Date.now();
   if(!state.room||r.current_round!==state.room.current_round||r.match_number!==state.room.match_number){state.selectedRound=r.current_round;state.lastTyping=null;state.typing={};}
   if(state.room&&(r.match_number!==state.room.match_number||(!state.room.records_deleted&&r.records_deleted))){for(const key of Object.keys(state.drafts))if(key.startsWith(`${r.id}:`))delete state.drafts[key];const dialog=$('#judgeNotice');if(dialog?.open)dialog.close();state.roomView='match';state.chat=[];state.chatDraft='';}
   state.room=r;
@@ -93,7 +104,7 @@ async function refreshRoom(expectedContext=null){
 }
 async function init(){applyPrefs();try{const previousUid=state.me?.user?.uid;state.me=await api('/api/me');if(previousUid&&previousUid!==state.me?.user?.uid)clearPersonalModelState();$('#logoutBtn').classList.remove('hide');const q=/^#room=(\d+)$/.exec(location.hash);if(location.hash.startsWith('#profile')){state.personalReturn=profileReturnFromHash();await openPersonalCenter({fromHash:true});}else if(q){await openRoom(Number(q[1]));}else renderLobby()}catch(e){state.me=null;state.roomId=null;state.personalModels=[];state.chat=[];$('#logoutBtn').classList.add('hide');renderAuth();}}
 function renderAuth(){
- stopWs();$('#logoutBtn').classList.add('hide');setConnection('未登录',false);
+ clearDmState();state.social=null;stopWs();$('#logoutBtn').classList.add('hide');setConnection('未登录',false);
  const reg=state.tab==='register',legacy=!!state.legacyLogin;
  app.innerHTML=`<div class="auth"><div class="intro"><div class="hero-mark">T.</div><div class="overline">HUMAN × AI / ANONYMOUS JUDGING</div><h1>在同一个房间里，<br>验证谁更像人类。</h1><p class="muted">支持真人裁判独立登录与 AI 裁判由房主手动转录；各裁判独立判断。AI 回答仍由房主手动录入；全部参赛者提交后统一公布回答。</p><div class="stat-row"><div class="stat">◈ 自由注册</div><div class="stat">◈ 匿名裁判包</div><div class="stat">◈ 完整轮次日志</div></div></div>
  <section class="card"><div class="overline">欢迎加入</div><h2 style="margin:7px 0 0">${reg?'创建你的账号':'登录图灵实验室'}</h2>
@@ -115,7 +126,7 @@ function renderLobby(){
  <section class="notice" style="margin-bottom:20px"><div class="label-line"><div><div class="tiny muted">你的登录 UID</div><strong class="code" id="accountUid">${esc(state.me.user.uid)}</strong></div><button class="small" data-action="copy-uid" data-uid="${esc(state.me.user.uid)}">复制 UID</button></div><p class="hint" style="margin:8px 0 0">请保存此 UID，下次使用它和密码登录。</p></section>
  <div class="grid2"><section class="card"><h2>加入已有房间</h2><form data-form="join"><label class="field">邀请码</label><input name="code" maxlength="20" required type="text" placeholder="例如 A1B2C3D4E5"><label class="field">加入身份</label><select name="role"><option value="player">参赛者</option>${isAdmin?"":'<option value="judge">真人裁判</option>'}</select><div class="form-actions"><button class="primary" type="submit">加入比赛 →</button></div></form></section>
  <section class="card"><h2>创建一场图灵测试</h2><form data-form="room"><label class="field">比赛名称</label><input type="text" name="title" maxlength="80" required placeholder="例如 人机辨识实验 #1"><label class="field">旧版手工转录裁判名（多裁判模式不使用）</label><input type="text" name="judge" maxlength="40" value="裁判" required><div class="form-actions"><button class="primary" type="submit">＋ 创建房间</button></div></form></section></div>
- <section class="spaced"><div class="label-line"><h2>${isAdmin?'全部房间':'我的房间'}</h2><span class="pill">${state.me.rooms.length} 个</span></div><div class="roomcards">${state.me.rooms.length?state.me.rooms.map(r=>`<div class="card flat room-card"><div class="overline">ROOM ${r.id}</div><h3>${esc(r.title)}</h3><div class="muted hint">${r.status==='finished'?'比赛已结束':'第 '+r.current_round+' 轮进行中'}${r.role==='judge'?' · 裁判席':r.role==='owner'?' · 我是房主':''}</div><div class="buttonrow"><button data-action="open" data-id="${r.id}">进入房间 →</button>${r.can_manage?`<button class="small danger" data-action="delete-room" data-id="${r.id}" data-match="${r.match_number}">删除房间</button>`:''}</div></div>`).join(''):D('尚未加入任何房间，可以创建房间或输入邀请码。')}</div></section>
+ <section class="spaced"><div class="label-line"><h2>${isAdmin?'全部房间':'我的房间'}</h2><span class="pill">${state.me.rooms.length} 个</span></div><div class="roomcards">${state.me.rooms.length?state.me.rooms.map(r=>`<div class="card flat room-card"><div class="overline">ROOM ${r.id}</div><h3>${esc(r.title)}</h3><div class="muted hint">${r.status==='closed'?'房间已关闭':r.status==='finished'?'比赛已结束':'第 '+r.current_round+' 轮进行中'}${r.role==='judge'?' · 裁判席':r.role==='owner'?' · 我是房主':''}</div><div class="buttonrow"><button data-action="open" data-id="${r.id}">进入房间 →</button>${r.can_manage?`<button class="small danger" data-action="delete-room" data-id="${r.id}" data-match="${r.match_number}">删除房间</button>`:''}</div></div>`).join(''):D('尚未加入任何房间，可以创建房间或输入邀请码。')}</div></section>
  ${completed.length?`<section class="spaced"><h2>已完赛房间记录</h2><p class="hint">任何已登录用户都可以清空这些房间的比赛记录。清空对所有人立即生效，房间本身保留。</p><div class="roomcards">${completed.map(r=>`<div class="card flat room-card"><div class="overline">ROOM ${r.id} · 第 ${r.match_number} 场</div><h3>${esc(r.title)}</h3><button class="danger small" data-action="delete-records" data-id="${r.id}" data-match="${r.match_number}">删除所有人的比赛记录</button></div>`).join('')}</div></section>`:''}`;
 }
 async function loadAccounts(){
@@ -133,29 +144,52 @@ function finishedActions(r){
  if(r.status!=='finished')return '';
  return `<div class="buttonrow spaced" style="margin-bottom:20px">${r.can_manage?'<button class="primary" data-action="restart-match">再次开赛</button>':''}${r.records_deleted?'':`<button class="danger" data-action="delete-records" data-id="${r.id}" data-match="${r.match_number}">删除所有人的比赛记录</button>`}</div>`;
 }
+function renderMyPointsResult(r){
+ const x=r.my_points_result;if(!x)return '';
+ const delta=String(x.delta),change=delta==='0'?'0':delta.startsWith('-')?delta:'+'+delta;
+ return `<section class="card compact account-points-result"><div class="overline">ACCOUNT POINTS / MATCH RESULT</div><h2>本场账号积分</h2><div class="label-line"><strong>${x.outcome==='win'?'胜利':'失败'}</strong><span class="pill ${x.outcome==='win'?'ok':'warn'}">${esc(change)} 分</span></div><div class="stat-row"><div class="stat">更新后总积分 <strong>${esc(x.points_after)}</strong></div><div class="stat">当前连胜 <strong>${esc(x.streak_after)}</strong></div></div></section>`;
+}
+async function leaveCurrentRoom(){
+ if(state.exitingRoom)return false;
+ const back=state.personalReturn;
+ const r=state.room||(back?.roomId?await api('/api/rooms/'+back.roomId):null);
+ if(r?.is_owner&&r.status==='open'&&!confirm('返回大厅将关闭房间，所有人退出当前比赛；记录保留，不结算积分。仅想退出参赛请取消，并到参赛者管理选择退赛。确定关闭房间？'))return false;
+ state.exitingRoom=true;
+ try{
+  if(r)await api('/api/rooms/'+r.id+'/leave',{method:'POST',body:{match_number:back?.matchNumber??r.match_number,confirm:true}});
+  if(r)for(const key of Object.keys(state.drafts))if(key.startsWith(r.id+':'))delete state.drafts[key];
+  const notice=$('#judgeNotice');if(notice?.open)notice.close();
+  await loadLobby();
+  return true;
+ }finally{state.exitingRoom=false;}
+}
+function renderClosedRoom(r){
+ const rounds=r.rounds.map(round=>'<section class="card"><h2>第 '+round.number+' 轮</h2><div class="question">'+esc(round.question||(round.questions||[]).map(q=>q.text).join('\n\n')||'尚未开启作答')+'</div><div class="feed spaced">'+Object.entries(round.answers||{}).map(([alias,a])=>'<article class="feed-item"><strong>'+esc(alias)+'</strong><div class="feed-text">'+esc(a.text)+'</div></article>').join('')+'</div><button class="small" data-action="closed-round-log" data-round="'+round.number+'">下载本轮 Log</button></section>').join('');
+ const packets=r.can_manage&&r.packets?.length?'<section class="card"><details><summary>单轮裁判包快照（'+r.packets.length+'）</summary><div class="feed spaced">'+r.packets.map(p=>'<div class="label-line"><strong>第 '+p.through_round+' 轮 · v'+p.version+'</strong><button class="small" data-action="view-packet" data-id="'+p.id+'">查看 / 复制</button></div>').join('')+'</div></details></section>':'';
+ app.innerHTML='<div class="pagehead"><div><h1>'+esc(r.title)+'</h1><h2>房间已关闭</h2><p class="muted">比赛已停止，记录保留，未结算积分。</p></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button data-action="back">← 返回大厅</button></div></div><div class="buttonrow spaced"><button data-action="download-full-log">下载整场 Log</button>'+(r.can_manage?'<button class="primary" data-action="restart-match">再次开赛</button>':'')+'</div><div class="stack spaced">'+rounds+packets+renderPublicChat(r)+'</div>';
+}
 function renderReadyRoom(r){
- app.innerHTML=`<div class="pagehead"><div><div class="overline">ROOM ${r.id} · 第 ${r.match_number} 场</div><h1>${esc(r.title)}</h1></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button data-action="back">← 返回大厅</button></div></div><section class="card"><h2>${r.can_manage?'开始下一场比赛':'等待再次开赛'}</h2>${finishedActions(r)}</section>`;
+ app.innerHTML=`<div class="pagehead"><div><div class="overline">ROOM ${r.id} · 第 ${r.match_number} 场</div><h1>${esc(r.title)}</h1></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button data-action="back">← 返回大厅</button></div></div>${renderMyPointsResult(r)}<section class="card"><h2>${r.can_manage?'开始下一场比赛':'等待再次开赛'}</h2>${finishedActions(r)}</section>`;
 }
 async function openRoom(id,options={}){
- const epoch=++state.roomContextEpoch,uid=state.me?.user?.uid,csrf=state.me?.user?.csrf;
- state.roomRefreshVersion=(state.roomRefreshVersion||0)+1;state.roomId=id;state.selectedRound=options.round||null;state.roomView=options.view||'match';state.room=null;state.chat=[];state.chatDraft='';
- const current=()=>state.roomContextEpoch===epoch&&state.roomId===id&&state.me?.user?.uid===uid&&state.me?.user?.csrf===csrf;
+ clearDmState();const epoch=++state.roomContextEpoch,accountEpoch=state.personalModelEpoch,uid=state.me?.user?.uid,csrf=state.me?.user?.csrf;
+ state.roomRefreshVersion=(state.roomRefreshVersion||0)+1;state.roomId=id;state.room=null;state.selectedRound=options.round||null;state.roomView=options.view||'match';state.chat=[];state.chatDraft='';
+ const current=()=>state.roomContextEpoch===epoch&&state.personalModelEpoch===accountEpoch&&state.roomId===id&&state.me?.user?.uid===uid&&state.me?.user?.csrf===csrf;
  try{
-  const r=await api(`/api/rooms/${id}`);
-  if(!current())return;
-  state.room=r;state.typing={};state.selectedRound=options.round&&r.rounds.some(x=>x.number===options.round)?options.round:r.current_round;history.replaceState(null,'',`#room=${id}`);
+  const r=await api(`/api/rooms/${id}`);if(!current())return;
+  state.serverTimeOffset=Date.parse(r.server_now||new Date().toISOString())-Date.now();state.room=r;state.typing={};
+  state.selectedRound=options.round&&r.rounds.some(x=>x.number===options.round)?options.round:r.current_round;history.replaceState(null,'',`#room=${id}`);
   await loadPersonalModels().catch(()=>{});if(!current())return;
-  if(!r.is_judge&&r.status==='open')await loadRoomChat().catch(()=>{});if(!current())return;
+  if(!r.is_judge&&r.status!=='finished')await loadRoomChat().catch(()=>{});if(!current())return;
   renderRoom();connectWs(id);maybeNotifyJudge();
- }catch(e){if(!current())return;state.roomId=null;state.room=null;state.chat=[];history.replaceState(null,'',location.pathname);toast(e.message);await loadLobby()}
+ }catch(e){if(!current())return;state.roomId=null;state.room=null;state.chat=[];history.replaceState(null,'',location.pathname);toast(e.message);await loadLobby();}
 }
 async function loadLobby(){
- const epoch=++state.roomContextEpoch,accountEpoch=state.personalModelEpoch;
- const uid=state.me?.user?.uid,csrf=state.me?.user?.csrf;
+ stopWs();clearDmState();state.roomId=null;state.room=null;history.replaceState(null,'',location.pathname);
+ const epoch=++state.roomContextEpoch,accountEpoch=state.personalModelEpoch,uid=state.me?.user?.uid,csrf=state.me?.user?.csrf;
  state.roomRefreshVersion=(state.roomRefreshVersion||0)+1;
  const me=await api('/api/me');
- if(state.roomContextEpoch!==epoch||state.personalModelEpoch!==accountEpoch||
-    state.me?.user?.uid!==uid||state.me?.user?.csrf!==csrf)return;
+ if(state.roomContextEpoch!==epoch||state.personalModelEpoch!==accountEpoch||state.me?.user?.uid!==uid||state.me?.user?.csrf!==csrf)return;
  state.me=me;state.chat=[];state.chatDraft='';state.personalReturn=null;renderLobby();
 }
 
@@ -193,9 +227,9 @@ async function loadModelOperationRecords(){
  state.modelOperationTotal=data.total||0;
 }
 async function loadRoomChat(){
- const r=state.room;if(!r||r.is_judge||r.status!=='open'){state.chat=[];return;}
+ const r=state.room;if(!r||r.is_judge||r.status==='finished'){state.chat=[];return;}
  const data=await api(`/api/rooms/${r.id}/chat?match_number=${r.match_number}`);
- if(state.roomId===r.id&&state.room?.match_number===data.match_number&&state.room?.status==='open'&&!state.room?.is_judge)state.chat=data.messages||[];
+ if(state.roomId===r.id&&state.room?.match_number===data.match_number&&state.room?.status!=='finished'&&!state.room?.is_judge)state.chat=data.messages||[];
 }
 function chatMessageHtml(m){return `<article class="chat-message"><div class="chat-meta"><strong>${esc(m.sender_name)}</strong><span class="chat-uid">${esc(m.sender_uid)}</span><time>${esc(shortDate(m.created_at))}</time></div><div class="chat-body">${esc(m.text)}</div></article>`;}
 function addChatMessage(message){
@@ -206,9 +240,9 @@ function addChatMessage(message){
 function renderPublicChat(r){
  const messages=state.chat||[];
  return `<section class="card chat-card"><div class="label-line"><div><div class="overline">ROOM CHAT / MATCH ${r.match_number}</div><h2>公共聊天</h2></div><span class="pill">${messages.length} 条消息</span></div>
- <p class="hint">仅本房间的人类参赛者、房主和管理员可见。真人裁判不参与此聊天。</p>
+ 
  <div id="chatMessages" class="chat-list" aria-live="polite" aria-relevant="additions text">${messages.map(chatMessageHtml).join('')||D('暂无聊天消息')}</div>
- ${r.status==='open'?`<form data-form="chat" class="chat-compose"><label class="field" for="roomChatInput">发送消息</label><textarea id="roomChatInput" name="text" data-chat-draft maxlength="2000" required placeholder="输入纯文本消息（最多 2000 字）">${esc(state.chatDraft)}</textarea><div class="form-actions"><span class="hint">纯文本 · 2000 字以内</span><button class="primary" type="submit">发送</button></div></form>`:'<p class="hint spaced">本场比赛已完赛，公共聊天已关闭。</p>'}
+ ${r.status==='open'?`<form data-form="chat" class="chat-compose"><label class="field" for="roomChatInput">发送消息</label><textarea id="roomChatInput" name="text" data-chat-draft maxlength="2000" required placeholder="输入纯文本消息（最多 2000 字）">${esc(state.chatDraft)}</textarea><div class="form-actions"><span class="hint">纯文本 · 2000 字以内</span><button class="primary" type="submit">发送</button></div></form>`:'<p class="hint spaced">'+(r.status==='closed'?'房间已关闭，聊天记录保留。':'本场比赛已完赛，公共聊天已关闭。')+'</p>'}
  </section>`;
 }
 const myDraft=(name,defaultText='')=>esc(state.drafts[`${state.roomId}:${state.room?.match_number}:${state.selectedRound}:${name}`]??defaultText);
@@ -260,11 +294,197 @@ function maybeNotifyJudge(){
   sessionStorage.setItem(key,'1');
  }catch(e){toast(message);}
 }
-function makeRoster(r){const submitted=new Set(r.rounds.find(x=>x.number===state.selectedRound)?.submitted||[]);
+function makeRoster(r){
+ const submitted=new Set(r.rounds.find(x=>x.number===state.selectedRound)?.submitted||[]);
  const people=[...r.humans.map(h=>({...h,role:'人类',label:h.name})),...r.ais.map(a=>({...a,role:'AI',label:a.name}))].sort((a,b)=>a.alias.localeCompare(b.alias));
- return people.map(p=>`<div class="roster-person"><div class="person-left"><span class="alias">${esc(p.alias)}</span><div style="min-width:0"><span class="person-name" title="${esc(p.label)}">${esc(p.label)}</span><span class="roster-role">${p.role==='人类'?'人类 · '+esc(p.uid):'AI 参赛位'}${p.alias===r.mine?' · 我':''}</span></div></div><span class="pill ${submitted.has(p.alias)?'ok':''}" ${p.role==='人类'&&r.mine?`data-typing-alias="${esc(p.alias)}"`:''} title="本轮提交状态">${submitted.has(p.alias)?'√':p.role==='人类'&&r.mine?(state.selectedRound===r.current_round&&state.typing[p.alias]?'....':'X'):'—'}</span></div>`).join('')||D('等待人类玩家加入');}
-
-function profileReturnFromHash(){const m=/^#profile\?room=(\d+)&view=([^&]+)&round=(\d+)$/.exec(location.hash);return m?{roomId:Number(m[1]),view:decodeURIComponent(m[2]),round:Number(m[3])}:null;}
+ return people.map(p=>`<div class="roster-person"><div class="person-left"><span class="alias">${esc(p.alias)}</span><div style="min-width:0"><span class="person-name" title="${esc(p.label)}">${esc(p.label)}</span><span class="roster-role">${p.role==='人类'?'人类 · '+esc(p.uid):'AI 参赛位'}${p.alias===r.mine?' · 我':''}</span></div></div><span class="pill ${submitted.has(p.alias)?'ok':''}" ${p.role==='人类'&&p.alias===r.mine?`data-typing-alias="${esc(p.alias)}"`:''} title="本轮提交状态">${submitted.has(p.alias)?'√':p.role==='人类'&&p.alias===r.mine?(state.selectedRound===r.current_round&&state.typing[p.alias]?'....':'X'):'—'}</span>${p.role==='人类'&&p.alias!==r.mine?`<button class="small" data-action="friend-from-room" data-uid="${esc(p.uid)}">加好友</button>`:''}</div>`).join('')||D('等待人类玩家加入');
+}
+function profileReturnFromHash(){const m=/^#profile\?room=(\d+)&view=([^&]+)&round=(\d+)(?:&match=(\d+))?$/.exec(location.hash);return m?{roomId:Number(m[1]),view:decodeURIComponent(m[2]),round:Number(m[3]),matchNumber:m[4]?Number(m[4]):null}:null;}
+function stopDmWs(){
+ if(state.dmReconnect)clearTimeout(state.dmReconnect);state.dmReconnect=null;
+ if(state.dmSocket){const ws=state.dmSocket;state.dmSocket=null;ws.onclose=null;try{ws.close();}catch{}}
+}
+function clearDmState(){
+ stopDmWs();state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;
+ state.dmOtherName='';state.dmCanSend=false;state.dmPending=null;state.dmDraft='';state.dmLoadVersion++;
+}
+async function loadSocial(){
+ const uid=state.me?.user?.uid,version=++state.socialEpoch;
+ const data=await api('/api/me/social');
+ if(state.socialEpoch!==version||state.me?.user?.uid!==uid)return state.social;
+ state.social=data;
+ if(state.dmUid){
+  const conv=state.social.conversations?.find(x=>x.uid===state.dmUid);
+  if(conv){state.dmCanSend=!!conv.can_send;if(conv.display_name)state.dmOtherName=conv.display_name;if(!conv.can_send){state.dmPending=null;state.dmDraft='';}}
+  else {state.dmCanSend=false;state.dmPending=null;state.dmDraft='';}
+ }
+ return state.social;
+}
+function mergeDmMessages(...groups){
+ const map=new Map();for(const group of groups)for(const message of group||[])map.set(Number(message.id),message);
+ return [...map.values()].sort((a,b)=>Number(a.id)-Number(b.id));
+}
+function mergeLedgerEntries(...groups){
+ const map=new Map();for(const group of groups)for(const entry of group||[])map.set(Number(entry.id),entry);
+ return [...map.values()].sort((a,b)=>Number(b.id)-Number(a.id));
+}
+function captureDmDraft(){
+ const form=$('#dmPanel form[data-form="dm-send"]');
+ if(form&&form.dataset.uid===state.dmUid){
+  const textarea=form.querySelector('textarea[name="text"]');
+  if(textarea)state.dmDraft=textarea.value;
+ }
+}
+function dmMessageHtml(m){
+ return `<div class="feed-item dm-message ${m.mine?'mine':''}"><strong>${m.mine?'我':esc(m.sender_name)}</strong><div class="feed-text">${esc(m.text)}</div><div class="tiny muted">${esc(shortDate(m.created_at))}</div></div>`;
+}
+function renderDmPanel(){
+ const box=$('#dmPanel');if(!box)return;
+ captureDmDraft();
+ const uid=state.dmUid;if(!uid){box.innerHTML='';return;}
+ const friend=state.social?.friends?.find(x=>x.uid===uid);
+ const conv=state.social?.conversations?.find(x=>x.uid===uid);
+ const title=friend?.note||conv?.note||state.dmOtherName||uid;
+ const canSend=conv?!!conv.can_send:state.dmCanSend;
+ box.innerHTML=`<div class="divider"></div><div class="label-line"><h3>与 ${esc(title)}（${esc(uid)}）私信</h3><button class="small" data-action="dm-close">收起</button></div><div class="feed" id="dmFeed" aria-live="polite">${state.dmMessages.map(dmMessageHtml).join('')||D('暂无消息')}</div>${state.dmHasMore?`<button class="small" data-action="dm-older" data-uid="${esc(uid)}">加载更早消息</button>`:''}${canSend?`<form data-form="dm-send" data-uid="${esc(uid)}"><textarea name="text" maxlength="2000" required placeholder="输入私信">${esc(state.dmDraft||'')}</textarea><div class="form-actions"><span class="hint">纯文本 · 最多 2000 字</span><button class="primary" type="submit">发送</button></div></form>`:D('好友关系已解除，只能查看历史消息。')}`;
+ const feed=$('#dmFeed');if(feed)feed.scrollTop=feed.scrollHeight;
+}
+async function markDmRead(uid,messageId,{refresh=true,accountUid=state.me?.user?.uid}={}){
+ if(!messageId)return;
+ const accountCsrf=state.me?.user?.csrf,accountEpoch=state.personalModelEpoch;
+ await api('/api/messages/'+encodeURIComponent(uid)+'/read',{method:'POST',body:{last_read_message_id:Number(messageId)}});
+ if(state.me?.user?.uid!==accountUid||state.me?.user?.csrf!==accountCsrf||state.personalModelEpoch!==accountEpoch)return;
+ if(refresh){
+  await loadSocial();
+  if(location.hash.startsWith('#profile')&&state.me?.user?.uid===accountUid&&state.me?.user?.csrf===accountCsrf&&state.personalModelEpoch===accountEpoch)refreshSocialPanel();
+ }
+}
+async function openDm(uid){
+ const version=++state.dmLoadVersion,accountUid=state.me?.user?.uid,accountCsrf=state.me?.user?.csrf,accountEpoch=state.personalModelEpoch;
+ if(state.dmUid!==uid)state.dmDraft='';
+ state.dmUid=uid;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;
+ renderDmPanel();
+ const data=await api('/api/messages/'+encodeURIComponent(uid));
+ if(version!==state.dmLoadVersion||state.dmUid!==uid||state.me?.user?.uid!==accountUid||state.me?.user?.csrf!==accountCsrf||state.personalModelEpoch!==accountEpoch)return null;
+ state.dmOtherName=data.other_name;state.dmCanSend=!!data.can_send;
+ state.dmMessages=mergeDmMessages(data.messages,state.dmMessages);
+ state.dmBeforeId=data.next_before_id;state.dmHasMore=!!data.has_more;
+ renderDmPanel();
+ if(data.last_received_message_id)await markDmRead(uid,data.last_received_message_id,{refresh:false,accountUid}).catch(()=>{});
+ await loadSocial();
+ if(location.hash.startsWith('#profile')&&state.me?.user?.uid===accountUid&&state.me?.user?.csrf===accountCsrf&&state.personalModelEpoch===accountEpoch&&state.dmLoadVersion===version&&state.dmUid===uid)refreshSocialPanel();
+ return state.dmLoadVersion===version&&state.dmUid===uid?version:null;
+}
+async function loadOlderDm(uid){
+ if(uid!==state.dmUid||!state.dmBeforeId)return;
+ const accountUid=state.me?.user?.uid,accountCsrf=state.me?.user?.csrf,accountEpoch=state.personalModelEpoch,version=state.dmLoadVersion;
+ const first=state.dmMessages[0]?.id;if(!first)return;
+ const feed=$('#dmFeed'),oldHeight=feed?.scrollHeight||0,oldTop=feed?.scrollTop||0;
+ const page=await api('/api/messages/'+encodeURIComponent(uid)+'?before_id='+encodeURIComponent(state.dmBeforeId));
+ if(uid!==state.dmUid||state.me?.user?.uid!==accountUid||state.me?.user?.csrf!==accountCsrf||state.personalModelEpoch!==accountEpoch||state.dmLoadVersion!==version)return;
+ state.dmMessages=mergeDmMessages(page.messages,state.dmMessages);
+ state.dmBeforeId=page.next_before_id;state.dmHasMore=!!page.has_more;
+ renderDmPanel();
+ const next=$('#dmFeed');if(next)next.scrollTop=next.scrollHeight-oldHeight+oldTop;
+}
+async function loadPointsLedger({reset=false}={}){
+ const accountUid=state.me?.user?.uid,before=reset?null:state.pointsLedgerBeforeId;
+ const params=new URLSearchParams({limit:'20'});if(before)params.set('before_id',String(before));
+ const data=await api('/api/me/points/ledger?'+params.toString());
+ if(state.me?.user?.uid!==accountUid)return;
+ state.pointsLedgerEntries=reset?data.entries:mergeLedgerEntries(state.pointsLedgerEntries,data.entries);
+ state.pointsLedgerBeforeId=data.next_before_id;state.pointsLedgerHasMore=!!data.has_more;state.pointsLedgerLoaded=true;
+ renderPointsLedger();
+}
+function renderPointsLedger(){
+ const el=$('#pointsLedger');if(!el)return;
+ if(!state.pointsLedgerLoaded){el.innerHTML='';return;}
+ const rows=state.pointsLedgerEntries.map(x=>{
+  const delta=String(x.delta),sign=delta==='0'||delta.startsWith('-')?'':'+'; 
+  return `<div class="feed-item">${x.outcome==='win'?'胜利':'失败'} · 房间 ${esc(x.room_id)} 第 ${esc(x.match_number)} 场 · ${sign}${esc(delta)} · 积分 ${esc(x.points_after)} · 连胜 ${esc(x.streak_after)} · ${esc(shortDate(x.settled_at))}</div>`;
+ }).join('')||D('暂无积分流水');
+ el.innerHTML=rows+(state.pointsLedgerHasMore?'<button class="small spaced" data-action="points-ledger-more">加载更多</button>':'');
+}
+function refreshSocialPanel(){
+ const panel=$('#socialPanel');if(!panel)return;
+ captureDmDraft();
+ const holder=document.createElement('div');
+ holder.innerHTML=renderSocialPanel();
+ const next=holder.firstElementChild;
+ if(next)panel.replaceWith(next);
+ renderDmPanel();renderPointsLedger();
+}
+async function refreshSocialUi(){
+ const accountUid=state.me?.user?.uid,accountCsrf=state.me?.user?.csrf,accountEpoch=state.personalModelEpoch;
+ await loadSocial();
+ if(state.me?.user?.uid!==accountUid||state.me?.user?.csrf!==accountCsrf||state.personalModelEpoch!==accountEpoch)return;
+ if(location.hash.startsWith('#profile'))refreshSocialPanel();
+}
+function connectDmWs(){
+ stopDmWs();const uid=state.me?.user?.uid;if(!uid||!location.hash.startsWith('#profile'))return;
+ const proto=location.protocol==='https:'?'wss:':'ws:';
+ const ws=new WebSocket(`${proto}//${location.host}/ws/messages`);state.dmSocket=ws;
+ ws.onopen=async()=>{
+  if(state.dmSocket!==ws||state.me?.user?.uid!==uid)return;
+  try{
+   await loadSocial();
+   if(state.dmSocket!==ws||state.me?.user?.uid!==uid)return;
+   if(state.dmUid)await openDm(state.dmUid);else refreshSocialPanel();
+  }catch{}
+ };
+ ws.onmessage=async event=>{
+  if(state.dmSocket!==ws||state.me?.user?.uid!==uid)return;
+  let message;try{message=JSON.parse(event.data)}catch{return;}
+  if(message.type==='social_updated'){await refreshSocialUi();return;}
+  if(message.type==='points_updated'){
+   await refreshSocialUi();
+   if(state.pointsLedgerLoaded)await loadPointsLedger({reset:true});
+   return;
+  }
+  if(message.type==='name_lock_updated'){
+   const context=capturePersonalSessionContext(ws);
+   try{
+    const refreshedMe=await api('/api/me');
+    if(!isCurrentPersonalSessionContext(context)||refreshedMe.user?.uid!==context.uid)return;
+    state.me=refreshedMe;renderPersonalCenter();
+   }catch{}
+   return;
+  }
+  if(message.type==='dm_message'){
+   const otherUid=message.other_uid,entry=message.message;
+   if(!otherUid||!entry)return;
+   if(state.dmUid===otherUid){
+    state.dmMessages=mergeDmMessages(state.dmMessages,[entry]);renderDmPanel();
+    if(!entry.mine)await markDmRead(otherUid,entry.id,{refresh:false,accountUid:uid}).catch(()=>{});
+   }
+   await refreshSocialUi();
+  }
+ };
+ ws.onclose=async event=>{
+  if(state.dmSocket!==ws)return;
+  const context=capturePersonalCenterContext();
+  state.dmSocket=null;
+  if(context.uid!==uid)return;
+  if(event.code===1008){
+   try{
+    const current=await api('/api/me');
+    if(!isCurrentPersonalModelAccountContext(context))return;
+    if(current.user?.uid!==uid){state.me=current;clearPersonalModelState();await init();}
+    else{
+     state.me=current;
+     state.dmReconnect=setTimeout(()=>{if(location.hash.startsWith('#profile')&&state.me?.user?.uid===uid)connectDmWs();},1000);
+    }
+   }catch{
+    if(!isCurrentPersonalModelAccountContext(context))return;
+    state.me=null;clearPersonalModelState();renderAuth();
+   }
+   return;
+  }
+  if(!location.hash.startsWith('#profile')||state.me?.user?.uid!==uid)return;
+  state.dmReconnect=setTimeout(()=>{if(location.hash.startsWith('#profile')&&state.me?.user?.uid===uid)connectDmWs();},3000);
+ };
+ ws.onerror=()=>{};
+}
 function capturePersonalCenterContext(){
  return {accountEpoch:state.personalModelEpoch,pageEpoch:state.roomContextEpoch,
   uid:state.me?.user?.uid,csrf:state.me?.user?.csrf};
@@ -277,24 +497,29 @@ function isCurrentPersonalCenterContext(context){
  return isCurrentPersonalModelAccountContext(context)&&
   state.roomContextEpoch===context.pageEpoch&&location.hash.startsWith('#profile');
 }
+function capturePersonalSessionContext(socket=state.dmSocket){
+ return {...capturePersonalCenterContext(),socket};
+}
+function isCurrentPersonalSessionContext(context){
+ return isCurrentPersonalCenterContext(context)&&state.dmSocket===context.socket;
+}
 async function openPersonalCenter(options={}){
  const epoch=++state.roomContextEpoch,uid=state.me?.user?.uid,csrf=state.me?.user?.csrf;
  state.roomRefreshVersion=(state.roomRefreshVersion||0)+1;
- if(!options.fromHash){state.personalReturn=state.roomId&&state.room?{roomId:state.roomId,view:state.roomView,round:state.selectedRound}:null;}
+ if(!options.fromHash){state.personalReturn=state.roomId&&state.room?{roomId:state.roomId,view:state.roomView,round:state.selectedRound,matchNumber:state.room.match_number}:null;}
  else if(!state.personalReturn)state.personalReturn=profileReturnFromHash();
- stopWs();const back=state.personalReturn;const hash=back?.roomId?`#profile?room=${back.roomId}&view=${encodeURIComponent(back.view)}&round=${back.round||1}`:'#profile';history.replaceState(null,'',hash);
+ stopWs();const back=state.personalReturn;const hash=back?.roomId?`#profile?room=${back.roomId}&view=${encodeURIComponent(back.view)}&round=${back.round||1}${back.matchNumber?'&match='+back.matchNumber:''}`:'#profile';history.replaceState(null,'',hash);
  const context={accountEpoch:state.personalModelEpoch,pageEpoch:epoch,uid,csrf};
  try{
+  const refreshedMe=await api('/api/me');if(!isCurrentPersonalCenterContext(context))return;state.me=refreshedMe;
   await loadPersonalModels();if(!isCurrentPersonalCenterContext(context))return;
   await loadModelOperationRecords();if(!isCurrentPersonalCenterContext(context))return;
-  renderPersonalCenter();
- }catch(error){
-  if(!isCurrentPersonalCenterContext(context))return;
-  throw error;
- }
+  await loadSocial();if(!isCurrentPersonalCenterContext(context))return;
+  renderPersonalCenter();connectDmWs();
+ }catch(error){if(!isCurrentPersonalCenterContext(context))return;throw error;}
 }
 async function returnFromPersonalCenter(){
- const back=state.personalReturn;state.personalReturn=null;
+ const back=state.personalReturn;state.personalReturn=null;clearDmState();
  if(back?.roomId){await openRoom(back.roomId,{view:back.view,round:back.round});return;}
  history.replaceState(null,'',location.pathname);state.roomId=null;state.room=null;await loadLobby();
 }
@@ -448,16 +673,27 @@ function renderModelOperationRecords(){
   '<div class="label-line operation-pagination"><span class="tiny muted">第 '+page+' / '+pages+' 页</span><div class="buttonrow"><button class="small" data-action="model-operations-page" data-direction="prev" '+(state.modelOperationOffset<=0?'disabled':'')+'>上一页</button><button class="small" data-action="model-operations-page" data-direction="next" '+(state.modelOperationOffset+20>=state.modelOperationTotal?'disabled':'')+'>下一页</button></div></div>'+
   '</div></details></section>';
 }
+function renderSocialPanel(){
+ const x=state.social||{friends:[],incoming:[],outgoing:[],conversations:[],points:{total_points:'0',current_streak:'0'}};
+ const friendRows=x.friends.map(f=>`<div class="feed-item"><strong>${esc(f.note)}</strong> <span class="code">${esc(f.uid)}</span><div class="hint">${esc(f.display_name)} · 积分 ${esc(f.total_points)} · 连胜 ${esc(f.current_streak)}</div><div class="buttonrow"><button class="small" data-action="dm-open" data-uid="${esc(f.uid)}">私信</button><button class="small" data-action="friend-note" data-uid="${esc(f.uid)}">修改备注</button><button class="small" data-action="friend-reset-note" data-uid="${esc(f.uid)}">恢复默认</button><button class="small danger" data-action="friend-delete" data-uid="${esc(f.uid)}">删除好友</button></div></div>`).join('')||D('暂无好友');
+ const incoming=x.incoming.map(f=>`<div class="feed-item">${esc(f.display_name)} · ${esc(f.uid)} <button class="small" data-action="friend-accept" data-id="${f.id}">接受</button> <button class="small" data-action="friend-reject" data-id="${f.id}">拒绝</button></div>`).join('')||D('没有收到的申请');
+ const outgoing=x.outgoing.map(f=>`<div class="feed-item">${esc(f.display_name)} · ${esc(f.uid)} <button class="small" data-action="friend-withdraw" data-id="${f.id}">撤回</button></div>`).join('')||D('没有发出的申请');
+ const conversations=x.conversations.map(c=>`<button class="room-view-link" data-action="dm-open" data-uid="${esc(c.uid)}"><strong>${esc(c.note||c.display_name)}</strong> · ${esc(c.uid)} ${c.unread_count?`<span class="pill">${c.unread_count} 未读</span>`:''}</button>`).join('')||D('暂无私信会话');
+ return `<div id="socialPanel" class="stack"><section class="card"><h2>账号积分</h2><div class="stat-row"><div class="stat">总积分 <strong>${esc(x.points.total_points)}</strong></div><div class="stat">当前连胜 <strong>${esc(x.points.current_streak)}</strong></div></div><div id="pointsLedger" class="feed spaced"></div><button class="small" data-action="points-ledger">${state.pointsLedgerLoaded?'刷新积分流水':'查看积分流水'}</button></section>
+ <section class="card"><h2>好友与私信</h2><form data-form="friend-search"><label class="field">通过 UID 搜索</label><input name="uid" maxlength="40" required placeholder="TL00000001"><div class="form-actions"><button class="primary" type="submit">搜索</button></div></form><div id="friendSearchResult"></div><h3 class="spaced">好友</h3>${friendRows}<h3 class="spaced">收到的申请</h3>${incoming}<h3 class="spaced">发出的申请</h3>${outgoing}<h3 class="spaced">私信会话</h3>${conversations}<div id="dmPanel"></div></section></div>`;
+}
 function renderPersonalCenter({skipModelDraftKey=null}={}){
  const u=state.me?.user;if(!u){clearPersonalModelState();renderAuth();return;}
+ captureDmDraft();
  capturePersonalModelDrafts(skipModelDraftKey);
  if(skipModelDraftKey)delete state.personalModelDrafts[skipModelDraftKey];
  stopWs();
  app.innerHTML='<div class="pagehead"><div><div class="overline">ACCOUNT / PERSONAL CENTER</div><h1>个人中心</h1><p class="muted">管理当前账号的基本资料、登录密码和个人模型 API 配置。</p></div><div class="buttonrow"><button data-action="personal-back">← 返回'+(state.personalReturn?.roomId?'房间':'大厅')+'</button></div></div>'+
  '<div class="personal-layout"><div class="stack">'+
- '<section class="card"><h2>基本资料</h2><div class="uid-row"><div><label class="field">UID（不可修改）</label><div class="code"> '+esc(u.uid)+'</div></div><button class="small" data-action="copy-uid" data-uid="'+esc(u.uid)+'">复制 UID</button></div><form data-form="profile-name" class="spaced"><label class="field">名字</label><input name="display_name" type="text" maxlength="40" required value="'+esc(u.display_name)+'"><div class="form-actions"><button class="primary" type="submit">保存名字</button></div></form></section>'+
- '<section class="card"><h2>修改密码</h2><p class="hint">修改成功后，当前账号的所有登录会话都会退出，需要使用新密码重新登录。</p><form data-form="change-password"><label class="field">当前密码</label><input name="current_password" type="password" autocomplete="current-password" maxlength="200" required><label class="field">新密码（8～200 位）</label><input name="new_password" type="password" autocomplete="new-password" minlength="8" maxlength="200" required><label class="field">确认新密码</label><input name="confirm_password" type="password" autocomplete="new-password" minlength="8" maxlength="200" required><div class="form-actions"><button class="primary" type="submit">修改密码并退出登录</button></div></form></section>'+
+ '<section class="card"><h2>基本资料</h2><div class="uid-row"><div><label class="field">UID（不可修改）</label><div class="code"> '+esc(u.uid)+'</div></div><button class="small" data-action="copy-uid" data-uid="'+esc(u.uid)+'">复制 UID</button></div><form data-form="profile-name" class="spaced"><label class="field">名字</label><input name="display_name" type="text" maxlength="40" required value="'+esc(u.display_name)+'"'+(u.name_change_locked?' disabled':'')+'><div class="form-actions"><button class="primary" type="submit"'+(u.name_change_locked?' disabled':'')+'>保存名字</button></div>'+(u.name_change_locked?'<p class="hint">比赛进行中，暂不能修改名字</p>':'')+'</form></section>'+
+ renderSocialPanel()+ '<section class="card"><h2>修改密码</h2><p class="hint">修改成功后，当前账号的所有登录会话都会退出，需要使用新密码重新登录。</p><form data-form="change-password"><label class="field">当前密码</label><input name="current_password" type="password" autocomplete="current-password" maxlength="200" required><label class="field">新密码（8～200 位）</label><input name="new_password" type="password" autocomplete="new-password" minlength="8" maxlength="200" required><label class="field">确认新密码</label><input name="confirm_password" type="password" autocomplete="new-password" minlength="8" maxlength="200" required><div class="form-actions"><button class="primary" type="submit">修改密码并退出登录</button></div></form></section>'+
  '</div><div class="stack"><section class="card"><h2>个人模型 API</h2>'+renderPersonalModelManager()+'</section>'+renderModelOperationRecords()+'</div></div>';
+ renderDmPanel();renderPointsLedger();
 }
 function modelProfileOptions(r){
  const profiles=(state.personalModels||[]).filter(p=>p.credential_status==='ok');
@@ -484,11 +720,59 @@ function renderHumanJudgeAdminPanel(r){
  return '<section class="card compact"><div class="label-line"><h2>真人裁判管理</h2><span class="pill">'+judges.length+' 位真人裁判</span></div>'+
  '<div class="feed">'+judges.map(j=>'<div class="feed-item"><div class="label-line"><strong>'+esc(j.label)+'</strong><span class="pill '+(j.locked?'ok':'')+'">'+(j.locked?'✓ 已锁定':'未锁定')+'</span></div><div class="tiny muted">UID：'+esc(j.uid||'不可用')+'</div><button class="small spaced" data-action="copy-uid" data-uid="'+esc(j.uid||'')+'">复制 UID</button></div>').join('')+'</div></section>';
 }
+function personaDraftKey(type,key,roomId=state.roomId,matchNumber=state.room?.match_number){
+ return `${roomId}:${matchNumber}:${type}:${key}`;
+}
+function rememberSeatPersonaDraft(target){
+ const form=target?.closest?.('form[data-form="seat-persona"]');
+ if(!form)return false;
+ state.personaDrafts[personaDraftKey(form.dataset.seatType,form.dataset.seatKey)]=Object.fromEntries(new FormData(form).entries());
+ return true;
+}
+function personaEditor(type,key,p,disabled){
+ p=p||{};const presets=type==='participant'?[
+  ['default','默认风格','保持自然、直接，不刻意套用固定表达模板。'],
+  ['minimal','极简交流者','优先使用短句，少作解释，直接回应问题；不为简短而遗漏必要信息。'],
+  ['casual','日常闲聊者','使用自然口语，可以适度联想和承接对话；避免机械套用固定开场或结尾。'],
+  ['analytical','严谨分析者','表达结构清晰，重视逻辑关系、事实依据和具体细节；区分事实、推测与不确定之处。'],
+  ['emotional','情绪表达者','更关注语气、情绪和交流对象的感受；表达自然，不刻意夸大情绪或迎合对方。'],
+  ['custom','自定义','填写本席位希望采用的风格提示词；正式揭晓后会展示。']
+ ]:[
+  ['balanced','默认均衡','综合衡量全部可用匿名证据，不因单一措辞或某种表达风格直接下结论。'],
+  ['language_detail','语言细节','重点检查措辞、句式、语义衔接、表达细节及其在上下文中的一致性；不得把某个单独语言特征当作身份定论。'],
+  ['cross_round','跨轮一致性','重点比较同一匿名代号跨轮回答中的立场、知识运用、表达习惯与自我修正；考虑正常变化，不把变化本身等同于 AI。'],
+  ['custom','自定义','填写本席位希望采用的判断风格提示词；正式揭晓后会展示。']
+ ];
+ const editorKey=personaDraftKey(type,key),draft=state.personaDrafts[editorKey];
+ const expanded=!!state.personaEditorOpen[editorKey];
+ const unappliedDraft=disabled&&draft?draft:null;
+ if(draft&&!disabled)p={...p,...draft};
+ const selectedPreset=presets.find(x=>x[0]===p.preset_id)||presets[0];
+ const presetLabel=selectedPreset[1]||p.display_name||p.preset_id||'默认风格';
+ const customSelected=selectedPreset[0]==='custom';
+ const lengths=[['default','沿用模型上限'],['short','短（约 80 字 / 最多 256 Token）'],['medium','中（约 300 字 / 最多 768 Token）'],['long','长（约 800 字 / 最多 2048 Token）']];
+ const opts=presets.map(x=>'<option value="'+x[0]+'" data-description="'+esc(x[2])+'" '+(selectedPreset[0]===x[0]?'selected':'')+'>'+x[1]+'</option>').join('');
+ const lens=lengths.map(x=>'<option value="'+x[0]+'" '+((p.output_length||'default')===x[0]?'selected':'')+'>'+x[1]+'</option>').join('');
+ const draftPreset=unappliedDraft?(presets.find(x=>x[0]===unappliedDraft.preset_id)||presets[0]):null;
+ const draftLength=unappliedDraft?(lengths.find(x=>x[0]===unappliedDraft.output_length)?.[1]||lengths[0][1]):'';
+ const draftPreview=unappliedDraft?
+  '<div class="notice persona-unsaved-draft"><strong>未保存草稿（未生效）</strong>'+
+  '<div class="hint">人设：'+esc(draftPreset[1])+' · '+esc(draftPreset[2])+'</div>'+
+  '<div class="hint">输出长度：'+esc(draftLength)+' · '+(type==='participant'?'回答':'出题')+'历史轮数：'+esc(unappliedDraft.history_rounds??5)+'</div>'+
+  (unappliedDraft.custom_system_prompt?'<div class="hint">自定义 System Prompt（未生效）</div><div class="question spaced">'+esc(unappliedDraft.custom_system_prompt)+'</div>':'')+
+  '</div>':'';
+ return '<details class="persona-editor" data-persona-editor data-key="'+esc(editorKey)+'" '+(expanded?'open':'')+'><summary>人设与回答策略 · '+esc(presetLabel)+' · '+(disabled?'已冻结 / 锁定':'可编辑')+'</summary><form data-form="seat-persona" data-seat-type="'+type+'" data-seat-key="'+esc(key)+'" class="stack spaced">'+
+ '<label class="field">人设预设</label><select name="preset_id" '+(disabled?'disabled':'')+'>'+opts+'</select>'+
+ '<p class="hint" data-preset-description>'+esc(selectedPreset[2])+'</p>'+
+ '<div class="persona-custom-prompt" data-custom-prompt-field '+(customSelected?'':'hidden')+'><label class="field">自定义 System Prompt（最多 8000 字；选择自定义时必填）</label><textarea name="custom_system_prompt" maxlength="8000" '+(customSelected?'required ':'')+(disabled?'disabled':'')+'>'+esc(p.custom_system_prompt||'')+'</textarea></div>'+
+ '<div class="grid2"><div><label class="field">输出长度</label><select name="output_length" '+(disabled?'disabled':'')+'>'+lens+'</select></div><div><label class="field">'+(type==='participant'?'回答历史轮数':'出题历史轮数')+'（0～100）</label><input name="history_rounds" type="number" min="0" max="100" required value="'+esc(p.history_rounds??5)+'" '+(disabled?'disabled':'')+'></div></div>'+
+ '<p class="tiny muted">短 / 中 / 长的 Token 上限分别为 256 / 768 / 2048，实际不超过绑定模型上限；最终裁判 JSON 始终沿用冻结模型上限。历史轮数只影响回答和出题；正式揭晓后会展示自定义提示词，请勿填写密钥。</p><button class="small" type="submit" '+(disabled?'disabled':'')+'>保存人设</button></form>'+draftPreview+'</details>';
+}
 function renderAIBindingControls(r){
  if(!r.ais?.length)return '';
- const disabled=r.status!=='open'||r.verdict_locked||(r.judges||[]).some(j=>j.locked);
+ const disabled=r.status!=='open'||r.verdict_locked||r.personas_frozen||(r.judges||[]).some(j=>j.locked);
  return '<div class="divider"></div><h3>AI 参赛席模型绑定</h3><p class="hint">更换或解除绑定不会删除 AI 席位及其匿名代号、历史回答。你只能选择自己拥有的配置；其他账号授权的现有绑定可以保留或解除。</p>'+
- r.ais.map(a=>'<form class="binding-row" data-form="bind-ai-player-model" data-alias="'+esc(a.alias)+'"><div><strong>'+esc(a.alias)+' · '+esc(a.name)+'</strong><div class="tiny muted">当前：'+esc(bindingLabel(a))+'</div></div><select name="model_profile_id">'+modelBindingOptions(a)+'</select><button class="small" type="submit" '+(disabled?'disabled':'')+'>更新绑定</button></form>').join('');
+ r.ais.map(a=>'<form class="binding-row" data-form="bind-ai-player-model" data-alias="'+esc(a.alias)+'"><div><strong>'+esc(a.alias)+' · '+esc(a.name)+'</strong><div class="tiny muted">当前：'+esc(bindingLabel(a))+'</div></div><select name="model_profile_id" '+(disabled?'disabled':'')+'>'+modelBindingOptions(a)+'</select><button class="small" type="submit" '+(disabled?'disabled':'')+'>更新绑定</button></form>'+personaEditor('participant',a.alias,a.persona,disabled)).join('');
 }
 function aiQuestionFeedback(result){
  const details=(result.results||[]).filter(x=>x.status==='failed'||x.status==='skipped'||x.status==='blocked').map(x=>{
@@ -511,12 +795,12 @@ function judgeAdminPanel(r){
  const manualAwaiting=awaiting.filter(j=>!usable(j));
  const autoAwaiting=awaiting.filter(j=>usable(j));
  const aliases=[...r.humans,...r.ais].map(x=>x.alias).sort();
- const canEdit=r.status==='open'&&!r.verdict_locked&&!judges.some(j=>j.locked);
+ const canEdit=r.status==='open'&&!r.verdict_locked&&!r.personas_frozen&&!judges.some(j=>j.locked);
  let html='<section class="card compact"><div class="label-line"><h2>AI 裁判管理</h2><span class="pill">'+judges.length+' 位 AI 裁判</span></div>'+
  '<p class="hint">AI 裁判可绑定你自己的个人模型配置自动出题和判断，也可手动转录。绑定后，本房间房主和全站管理员可通过比赛操作触发该配置的模型调用，服务商可能按实际调用量计费。绑定他人配置时，只能看到当前席位的必要摘要，不能读取或编辑对方的个人配置。</p>';
  if(judges.length){
   html+=judges.map(j=>'<div class="feed-item"><div class="label-line"><strong>'+esc(j.label)+'</strong><span class="pill '+(j.locked?'ok':'')+'">'+(j.locked?'✓ 已锁定':'未锁定')+'</span></div>'+
-   '<div class="tiny muted">当前绑定：'+esc(bindingLabel(j))+'</div><form data-form="bind-ai-judge-model" data-id="'+j.id+'" class="binding-row"><select name="model_profile_id">'+modelBindingOptions(j)+'</select><button class="small" type="submit" '+(canEdit?'':'disabled')+'>更新绑定</button></form></div>').join('');
+   '<div class="tiny muted">当前绑定：'+esc(bindingLabel(j))+'</div><form data-form="bind-ai-judge-model" data-id="'+j.id+'" class="binding-row"><select name="model_profile_id" '+(canEdit?'':'disabled')+'>'+modelBindingOptions(j)+'</select><button class="small" type="submit" '+(canEdit?'':'disabled')+'>更新绑定</button></form>'+personaEditor('judge',j.id,j.persona,!canEdit)+'</div>').join('');
  }else html+=D('尚无 AI 裁判席。');
  if(r.model_request_limit!==null&&r.model_request_limit!==undefined&&
     Number(r.model_request_count)>=Number(r.model_request_limit)){
@@ -530,7 +814,7 @@ function judgeAdminPanel(r){
  if(pendingRound?.status==='draft'&&pendingAis.length){
   html+='<div class="divider"></div><form data-form="ai-judge-question"><h3>代录 AI 裁判的第 '+r.current_round+' 轮问题</h3><p class="hint">手动转录或配置暂不可用的 AI 裁判，每席每轮只能提交一次。</p><select name="judge_id">'+pendingAis.map(j=>'<option value="'+j.id+'">'+esc(j.label)+'</option>').join('')+'</select><textarea name="text" data-draft="ai-judge-question" maxlength="3000" required placeholder="粘贴 AI 裁判提出的问题原文…">'+myDraft('ai-judge-question')+'</textarea><div class="form-actions"><button class="primary" type="submit">提交 AI 裁判问题</button></div></form>';
  }
- if(!r.revealed_at&&!r.verdict_locked){
+ if(!r.revealed_at&&!r.verdict_locked&&canEdit){
   html+='<div class="divider"></div><form data-form="add-ai-judge"><h3>添加 AI 裁判</h3><label class="field">AI 裁判名称</label><input type="text" name="name" required maxlength="60" placeholder="例如 DeepSeek-R1"><label class="field">个人模型配置</label><select name="model_profile_id">'+modelProfileOptions(r)+'</select><div class="form-actions"><button class="primary" type="submit">＋ 添加 AI 裁判</button></div></form>';
  }
  if(!r.revealed_at&&r.rounds.every(x=>x.status==='revealed')&&autoAwaiting.length){
@@ -544,21 +828,87 @@ function judgeAdminPanel(r){
  return html+'</section>';
 }
 
+function workflowStateText(value){
+ const labels={queued:'排队中',generating_questions:'正在生成裁判问题',starting_round:'正在开启作答',
+  generating_answers:'正在生成 AI 回答',waiting_input:'等待输入或人工确认',blocked:'等待处理阻塞',
+  failed:'执行失败',completed:'自动步骤已完成',cancelled:'已取消',stale:'已作废'};
+ return labels[value]||value||'未知';
+}
+function renderPersonaPreparationControl(r){
+ if(!r.can_manage||!r.personas_frozen||r.match_started||r.current_round!==1)return '';
+ return '<section class="card compact"><div class="label-line"><h2>人设配置已冻结</h2><span class="pill">首轮尚未开始</span></div><p class="hint">如需修改 AI 席位或人设，或因账号删除需要补位，先取消准备。旧 AI 裁判题目和在途任务会作废，真人裁判问题保留。</p><button class="small danger" data-action="reset-persona-preparation">取消准备并编辑人设</button></section>';
+}
+function renderRoundWorkflowPanel(r){
+ const wf=r.round_workflow;if(!wf)return '';
+ const actions=[];
+ if(wf.can_resume)actions.push('<button class="small primary" data-action="resume-round-workflow" data-id="'+wf.id+'">恢复工作流</button>');
+ if(wf.can_cancel)actions.push('<button class="small danger" data-action="cancel-round-workflow" data-id="'+wf.id+'">取消准备</button>');
+ return '<section class="card compact workflow-card"><div class="label-line"><h2>服务端比赛编排</h2><span class="pill">'+esc(workflowStateText(wf.state))+'</span></div>'+
+  '<p class="hint">任务由服务器持续推进；关闭网页、刷新或断线不会中断已授权的工作流。</p>'+
+  (wf.waiting_reason?'<p class="hint">'+esc(wf.waiting_reason)+'</p>':'')+
+  (wf.error_message?'<p class="operation-error">'+esc(wf.error_message)+'</p>':'')+
+  (actions.length?'<div class="buttonrow spaced">'+actions.join('')+'</div>':'')+
+  '</section>';
+}
+function renderRoundTimerSettings(r){
+ if(!r.can_manage||r.status!=='open')return '';
+ const value=r.round_duration_seconds===null||r.round_duration_seconds===undefined?'':esc(r.round_duration_seconds);
+ return '<section class="card compact"><div class="label-line"><h2>单轮答题限时</h2><span class="pill">'+(value?'已启用':'已关闭')+'</span></div>'+
+  '<p class="hint">留空表示关闭；启用范围为 30～3600 秒。当前轮次开始后，修改只影响后续轮次。</p>'+
+  '<form data-form="round-timer" class="operation-limit-form"><input name="seconds" type="number" min="30" max="3600" step="1" value="'+value+'" placeholder="留空表示关闭">'+
+  '<button class="small" type="submit">保存限时</button></form></section>';
+}
+function serverNowMs(){return Date.now()+(Number(state.serverTimeOffset)||0)}
+function formatCountdown(ms){
+ const seconds=Math.max(0,Math.ceil(ms/1000));
+ const hours=Math.floor(seconds/3600),minutes=Math.floor((seconds%3600)/60),rest=seconds%60;
+ return hours?String(hours).padStart(2,'0')+':'+String(minutes).padStart(2,'0')+':'+String(rest).padStart(2,'0'):
+  String(minutes).padStart(2,'0')+':'+String(rest).padStart(2,'0');
+}
+function renderRoundTimer(r,round,active){
+ if(round.duration_seconds===null||round.duration_seconds===undefined)return '';
+ const manager=!!r.can_manage&&active&&round.status==='collecting';
+ return '<div class="notice round-timer" data-round-timer><div class="label-line"><strong>本轮限时 · '+Math.round(round.duration_seconds/60*10)/10+' 分钟</strong>'+
+  '<strong id="roundCountdown" data-deadline="'+esc(round.deadline_at||'')+'">计算中…</strong></div>'+
+  (manager?'<div class="buttonrow spaced"><button class="small danger" id="finishRoundTimeoutBtn" data-action="finish-round-timeout" data-round="'+round.number+'" disabled>结束本轮</button></div>':'')+
+  '</div>';
+}
+function updateRoundCountdown(){
+ const el=$('#roundCountdown');if(!el)return;
+ const deadline=Date.parse(el.dataset.deadline||'');
+ if(!Number.isFinite(deadline))return;
+ const remaining=deadline-serverNowMs();
+ const round=state.room?.rounds?.find(x=>x.number===state.room.current_round);
+ const expired=remaining<=0;
+ el.textContent=expired?'时间已到':formatCountdown(remaining);
+ const button=$('#finishRoundTimeoutBtn');
+ if(button)button.disabled=!expired||round?.status!=='collecting';
+ const notice=el.closest('[data-round-timer]');
+ if(notice&&expired&&round?.status==='collecting'){
+  const hint=notice.querySelector('[data-timeout-hint]');
+  if(!hint){const p=document.createElement('p');p.className='hint';p.dataset.timeoutHint='1';p.textContent='已到截止时间；本轮不会自动结束，请房主确认结束。';notice.appendChild(p);}
+ }
+}
 function renderReadinessPanel(r){
- const x=r.readiness;if(!x||x.phase!=='draft')return '';
+ const workflowPanel=renderRoundWorkflowPanel(r);
+ const x=r.readiness;if(!x||x.phase!=='draft')return workflowPanel;
  const limit=x.model_request_limit===null?'不限':x.model_request_limit;
  const blockers=(x.blockers||[]).map(message=>'<li>'+esc(message)+'</li>').join('');
  const notices=(x.notices||[]).map(message=>'<li>'+esc(message)+'</li>').join('');
+ const wf=r.round_workflow;
+ const workflowBlocksNew=wf&&['queued','generating_questions','starting_round','generating_answers',
+  'waiting_input','blocked','failed'].includes(wf.state);
  let actions='';
- if(x.can_generate_and_start)actions+='<button class="primary" data-action="start-round" data-generate-questions="true">生成问题并开始</button>';
+ if(workflowBlocksNew)actions+='<button class="primary" disabled>服务端工作流处理中</button>';
+ else if(x.can_generate_and_start)actions+='<button class="primary" data-action="start-round" data-generate-questions="true">生成问题并开始</button>';
  else if(x.can_start)actions+='<button data-action="start-round" data-generate-questions="false">按已提交问题开始</button>';
  else actions+='<button data-action="start-round" disabled>开始本轮</button>';
- if(!x.can_start&&!x.can_generate_and_start){
-  if(x.participant_count<2)actions+='<button class="small" data-action="room-view" data-view="admin">前往房主管理台补足参赛者</button>';
+ if(!workflowBlocksNew&&!x.can_start&&!x.can_generate_and_start){
+  if(x.participant_count<2)actions+='<button class="small" data-action="room-view" data-view="admin">前往参赛者管理补足参赛者</button>';
   if(x.manual_question_required)actions+='<button class="small" data-action="focus-manual-question">前往外部裁判问题录入</button>';
   else if(x.participant_count>=2&&x.suggested_view&&x.suggested_view!=='admin')actions+='<button class="small" data-action="room-view" data-view="'+esc(x.suggested_view)+'">前往裁判管理</button>';
  }
- return '<section class="card compact readiness-card"><div class="label-line"><h2>本轮准备</h2><span class="pill">'+(x.can_start?'可以开始':'尚未就绪')+'</span></div>'+
+ return workflowPanel+'<section class="card compact readiness-card"><div class="label-line"><h2>本轮准备</h2><span class="pill">'+(x.can_start?'可以开始':'尚未就绪')+'</span></div>'+
   '<div class="readiness-grid"><div><span class="tiny muted">参赛者</span><strong>'+x.participant_count+' 人已加入</strong></div>'+
   '<div><span class="tiny muted">裁判问题</span><strong>已提交 '+x.submitted_judges+' / '+x.total_judges+' 位裁判 · '+x.question_count+' 份</strong></div>'+
   '<div><span class="tiny muted">自动席位</span><strong>'+x.auto_pending+' 位可用模型 AI 裁判待出题'+(x.unavailable_ai_pending?' · '+x.unavailable_ai_pending+' 位配置不可用':'')+'</strong></div>'+
@@ -574,13 +924,14 @@ function renderModelOperationPanel(r){
  const tasks=r.model_operations||[],history=r.model_operation_history||[];
  const historyKey=String(r.id)+':'+String(r.match_number);
  const renderTask=(t,allowRetry)=>{
-  const retryable=allowRetry&&['failed','interrupted','blocked'].includes(t.state);
+  const retryable=allowRetry&&!t.workflow_id&&['failed','interrupted','blocked'].includes(t.state);
   const request=t.request_succeeded===true?'请求成功':t.request_succeeded===false?'请求失败':t.request_started_at?'请求结果待确认':'尚未开始请求';
   const applied=t.result_applied?'已写入比赛':t.request_succeeded===true?'结果未应用':'未写入比赛';
   const usage=t.usage_known?'Token：'+operationTokens(t.total_tokens):'Token：未返回';
   return '<article class="operation-record"><div class="label-line"><strong>'+esc(t.target_label)+' · '+operationPurposeLabel(t.purpose)+'</strong><span class="operation-status '+esc(t.state)+'">'+operationStateLabel(t.state)+'</span></div>'+
    '<div class="tiny muted">'+esc(t.profile_name)+' · '+esc(t.model_name)+'</div>'+
    '<div class="operation-meta"><span>'+request+'</span><span>'+applied+'</span></div>'+
+   (t.credential_version_changed?'<div class="tiny muted">本次调用使用了轮换后的 API Key；模型与请求参数仍采用本场冻结版本。</div>':'')+
    '<div class="tiny muted">等待 '+(t.queue_ms===null?'—':esc(t.queue_ms)+' ms')+' · 请求 '+(t.duration_ms===null?'—':esc(t.duration_ms)+' ms')+' · '+usage+'</div>'+
    (t.retry_of?'<div class="tiny muted">重试自任务 #'+esc(t.retry_of)+'</div>':'')+
    (t.error_message?'<p class="operation-error">'+esc(t.error_message)+'</p>':'')+
@@ -597,7 +948,7 @@ function renderJudgeWorkflowPanel(r){
  const allDone=judges.every(j=>j.locked);
  const allRoundsDone=r.rounds.length>0&&r.rounds.every(x=>x.status==='revealed');
  let html='<section class="card compact"><div class="label-line"><h2>统一作答与揭晓</h2><span class="pill">'+judges.filter(j=>j.locked).length+'/'+judges.length+' 位裁判已锁定</span></div>';
- if(!r.revealed_at&&allDone&&allRoundsDone)html+='<button class="danger" data-action="reveal">全部裁判已锁定 · 正式揭晓</button>';
+ if(!r.revealed_at&&allDone&&allRoundsDone)html+='<button class="danger" data-action="reveal">正式揭晓</button>';
  return html+'</section>';
 }
 function renderJudgeRoom(r){
@@ -611,79 +962,93 @@ function renderJudgeRoom(r){
  const canLock=!finished&&!r.my_verdict&&ready;
  const pending=r.rounds.find(x=>x.number===r.current_round)?.status==='draft';
  const questions=(round.questions||[]).map(q=>`<div class="feed-item"><strong>${esc(q.judge)}</strong><div class="feed-text">${esc(q.text)}</div></div>`).join('')||D('尚无裁判提交问题');
- const answers=round.status==='revealed'?aliases.map(a=>`<div class="answer-card"><strong>匿名参与者 ${esc(a)}</strong>${round.answers[a]?.edited_at?'<span class="pill">本轮答复已修订</span>':''}<div class="answer-content">${esc(round.answers[a]?.text||'（未提交）')}</div></div>`).join(''):
+ const answers=round.status==='revealed'?aliases.map(a=>`<div class="answer-card"><strong>匿名参与者 ${esc(a)}</strong>${round.timed_out?.includes(a)?'<span class="pill">超时未提交</span>':''}${round.answers[a]?.edited_at?'<span class="pill">本轮答复已修订</span>':''}<div class="answer-content">${esc(round.answers[a]?.text||(round.timed_out?.includes(a)?'（超时未提交）':'（未提交）'))}</div></div>`).join(''):
  `<div class="notice">🔒 尚未全部提交：${round.submitted.length}/${aliases.length}。在所有回答统一公开前，裁判同样不能读取任何回答正文。</div>`;
  const buttons=r.rounds.map(x=>`<button class="small ${x.number===n?'active':''}" data-action="round" data-id="${x.number}">第 ${x.number} 轮 ${x.status==='revealed'?'✓':''}</button>`).join('');
  const form=canLock?`<form data-form="judge-verdict"><p class="hint">只根据匿名回答判断。所有预测只保存在你的独立记录中，其他裁判始终无法通过网站读取。</p>${aliases.map(a=>`<div class="label-line" style="margin:8px 0"><label>参与者 ${esc(a)}</label><select name="pred-${esc(a)}" required><option value="">选择</option><option value="Human">人类</option><option value="AI">AI</option></select></div>`).join('')}<label class="field">判断依据</label><textarea name="evidence" data-draft="judge-evidence" required maxlength="5000">${myDraft('judge-evidence')}</textarea><label class="field">置信度 (0-100)</label><input name="confidence" type="number" min="0" max="100" value="50" required><label class="field">最弱环节（可选）</label><textarea name="weakness" maxlength="5000"></textarea><label class="field">可能误判原因（可选）</label><textarea name="possible_error" maxlength="5000"></textarea><div class="form-actions"><button class="primary" type="submit">锁定我自己的判断</button></div></form>`:
  r.my_verdict?`<div class="locked">🔒 你的判决已锁定，不能修改。其他裁判的判断对你保密。</div><div class="answer-card"><strong>我的判断</strong><div class="answer-content">${aliases.map(a=>a+'：'+(r.my_verdict.predictions[a]==='Human'?'人类':'AI')).join('\n')}</div><div class="hint">依据：${esc(r.my_verdict.evidence)}</div></div>`:
- D('待所有轮次的参赛者回答全部公开后才可提交最终判断。');
+ '';
  app.innerHTML=`<div class="pagehead"><div><div class="overline">INDEPENDENT JUDGE / ROOM ${r.id}</div><h1>${esc(r.title)}</h1><div class="stat-row"><span class="pill">独立裁判 · ${esc(r.my_judge_label)}</span><span class="pill">${aliases.length} 位匿名参赛者</span><span class="pill">${finished?'比赛已结束':'匿名盲测中'}</span></div></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button data-action="back" class="ghost">← 返回大厅</button><button data-action="sync">↻ 刷新</button></div></div>
  ${finishedActions(r)}<div class="room-layout"><aside class="aside"><section class="card flat"><h2>匿名参赛者</h2><p class="hint">仅显示固定代号，隐藏所有账号、昵称和真实身份。即使比赛结束，此视图也不显示真实身份。</p>${aliases.map(a=>`<div class="roster-person"><span class="alias">${esc(a)}</span><span>匿名参赛者</span></div>`).join('')}</section><section class="card flat"><h2>比赛轮次</h2><div class="round-tags">${buttons}</div></section></aside>
- <div class="stack"><section class="card"><div class="label-line"><h2>第 ${n} 轮问题</h2><span class="pill">${round.status==='draft'?'收集问题中':round.status==='collecting'?'等待答复':'回答已公开'}</span></div><p class="hint">当前独立裁判的题目将在房主开启本轮作答后汇总。</p><div class="feed">${questions}</div>${round.question?`<div class="question spaced">${esc(round.question)}</div>`:''}<div class="buttonrow spaced"><button data-action="download-log" class="small">↓ 下载匿名 Log</button>${finished?'<button data-action="download-full-log" class="small">↓ 下载整场匿名 Log</button>':''}</div></section>
+ <div class="stack"><section class="card"><div class="label-line"><h2>第 ${n} 轮问题</h2><span class="pill">${round.status==='draft'?'收集问题中':round.status==='collecting'?'等待答复':'回答已公开'}</span></div><div class="feed">${questions}</div>${round.question?`<div class="question spaced">${esc(round.question)}</div>${renderRoundTimer(r,round,active)}`:''}<div class="buttonrow spaced"><button data-action="download-log" class="small">↓ 下载匿名 Log</button>${finished?'<button data-action="download-full-log" class="small">↓ 下载整场匿名 Log</button>':''}</div></section>
  <section class="card"><h2>匿名回答</h2>${answers}</section></div>
  <div class="right-panel"><section class="card"><h2>我的裁判操作</h2>${active&&pending&&!questionSubmitted?`<form data-form="judge-question"><p class="hint">每位裁判每轮最多提交一个问题，房主统一开启本轮作答。</p><textarea name="text" data-draft="judge-question" maxlength="3000" required placeholder="输入你要向所有参赛者提出的问题…">${myDraft('judge-queion')}</textarea><div class="form-actions"><button class="primary" type="submit">提交并实时同步问题</button></div></form>`:pending?D('你已提交本轮问题，等待房主开启作答。'):D('本轮已经开始作答，不能再添加新问题。')}
- <div class="divider"></div><h3>独立身份判决</h3>${form}</section></div></div>`;
+ <div class="divider"></div><h3>独立身份判决</h3>${form}</section></div></div>${renderRevealedSeatPersonas(r)}`;
+}
+function renderRevealedSeatPersonas(r){
+ if(!r.personas_revealed||!r.seat_personas?.length)return '';
+ return `<section class="card"><h2>本场 AI 席位人设</h2><p class="hint">以下内容来自本场冻结快照，不是个人中心当前配置。</p>${r.seat_personas.map(p=>`<div class="answer-card"><strong>${esc(p.seat_key)} · ${esc(p.persona_name)}</strong><div class="hint">${p.seat_type==='participant'?'AI 参赛者':'AI 裁判'} · 输出：${esc(p.output_length)} · ${p.seat_type==='participant'?'回答历史轮数':'出题历史轮数'}：${p.history_rounds}${p.model_name?' · 模型：'+esc(p.model_name)+' · 采样温度：'+esc(p.model_temperature)+' · 模型上限：'+esc(p.model_max_tokens)+' · '+(p.seat_type==='participant'?'回答':'出题')+' Token 上限：'+esc(p.effective_output_max_tokens)+(p.seat_type==='judge'?' · 最终判断 JSON 上限：'+esc(p.verdict_max_tokens):'')+' · 超时：'+esc(p.model_timeout_seconds)+' 秒':' · 手动席位'}</div>${p.custom_system_prompt?`<div class="hint">自定义 System Prompt</div><div class="question spaced">${esc(p.custom_system_prompt)}</div>`:p.style_prompt?`<div class="hint">预设风格</div><div class="question spaced">${esc(p.style_prompt)}</div>`:''}</div>`).join('')}</section>`;
 }
 function renderMultiResults(r,roster){
- return `<section class="card"><div class="overline">MULTI-JUDGE / RESULTS</div><h2>多裁判独立判决结果</h2><p class="hint">比赛结束后向人类参与者展示全部裁判判决及评分；各裁判登录时仍只能读取自己的判断。</p>${r.verdicts.map(v=>{const count=roster.filter(p=>v.predictions?.[p.alias]===(p.role==='AI'?'AI':'Human')).length;return `<div class="answer-card"><div class="label-line"><h3>${esc(v.judge)} <span class="tiny muted">${v.kind==='ai'?'AI 裁判':v.kind==='human'?'真人裁判':''}</span></h3><span class="pill ok">${count} / ${roster.length} 正确</span></div><div class="hint">置信度 ${v.confidence}%</div>${roster.map(p=>`<div class="hint">${esc(p.alias)} · ${p.role} · 判断：${v.predictions?.[p.alias]==='Human'?'人类':'AI'} ${v.predictions?.[p.alias]===(p.role==='AI'?'AI':'Human')?'✓':'✗'}</div>`).join('')}<div class="question spaced">${esc(v.evidence)}</div><p class="hint">最弱环节：${esc(v.weakness||'未填写')}</p><p class="hint">可能误判：${esc(v.possible_error||'未填写')}</p></div>`}).join('')}</section>`;
+ return `<section class="card"><div class="overline">MATCH ACCURACY / 比赛识别统计</div><h2>多裁判独立判决结果</h2><p class="hint">比赛结束后向人类参与者展示全部裁判判决及评分；各裁判登录时仍只能读取自己的判断。</p>${r.verdicts.map(v=>{const count=roster.filter(p=>v.predictions?.[p.alias]===(p.role==='AI'?'AI':'Human')).length;return `<div class="answer-card"><div class="label-line"><h3>${esc(v.judge)} <span class="tiny muted">${v.kind==='ai'?'AI 裁判':v.kind==='human'?'真人裁判':''}</span></h3><span class="pill ok">${count} / ${roster.length} 正确</span></div><div class="hint">置信度 ${v.confidence}%</div>${roster.map(p=>`<div class="hint">${esc(p.alias)} · ${p.role} · 判断：${v.predictions?.[p.alias]==='Human'?'人类':'AI'} ${v.predictions?.[p.alias]===(p.role==='AI'?'AI':'Human')?'✓':'✗'}</div>`).join('')}<div class="question spaced">${esc(v.evidence)}</div><p class="hint">最弱环节：${esc(v.weakness||'未填写')}</p><p class="hint">可能误判：${esc(v.possible_error||'未填写')}</p></div>`}).join('')}</section>`;
 }
 function renderAdminRoomNav(r,finished){
- const views=[['match','比赛现场'],['human-judges','真人裁判管理'],['ai-judges','AI 裁判管理'],['admin','房主管理台']];
+ const views=[['match','比赛现场'],['human-judges','真人裁判管理'],['ai-judges','AI 裁判管理'],['admin','参赛者管理']];
  return '<nav class="card flat room-view-menu" aria-label="房间页面导航"><div class="overline">房间导航 / NAVIGATION</div><h2>操作页面</h2>'+
  views.map(([view,title])=>'<button type="button" class="room-view-link '+(state.roomView===view?'active':'')+'" data-action="room-view" data-view="'+view+'" '+(state.roomView===view?'aria-current="page"':'')+'><strong>'+title+'</strong></button>').join('')+
- '<button class="room-view-link" type="button" data-action="personal-center"><strong>个人中心</strong></button>'+
+ 
  '<div class="room-view-hint">第 '+r.current_round+' 轮 · '+(finished?'比赛已结束':'比赛进行中')+'</div></nav>';
 }
 function renderRoom(){
  const editing=document.activeElement;
  const editingDraft=editing?.dataset?.draft;
  const editingPos=typeof editing?.selectionStart==='number'?editing.selectionStart:null;
- const r=state.room;if(!r)return;if(r.records_deleted){renderReadyRoom(r);return;}if(r.is_judge){renderJudgeRoom(r);return;}const n=state.selectedRound||r.current_round;const round=r.rounds.find(x=>x.number===n)||r.rounds[r.rounds.length-1];const active=n===r.current_round;const finished=r.status==='finished';const canManage=r.can_manage;const humans=r.humans.length,ais=r.ais.length;const submitted=new Set(round.submitted);const locked=!!r.verdict_locked||(r.judges||[]).some(j=>j.locked);
+ const r=state.room;if(!r)return;if(r.status==='closed'){renderClosedRoom(r);return;}if(r.records_deleted){renderReadyRoom(r);return;}if(r.is_judge){renderJudgeRoom(r);return;}const n=state.selectedRound||r.current_round;const round=r.rounds.find(x=>x.number===n)||r.rounds[r.rounds.length-1];const active=n===r.current_round;const finished=r.status==='finished';const canManage=r.can_manage;const humans=r.humans.length,ais=r.ais.length;const submitted=new Set(round.submitted);const locked=!!r.verdict_locked||(r.judges||[]).some(j=>j.locked);
  const rtab=r.rounds.map(x=>`<button class="small ${x.number===n?'active':''}" data-action="round" data-id="${x.number}">第 ${x.number} 轮 ${x.status==='revealed'?'✓':''}</button>`).join('');
  const roster=[...r.humans.map(p=>({...p,role:'人类',label:p.name})),...r.ais.map(p=>({...p,role:'AI',label:p.name}))].sort((a,b)=>a.alias.localeCompare(b.alias));
- const answerView=round.status==='revealed'?roster.map(p=>`<div class="answer-card"><strong>${esc(p.alias)} · ${esc(p.label)}</strong><span class="pill" style="margin-left:7px">${p.role}</span><div class="tiny muted">${esc(shortDate(round.answers[p.alias]?.submitted_at))}</div>${round.answers[p.alias]?.edited_at?'<span class="pill">主持人已修订</span>':''}<div class="answer-content">${esc(round.answers[p.alias]?.text||'（无回答）')}</div></div>`).join(''):
+ const answerView=round.status==='revealed'?roster.map(p=>`<div class="answer-card"><strong>${esc(p.alias)} · ${esc(p.label)}</strong><span class="pill" style="margin-left:7px">${p.role}</span>${round.timed_out?.includes(p.alias)?'<span class="pill">超时未提交</span>':''}<div class="tiny muted">${esc(shortDate(round.answers[p.alias]?.submitted_at))}</div>${round.answers[p.alias]?.edited_at?'<span class="pill">主持人已修订</span>':''}<div class="answer-content">${esc(round.answers[p.alias]?.text||(round.timed_out?.includes(p.alias)?'（超时未提交）':'（无回答）'))}</div></div>`).join(''):
    `<div class="notice">🔒 回答暂时隐藏。已提交 ${round.submitted.length} / ${roster.length}；全部参赛者（含 AI）提交后，服务器会自动向所有在线玩家公布。</div>${round.answers[r.mine]?.text?`<div class="answer-card"><strong>我已提交的回答</strong><div class="answer-content">${esc(round.answers[r.mine].text)}</div></div>`:''}`;
  const canAnswer=active&&!finished&&round.status==='collecting'&&r.mine&&!submitted.has(r.mine);
- const judgeBox= canManage?`<section class="card compact"><div class="label-line"><h2>房主管理台</h2><span class="pill">${r.is_owner?'房主':'管理员'}</span></div>
+ const judgeBox= canManage?`<section class="card compact"><div class="label-line"><h2>参赛者管理</h2><span class="pill">${r.is_owner?'房主':'管理员'}</span></div>${renderRoundTimerSettings(r)}
  ${active&&round.status==='draft'&&!finished&&!round.questions?.length&&!(r.judges||[]).length?`<div class="divider"></div><form id="manual-question-form" data-form="question"><label class="field">录入裁判的第 ${n} 轮问题</label><textarea name="question" data-draft="question" maxlength="6000" required placeholder="从裁判聊天窗口复制原文…">${myDraft('question')}</textarea><div class="form-actions"><button class="primary" type="submit">向所有玩家发布问题</button></div></form>`:''}
  ${active&&round.status==='collecting'&&!finished&&r.ais.some(a=>a.model_profile_id&&a.model_profile?.credential_status==='ok'&&!submitted.has(a.alias))?`<div class="divider"></div><button class="primary" data-action="generate-ai-answers">自动生成模型 AI 回复</button>`:''}
   ${active&&round.status==='collecting'&&!finished&&r.ais.some(a=>(!a.model_profile_id||a.model_profile?.credential_status!=='ok')&&!submitted.has(a.alias))?`<div class="divider"></div><form data-form="ai-answer"><label class="field">录入 AI 原始回答</label><select name="alias">${r.ais.filter(a=>(!a.model_profile_id||a.model_profile?.credential_status!=='ok')&&!submitted.has(a.alias)).map(a=>`<option value="${a.alias}">${a.alias} · ${esc(a.name)}</option>`).join('')}</select><label class="field">AI 回答（复制原文）</label><textarea name="answer" data-draft="ai-answer" maxlength="12000" required placeholder="请粘贴 AI 原样回答，不做修改…">${myDraft('ai-answer')}</textarea><div class="fom-actions"><button class="primary" type="submit">录入 AI 回答</button></div></form>`:''}
  ${r.invite_code?`<div class="notice"><div class="muted tiny">房间邀请码（房主 / 管理员可见）</div><div class="label-line"><strong class="code">${esc(r.invite_code)}</strong><button class="small" data-action="copy-code">复制</button></div></div>`:''}
- ${(r.rounds[0].status==='draft'||r.roster_recovery)&&active&&!finished?`<div class="divider"></div><label class="field">${r.roster_recovery?'补足本轮参赛者（至少 2 人）':'增加 AI 参赛位（最多总计 8 人）'}</label><form data-form="add-ai"><input name="name" maxlength="60" placeholder="AI 来源，如 GPT-6" required><label class="field">模型配置</label><select name="model_profile_id">${modelProfileOptions(r)}</select><div class="form-actions"><button type="submit">＋ 添加 AI</button></div></form>${r.roster_recovery?'<p class="hint">账号退赛后人数不足，可补齐至 2 人再开启本轮；历史代号和回答保留。</p>':''}`:''}
- ${!r.mine&&(r.rounds[0].status==='draft'||r.roster_recovery)&&!finished?`<button class="small" data-action="admin-join">作为人类玩家加入</button>`:''}
+ ${r.roster_recovery&&r.personas_frozen&&!r.match_started?'<p class="hint">首轮准备冻结后账号删除导致参赛人数不足。请先取消准备并重置配置，再添加补位 AI；旧 AI 裁判问题不会沿用。</p>':''}
+ ${(r.rounds[0].status==='draft'||r.roster_recovery)&&active&&!finished&&(!r.personas_frozen||(r.roster_recovery&&r.match_started))?`<div class="divider"></div><label class="field">${r.roster_recovery?'补足本轮参赛者（至少 2 人）':'增加 AI 参赛位（最多总计 8 人）'}</label><form data-form="add-ai"><input name="name" maxlength="60" placeholder="AI 来源，如 GPT-6" required>${r.personas_frozen?'<p class="hint">比赛已经开始；账号删除导致人数不足时，只能补入使用默认人设的手动 AI 席位。</p>':'<label class="field">模型配置</label><select name="model_profile_id">'+modelProfileOptions(r)+'</select>'}<div class="form-actions"><button type="submit">＋ 添加 AI</button></div></form>${r.roster_recovery?'<p class="hint">账号退赛后人数不足，可补齐至 2 人再开启本轮；历史代号和回答保留。</p>':''}`:''}
+ ${!r.mine&&(!r.self_withdrawn||!r.match_started)&&(r.rounds[0].status==='draft'||r.roster_recovery)&&(!r.personas_frozen||r.roster_recovery)&&!finished?`<button class="small" data-action="admin-join">作为人类玩家加入</button>`:''}
+ ${r.mine&&!finished?'<div class="divider"></div><button class="danger" data-action="withdraw">退赛（保留管理权限）</button>':''}
  ${renderAIBindingControls(r)}
  ${active&&!finished&&!locked&&['collecting','revealed'].includes(round.status)&&r.ais.some(a=>submitted.has(a.alias))?`<div class="divider"></div><form data-form="edit-ai-answer"><h3>修订 AI 参赛者回复</h3><p class="hint">仅能修改当前轮、下一轮开始之前的 AI 回复。已公开的修改将实时通知裁判，历史修订保留供审计；已锁定判决时不可修改。</p><label class="field">AI 参赛者</label><select name="alias" data-ai-edit-select>${r.ais.filter(a=>submitted.has(a.alias)).map(a=>`<option value="${esc(a.alias)}">${esc(a.alias)} · ${esc(a.name)}</option>`).join('')}</select><label class="field">修改后的回复</label><textarea name="text" data-ai-edit-text maxlength="12000" required>${esc(r.ai_edits?.[r.ais.find(a=>submitted.has(a.alias))?.alias]||'')}</textarea><div class="form-actions"><button type="submit">保存修订并同步</button></div></form>`:''}
  ${active&&!finished&&!locked&&r.humans.length&&roster.length>2?`<div class="divider"></div><h3>移除人类参赛者</h3><p class="hint">移除后该账号无法重新加入房间；历史已提交回答仍保留。</p>${r.humans.map(h=>`<div class="label-line" style="gap:8px;margin:8px 0"><span>${esc(h.alias)} · ${esc(h.name)}</span><button class="small danger" data-action="remove-human" data-id="${h.user_id}">移出房间</button></div>`).join('')}`:''}
  ${active&&round.status==='revealed'&&!finished&&!locked?`<div class="divider"></div><div class="buttonrow"><button class="primary" data-action="next-round">＋ 开启下一轮</button><button data-action="packet">生成匿名裁判包</button></div>`:''}
  ${r.packets.length?`<div class="divider"></div><details class="packet-panel" data-packet-panel data-key="${r.id}:${r.match_number}" ${state.packetPanels[`${r.id}:${r.match_number}`]?'open':''}><summary><strong>单轮裁判包快照</strong><span class="pill">${r.packets.length} 份</span></summary><div class="packet-panel-body"><p class="hint">每份快照仅包含该轮裁判问题和参赛者答复，生成后内容固定；修订回复后请重新生成快照。</p>${r.packets.slice(0,6).map(p=>`<div class="feed-item" style="margin-top:7px"><div class="label-line"><strong>仅第 ${p.through_round} 轮 · v${p.version}</strong><span class="pill ${p.sent_at?'ok':''}">${p.sent_at?'已确认发送':'待发送'}</span></div><div class="tiny muted">SHA256: ${esc(p.sha256.slice(0,16))}…</div><div class="buttonrow spaced"><button class="small" data-action="view-packet" data-id="${p.id}">查看 / 复制</button>${p.sent_at?'':`<button class="small" data-action="mark-sent" data-id="${p.id}">标记已发送</button>`}</div></div>`).join('')}</div></details>`:''}
- ${!finished&&!(r.judges||[]).length?`<div class="divider"></div><h3>裁判最终判断</h3>${locked?`<p class="locked">🔒 结论已锁定，揭晓后所有玩家都能查看。</p><button class="danger" data-action="reveal">揭晓身份与计分</button>`: (r.rounds.every(x=>x.status==='revealed')?`<form data-form="verdict"><p class="hint">手动录入裁判的最终判断。锁定前不能修改身份判决；请勿提前公布真实身份。</p>${roster.map(p=>`<div class="label-line" style="margin:8px 0"><label for="pred-${p.alias}">参与者 ${p.alias}</label><select required style="max-width:120px" name="pred-${p.alias}" id="pred-${p.alias}"><option value="">选择</option><option value="Human">人类</option><option value="AI">AI</option></select></div>`).join('')}<label class="field">裁判主要依据（必填）</label><textarea name="evidence" data-draft="evidence" required maxlength="5000" placeholder="裁判的判断依据…">${myDraft('evidence')}</textarea><label class="field">置信度（0–100）</label><input type="text" name="confidence" inputmode="numeric" pattern="[0-9]{1,3}" value="50" required><label class="field">最弱环节（可选）</label><textarea name="weakness" data-draft="weakness" maxlength="5000">${myDraft('weakness')}</textarea><label class="field">如果判断错误可能错在哪（可选）</label><textarea name="possible_error" data-draft="possible_error" maxlength="5000">${myDraft('possible_error')}</textarea><div class="form-actions"><button class="primary" type="submit">锁定裁判结论</button></div></form>`:`<p class="hint">所有轮次回答完成之后才可锁定裁判最终判断。</p>`)}`:''}</section>`:'';
+ ${!finished&&!(r.judges||[]).length?`<div class="divider"></div><h3>裁判最终判断</h3>${locked?`<p class="locked">🔒 结论已锁定，揭晓后所有玩家都能查看。</p><button class="danger" data-action="reveal">揭晓身份与计分</button>`: (r.rounds.every(x=>x.status==='revealed')?`<form data-form="verdict"><p class="hint">手动录入裁判的最终判断。锁定前不能修改身份判决；请勿提前公布真实身份。</p>${roster.map(p=>`<div class="label-line" style="margin:8px 0"><label for="pred-${p.alias}">参与者 ${p.alias}</label><select required style="max-width:120px" name="pred-${p.alias}" id="pred-${p.alias}"><option value="">选择</option><option value="Human">人类</option><option value="AI">AI</option></select></div>`).join('')}<label class="field">裁判主要依据（必填）</label><textarea name="evidence" data-draft="evidence" required maxlength="5000" placeholder="裁判的判断依据…">${myDraft('evidence')}</textarea><label class="field">置信度（0–100）</label><input type="text" name="confidence" inputmode="numeric" pattern="[0-9]{1,3}" value="50" required><label class="field">最弱环节（可选）</label><textarea name="weakness" data-draft="weakness" maxlength="5000">${myDraft('weakness')}</textarea><label class="field">如果判断错误可能错在哪（可选）</label><textarea name="possible_error" data-draft="possible_error" maxlength="5000">${myDraft('possible_error')}</textarea><div class="form-actions"><button class="primary" type="submit">锁定裁判结论</button></div></form>`:``)}`:''}</section>`:'';
  const scored=r.verdict&&finished?roster.filter(p=>r.verdict.predictions[p.alias]===(p.role==='AI'?'AI':'Human')).length:null;
  app.innerHTML=`<div class="pagehead"><div><div class="overline">ROOM ${r.id} / REAL-TIME MATCH</div><h1>${esc(r.title)}</h1><div class="stat-row"><span class="pill ${finished?'ok':'warn'}">${finished?'比赛已结束':'比赛进行中'}</span><span cass="pill">${humans} 位人类 · ${ais} 位 AI</span><span class="pill">${r.judges?.length?`${r.judges.length} 位裁判（真人 / AI）`:`外部裁判：${esc(r.judge)}`}</span></div></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button class="ghost" data-action="back">← 比赛大厅</button><button data-action="sync">↻ 刷新</button></div></div>
- ${finishedActions(r)}<div class="room-layout ${canManage?'admin-room-layout':''}"><aside class="aside"><section class="card flat"><h2>参赛者身份</h2><div class="roster">${makeRoster(r)}</div></section><section class="card flat"><h2>比赛轮次</h2><div class="round-tags">${rtab}</div></section></aside>
- <div class="stack">${canManage&&state.roomView==='human-judges'?renderHumanJudgeAdminPanel(r):canManage&&state.roomView==='ai-judges'?judgeAdminPanel(r)+renderModelOperationPanel(r):canManage&&state.roomView==='admin'?judgeBox+renderReadinessPanel(r)+renderJudgeWorkflowPanel(r)+renderModelOperationPanel(r):''}
- <div class="${canManage&&state.roomView!=='match'?'hide':'stack'}"><section class="card"><div class="label-line"><div><div class="overline">JUDGE / ROUND ${n}</div><h2 style="margin:5px 0 0">裁判问题</h2></div><span class="pill ${round.status==='revealed'?'ok':'warn'}">${round.status==='draft'?'等待发布':round.status==='collecting'?'正在收集回答':'本轮已揭晓'}</span></div><div class="question spaced">${esc(round.question||'管理员尚未开启本轮作答。')}</div>${round.status==='draft'&&round.questions?.length?`<div class="feed spaced">${round.questions.map(q=>`<div class="feed-item"><strong>${esc(q.judge)}</strong><div class="feed-text">${esc(q.text)}</div></div>`).join('')}</div>`:''}<div class="buttonrow spaced"><button class="small" data-action="download-log">↓ 下载本轮 Log (.md)</button>${finished?'<button class="small" data-action="download-full-log">↓ 下载整场 Log (.md)</button>':''}</div></section>
+ ${finishedActions(r)}${renderMyPointsResult(r)}<div class="room-layout ${canManage?'admin-room-layout':''}"><aside class="aside"><section class="card flat"><h2>参赛者身份</h2><div class="roster">${makeRoster(r)}</div></section><section class="card flat"><h2>比赛轮次</h2><div class="round-tags">${rtab}</div></section></aside>
+ <div class="stack">${canManage&&state.roomView==='human-judges'?renderHumanJudgeAdminPanel(r):canManage&&state.roomView==='ai-judges'?judgeAdminPanel(r)+renderModelOperationPanel(r):canManage&&state.roomView==='admin'?judgeBox+renderPersonaPreparationControl(r)+renderReadinessPanel(r)+renderJudgeWorkflowPanel(r)+renderModelOperationPanel(r):''}
+ <div class="${canManage&&state.roomView!=='match'?'hide':'stack'}"><section class="card"><div class="label-line"><div><div class="overline">JUDGE / ROUND ${n}</div><h2 style="margin:5px 0 0">裁判问题</h2></div><span class="pill ${round.status==='revealed'?'ok':'warn'}">${round.status==='draft'?'等待发布':round.status==='collecting'?'正在收集回答':'本轮已揭晓'}</span></div><div class="question spaced">${esc(round.question||'管理员尚未开启本轮作答。')}</div>${renderRoundTimer(r,round,active)}${round.status==='draft'&&round.questions?.length?`<div class="feed spaced">${round.questions.map(q=>`<div class="feed-item"><strong>${esc(q.judge)}</strong><div class="feed-text">${esc(q.text)}</div></div>`).join('')}</div>`:''}<div class="buttonrow spaced"><button class="small" data-action="download-log">↓ 下载本轮 Log (.md)</button>${finished?'<button class="small" data-action="download-full-log">↓ 下载整场 Log (.md)</button>':''}</div></section>
  <section class="card"><div class="label-line"><h2>参赛者回答</h2><span class="pill">${round.submitted.length}/${roster.length} 已提交</span></div>${answerView}
  ${canAnswer?`<form data-form="answer" class="spaced"><label class="field">我的本轮回答 · ${esc(r.mine)}</label><textarea name="answer" data-draft="answer" maxlength="12000" required placeholder="在这里回答裁判的问题。提交后不可修改，直到全员提交才统一公开。">${myDraft('answer')}</textarea><div class="form-actions"><button class="primary" type="submit">提交本轮回答</button></div></form>`:''}
- ${!r.mine&&!finished?D('在房主管理台选择以人类身份加入。'):''}</section>
+ ${!r.mine&&!finished?D('在参赛者管理选择以人类身份加入。'):''}</section>
 ${renderPublicChat(r)}
  ${finished&&r.verdicts?.length?renderMultiResults(r,roster):''}
- ${finished&&!r.verdicts?.length?`<section class="card"><div class="overline">FINAL / RESULT</div><h2>最终判决与真实身份</h2><div class="score">${scored}/${roster.length}</div><p class="muted">裁判 ${esc(r.judge)} · 置信度 ${r.verdict?.confidence??'?'}%</p>${roster.map(p=>`<div class="answer-card"><strong>${p.alias} · ${esc(p.label)}</strong><div>真实身份：${p.role} / 裁判判断：${r.verdict?.predictions?.[p.alias]==='Human'?'人类':'AI'} ${r.verdict?.predictions?.[p.alias]===(p.role==='AI'?'AI':'Human')?'✓':'✗'}</div></div>`).join('')}<h3 class="spaced">判断依据</h3><div class="question">${esc(r.verdict?.evidence)}</div><p class="hint spaced">最弱环节：${esc(r.verdict?.weakness||'未填写')}</p><p class="hint">可能误判：${esc(r.verdict?.possible_error||'未填写')}</p></section>`:''}
- </div></div><div class="right-panel">${canManage?renderAdminRoomNav(r,finished):`<section class="card flat"><div class="overline">PARTICIPANT</div><h2>等待主持人推进比赛</h2><p class="hint">你的每次提交都会发送到服务器；全员提交完成后自动揭晓。若网络断开，请等待自动重连或手动刷新。</p></section>`}</div></div>`;
+ ${finished&&!r.verdicts?.length?`<section class="card"><div class="overline">MATCH ACCURACY / 比赛识别统计</div><h2>最终判决与真实身份</h2><div class="score">${scored}/${roster.length}</div><p class="muted">裁判 ${esc(r.judge)} · 置信度 ${r.verdict?.confidence??'?'}%</p>${roster.map(p=>`<div class="answer-card"><strong>${p.alias} · ${esc(p.label)}</strong><div>真实身份：${p.role} / 裁判判断：${r.verdict?.predictions?.[p.alias]==='Human'?'人类':'AI'} ${r.verdict?.predictions?.[p.alias]===(p.role==='AI'?'AI':'Human')?'✓':'✗'}</div></div>`).join('')}<h3 class="spaced">判断依据</h3><div class="question">${esc(r.verdict?.evidence)}</div><p class="hint spaced">最弱环节：${esc(r.verdict?.weakness||'未填写')}</p><p class="hint">可能误判：${esc(r.verdict?.possible_error||'未填写')}</p></section>`:''}
+ </div>
+ ${renderRevealedSeatPersonas(r)}
+ </div><div class="right-panel">${canManage?renderAdminRoomNav(r,finished):`<section class="card flat"><div class="overline">PARTICIPANT</div><h2>等待主持人推进比赛</h2><p class="hint">你的每次提交都会发送到服务器；全员提交完成后自动揭晓。若网络断开，请等待自动重连或手动刷新。</p></section>`}</div></div>`;
  updateTypingBadges();
+ updateRoundCountdown();
  if(editingDraft){
    const next=app.querySelector(`[data-draft="${editingDraft}"]`);
    if(next){next.focus();if(editingPos!==null)next.setSelectionRange(editingPos,editingPos)}
  }
 }
+setInterval(updateRoundCountdown,1000);
 async function downloadLog(){const id=state.roomId,n=state.selectedRound;const file=await api(`/api/rooms/${id}/rounds/${n}/log`,{raw:true});const href=URL.createObjectURL(file);const a=document.createElement('a');a.href=href;a.download=`room-${id}-round-${n}.md`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(href),1500)}
 async function downloadFullLog(){const id=state.roomId;const file=await api(`/api/rooms/${id}/log`,{raw:true});const href=URL.createObjectURL(file);const a=document.createElement('a');a.href=href;a.download=`room-${id}-full-log.md`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(href),1500)}
 app.addEventListener('toggle',e=>{
  if(e.target.matches('details[data-packet-panel]'))state.packetPanels[e.target.dataset.key]=e.target.open;
+ if(e.target.matches('details[data-persona-editor]'))state.personaEditorOpen[e.target.dataset.key]=e.target.open;
  if(e.target.matches('details[data-model-config]'))state.personalModelExpanded[Number(e.target.dataset.id)]=e.target.open;
  if(e.target.matches('[data-model-operations-panel]'))state.modelOperationsExpanded=!!e.target.open;
  if(e.target.matches('details[data-model-operation-history]'))state.modelOperationHistoryPanels[e.target.dataset.key]=e.target.open;
 },true);
 app.addEventListener('input',e=>{
+ const dmInput=e.target.closest('form[data-form="dm-send"] textarea[name="text"]');
+ if(dmInput){state.dmDraft=dmInput.value;return;}
+ if(rememberSeatPersonaDraft(e.target))return;
  const modelForm=e.target.closest('form[data-form="personal-model-edit"]');
  if(modelForm)invalidatePersonalModelTest(Number(modelForm.dataset.id));
  if(e.target.dataset?.chatDraft!==undefined){state.chatDraft=e.target.value;return;}
@@ -693,6 +1058,18 @@ app.addEventListener('input',e=>{
  }
 });
 app.addEventListener('change',e=>{
+ const personaPreset=e.target.closest('form[data-form="seat-persona"] select[name="preset_id"]');
+ if(personaPreset){
+  const customPrompt=personaPreset.form.elements.namedItem('custom_system_prompt');
+  const customField=personaPreset.form.querySelector('[data-custom-prompt-field]');
+  const customSelected=personaPreset.value==='custom';
+  if(customPrompt){if(!customSelected)customPrompt.value='';customPrompt.required=customSelected;}
+  if(customField)customField.hidden=!customSelected;
+  const description=personaPreset.selectedOptions[0]?.dataset.description||'';
+  const descriptionField=personaPreset.form.querySelector('[data-preset-description]');
+  if(descriptionField)descriptionField.textContent=description;
+ }
+ if(rememberSeatPersonaDraft(e.target))return;
  if(e.target.matches('[data-ai-edit-select]')){
   const area=app.querySelector('[data-ai-edit-text]');if(area)area.value=state.room?.ai_edits?.[e.target.value]||'';
  }
@@ -703,9 +1080,40 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
   if(action==='tab-login'||action==='tab-register'){state.tab=action==='tab-login'?'login':'register';renderAuth()}
   if(action==='toggle-legacy-login'){state.legacyLogin=!state.legacyLogin;renderAuth()}
   if(action==='copy-uid'){if(!b.dataset.uid)throw new Error('UID 不可用');await navigator.clipboard.writeText(b.dataset.uid);toast('UID 已复制')}
+  if(action==='dm-open')await openDm(b.dataset.uid);
+  if(action==='dm-close'){state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;state.dmPending=null;state.dmDraft='';renderDmPanel();}
+  if(action==='dm-older')await loadOlderDm(b.dataset.uid);
+  if(action==='friend-accept'||action==='friend-reject'||action==='friend-withdraw'){
+   const id=Number(b.dataset.id),suffix=action==='friend-accept'?'accept':action==='friend-reject'?'reject':'withdraw';
+   await api('/api/friends/requests/'+id+'/'+suffix,{method:'POST'});await loadSocial();renderPersonalCenter();toast('好友申请状态已更新');
+  }
+  if(action==='friend-delete'){
+   const uid=b.dataset.uid;if(confirm('删除好友关系？双方原有私信仍可查看。')){await api('/api/friends/'+encodeURIComponent(uid),{method:'DELETE',body:{confirm:true}});await loadSocial();renderPersonalCenter();}
+  }
+  if(action==='friend-note'){
+   const uid=b.dataset.uid,current=state.social?.friends?.find(x=>x.uid===uid)?.note||'';const note=prompt('设置仅自己可见的好友备注（1～40 字）',current);
+   if(note!==null){await api('/api/friends/'+encodeURIComponent(uid)+'/note',{method:'PUT',body:{note}});await loadSocial();renderPersonalCenter();}
+  }
+  if(action==='friend-reset-note'){
+   await api('/api/friends/'+encodeURIComponent(b.dataset.uid)+'/note',{method:'PUT',body:{reset_default:true}});
+   await loadSocial();renderPersonalCenter();toast('已恢复为对方当前名字');
+  }
+  if(action==='points-ledger')await loadPointsLedger({reset:true});
+  if(action==='points-ledger-more')await loadPointsLedger();
+  if(action==='friend-add'){
+   await api('/api/friends/requests',{method:'POST',body:{uid:b.dataset.uid}});await loadSocial();renderPersonalCenter();toast('好友申请已发送');
+  }
+  if(action==='friend-from-room'){
+   const uid=b.dataset.uid,result=await api('/api/users/search?uid='+encodeURIComponent(uid));
+   if(result.status==='none'){await api('/api/friends/requests',{method:'POST',body:{uid}});await loadSocial();toast('好友申请已发送');}
+   else if(result.status==='friend')toast('已经是好友');
+   else if(result.status==='incoming')toast('对方已向你发送好友申请，请在个人中心处理');
+   else toast('好友申请已经发送');
+  }
   if(action==='personal-center')await openPersonalCenter();
   if(action==='personal-back')await returnFromPersonalCenter();
-  if(action==='back'){history.replaceState(null,'',location.pathname);await loadLobby()}
+  if(action==='back')await leaveCurrentRoom();
+  if(action==='closed-round-log'){state.selectedRound=Number(b.dataset.round);await downloadLog();}
   if(action==='manage-users')await loadAccounts();
   if(action==='toggle-password-reset'){const form=b.closest('[data-account-uid]').querySelector('form');form.classList.toggle('hide');if(!form.classList.contains('hide'))form.querySelector('input').focus();}
   if(action==='delete-account'){
@@ -743,6 +1151,11 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
     if(state.roomView!==view){state.roomView=view;if(view!=='match')state.selectedRound=state.room.current_round;renderRoom();window.scrollTo({top:0,behavior:'instant'});}
    }
    if(action==='sync')await refreshRoom();
+  if(action==='reset-persona-preparation'){
+   if(confirm('取消本场准备并编辑人设？在途任务和已生成的 AI 裁判问题会作废；真人裁判已提交的问题保留。')){
+    await api('/api/rooms/'+state.roomId+'/personas/reset-preparation',{method:'POST',body:{confirm:true}});await refreshRoom();toast('准备已取消，可以修改人设');
+   }
+  }
   if(action==='generate-ai-questions'){
    const context=captureRoomOperationContext();roomErrorGuard=()=>isCurrentRoomContext(context);if(!isCurrentRoomContext(context))return;
    b.disabled=true;b.textContent='模型正在出题…';
@@ -848,54 +1261,71 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
     await api(`/api/rooms/${state.roomId}/members/${person.user_id}/remove`,{method:'POST'});await refreshRoom();toast('已移出参赛者');
    }
   }
+  if(action==='withdraw'){
+   if(confirm('仅退出自己的参赛身份？房间将继续运行，管理权限保留。本场已开赛则不能重新参赛。')){
+    await api('/api/rooms/'+state.roomId+'/withdraw',{method:'POST',body:{match_number:state.room.match_number,confirm:true}});
+    await refreshRoom();toast('已退赛，仍可管理比赛');
+   }
+  }
   if(action==='admin-join'){await api('/api/join',{method:'POST',body:{code:state.room.invite_code}});await refreshRoom();toast('已作为玩家加入')}
   if(action==='next-round'){
    const context=captureRoomOperationContext();roomErrorGuard=()=>isCurrentRoomContext(context,false);
-   if(!isCurrentRoomContext(context))throw new Error('房间状态已变化，请刷新后重试。');
-   if(confirm('确定开启下一轮？')){
-    const base=`/api/rooms/${context.roomId}`;
-    await api(base+'/next',{method:'POST',matchNumber:context.matchNumber,roundNumber:context.roundNumber});
+   if(!isCurrentRoomContext(context,false))throw new Error('房间状态已变化，请刷新后重试。');
+   if(confirm('确定创建下一轮？服务器会在后台准备可用 AI 裁判问题，但不会自动开放作答。')){
+    const result=await api(`/api/rooms/${context.roomId}/next`,{method:'POST',matchNumber:context.matchNumber,roundNumber:context.roundNumber});
     if(!isCurrentRoomContext(context,false))return;
     const refreshed=await refreshRoom(context);
-    if(!refreshed||!isCurrentRoomContext(context,false)||state.room.current_round!==context.roundNumber+1)return;
-    const q=await idempotentApi(`room:${context.roomId}:match:${context.matchNumber}:round:${context.roundNumber+1}:judge_question`,
-     base+'/ai-judges/questions/generate',{method:'POST',matchNumber:context.matchNumber,roundNumber:context.roundNumber+1});
-    if(!isCurrentRoomContext(context,false)||state.room.current_round!==context.roundNumber+1)return;
-    await refreshRoom(context);
-    if(!isCurrentRoomContext(context,false)||state.room.current_round!==context.roundNumber+1)return;
-    const detail=q.failed?.length?'；AI 裁判出题失败：'+q.failed.map(x=>x.error).join('；'):'';
-    toast('下一轮已开启'+(q.generated?`，AI 裁判已生成 ${q.generated} 个问题`:'')+detail);
+    if(!isCurrentRoomContext(context,false))return;
+    toast('第 '+result.number+' 轮已创建；服务端正在准备问题，准备完成后仍需单独开始答题。');
    }
   }
   if(action==='start-round'){
-   const context=captureRoomOperationContext(),roomId=context.roomId,matchNumber=context.matchNumber,roundNumber=context.roundNumber;roomErrorGuard=()=>isCurrentRoomContext(context);
+   const context=captureRoomOperationContext(),shouldGenerate=b.dataset.generateQuestions==='true';roomErrorGuard=()=>isCurrentRoomContext(context);
    if(!isCurrentRoomContext(context))throw new Error('房间状态已变化，请刷新后重试。');
    const readiness=state.room?.readiness;
-   if(!readiness||(!readiness.can_start&&!readiness.can_generate_and_start)){
-    const reasons=(readiness?.blockers||[]).filter(Boolean);
-    throw new Error(reasons.join('；')||'本轮尚未满足开局条件，请刷新后重试。');
+   if(!readiness||!(readiness.can_start||readiness.can_generate_and_start)){
+    const reasons=(readiness?.blockers||[]).filter(Boolean);throw new Error(reasons.join('；')||'本轮尚未满足开局条件，请刷新后重试。');
    }
-   if(confirm('确认向所有参赛者开放作答？模型 AI 裁判会先自动出题，开局后模型 AI 参赛者会自动回答。')){
-    const base=`/api/rooms/${roomId}`,originalText=b.textContent;b.disabled=true;b.textContent='正在准备模型…';
+   const prompt=shouldGenerate?'提交一次服务端开局任务？服务器会先生成可用 AI 裁判问题，再检查条件、开启作答并自动生成 AI 回答。':'提交一次服务端开局任务？服务器会按当前已提交问题检查条件、开启作答并自动生成 AI 回答。';
+   if(confirm(prompt)){
+    const originalText=b.textContent;b.disabled=true;b.textContent='已提交…';
     try{
-     const q=await idempotentApi(`room:${roomId}:match:${matchNumber}:round:${roundNumber}:judge_question`,
-      base+'/ai-judges/questions/generate',{method:'POST',matchNumber,roundNumber});
+     const result=await idempotentApi(`room:${context.roomId}:match:${context.matchNumber}:round:${context.roundNumber}:workflow_start`,
+      `/api/rooms/${context.roomId}/round-workflows`,{
+       method:'POST',matchNumber:context.matchNumber,roundNumber:context.roundNumber,
+       body:{match_number:context.matchNumber,round_number:context.roundNumber,include_ai_questions:shouldGenerate,mode:'start'}
+      });
      if(!isCurrentRoomContext(context))return;
-     const questionFailures=q.failed?.map(x=>(x.label||x.judge_id||'AI裁判')+'：'+x.error).filter(Boolean)||[];
-     const questionSkips=q.results?.filter(x=>x.status==='skipped'&&x.reason).map(x=>(x.label||x.judge_id||'AI裁判')+'：'+x.reason)||[];
-     if(questionFailures.length){const failureDetails=['失败：'+questionFailures.join('；'),questionSkips.length?'跳过：'+questionSkips.join('；'):''].filter(Boolean).join('；');throw new Error('AI 裁判出题未完成：'+failureDetails)}
-     await api(base+'/start',{method:'POST',matchNumber,roundNumber});
-     if(!isCurrentRoomContext(context))return;
-     const a=await idempotentApi(`room:${roomId}:match:${matchNumber}:round:${roundNumber}:ai_answer`,
-      base+'/ai/answers/generate',{method:'POST',matchNumber,roundNumber});
-     if(!isCurrentRoomContext(context))return;
-     await refreshRoom(context);
-     if(!isCurrentRoomContext(context))return;
-     const answerProblems=[...(a.failed||[]).map(x=>(x.alias||'AI参赛者')+'：'+x.error),...(a.results||[]).filter(x=>x.status==='skipped'&&x.reason).map(x=>(x.alias||'AI参赛者')+'：'+x.reason)];
-     const details=[questionSkips.length?'裁判出题跳过：'+questionSkips.join('；'):'',answerProblems.length?'AI回答问题：'+answerProblems.join('；'):''].filter(Boolean).join('；');
-     const questionSummary=q.generated?`成功生成 ${q.generated} 个 AI 裁判问题`:'未新增 AI 裁判问题';
-     toast(`${questionSummary}；本轮已开始，模型自动提交 ${a.generated||0} 个回答${details?'；'+details:''}`);
+     await refreshRoom(context);if(!isCurrentRoomContext(context))return;
+     toast('服务端开局任务已提交：'+workflowStateText(result.workflow?.state));
     }finally{if(b.isConnected){b.disabled=false;b.textContent=originalText}}
+   }
+  }
+  if(action==='finish-round-timeout'){
+   if(confirm('答题期限已到。结束本轮后，未提交席位会标记为“超时未提交”，已有回答将统一公开；不会自动开启下一轮或结算积分。')){
+    await api('/api/rooms/'+state.roomId+'/rounds/'+Number(b.dataset.round)+'/finish-timeout',{
+     method:'POST',body:{match_number:state.room.match_number,confirm:true}
+    });
+    await refreshRoom();toast('本轮已结束，超时状态和已有回答已公开');
+   }
+  }
+  if(action==='cancel-round-workflow'){
+   if(confirm('确定取消本次服务端准备？已发出的第三方模型请求可能仍会产生费用，但迟到结果不会写入比赛。')){
+    await api('/api/rooms/'+state.roomId+'/round-workflows/'+Number(b.dataset.id)+'/cancel',{
+     method:'POST',body:{confirm:true}
+    });
+    await refreshRoom();toast('服务端工作流已取消');
+   }
+  }
+  if(action==='resume-round-workflow'){
+   const wf=state.room?.round_workflow;
+   const unknown=!!wf?.requires_unknown_confirmation;
+   const prompt=unknown?'存在结果未知的模型请求。请先核对比赛内容；确认再次请求可能产生费用后继续？':'恢复此服务端工作流？服务器会只补齐尚未完成的席位。';
+   if(confirm(prompt)){
+    await api('/api/rooms/'+state.roomId+'/round-workflows/'+Number(b.dataset.id)+'/resume',{
+     method:'POST',body:{confirm_unknown_attempts:unknown}
+    });
+    await refreshRoom();toast('已请求恢复服务端工作流');
    }
   }
   if(action==='packet'){await api(`/api/rooms/${state.roomId}/packets`,{method:'POST'});await refreshRoom();toast('已生成匿名裁判包快照')}
@@ -906,12 +1336,52 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
 });
 app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-form]');if(!form)return;e.preventDefault();const type=form.dataset.form;const data=Object.fromEntries(new FormData(form));const btn=form.querySelector('[type=submit]');if(btn)btn.disabled=true;
  try{
+  if(type==='friend-search'){
+   const result=await api('/api/users/search?uid='+encodeURIComponent(data.uid.trim()));
+   const box=$('#friendSearchResult');if(box)box.innerHTML=`<div class="feed-item"><strong>${esc(result.display_name)}</strong> · ${esc(result.uid)}<div class="hint">积分 ${esc(result.total_points)} · 连胜 ${esc(result.current_streak)}</div><div class="buttonrow">${result.status==='none'?'<button class="small primary" data-action="friend-add" data-uid="'+esc(result.uid)+'">发送好友申请</button>':result.status==='incoming'?'对方已向你发送申请，请处理收到的申请':result.status==='outgoing'?'申请已发送': '已经是好友'}</div></div>`;
+   return;
+  }
+  if(type==='dm-send'){
+   const uid=form.dataset.uid,textValue=String(data.text||''),accountUid=state.me?.user?.uid;
+   const accountCsrf=state.me?.user?.csrf,accountEpoch=state.personalModelEpoch,dmVersion=state.dmLoadVersion;
+   const sameSession=()=>state.me?.user?.uid===accountUid&&state.me?.user?.csrf===accountCsrf&&state.personalModelEpoch===accountEpoch;
+   const sameConversation=()=>sameSession()&&state.dmUid===uid&&state.dmLoadVersion===dmVersion&&location.hash.startsWith('#profile');
+   if(!state.dmPending||state.dmPending.uid!==uid||state.dmPending.text!==textValue){
+    const client_message_id=crypto.randomUUID?crypto.randomUUID():Array.from(crypto.getRandomValues(new Uint8Array(16)),x=>x.toString(16).padStart(2,'0')).join('');
+    state.dmPending={uid,text:textValue,client_message_id};
+   }
+   const pending=state.dmPending;
+   let sent;
+   try{
+    sent=await api('/api/messages/'+encodeURIComponent(uid),{method:'POST',body:{text:pending.text,client_message_id:pending.client_message_id}});
+   }catch(error){
+    if(!sameConversation())return;
+    throw error;
+   }
+   if(!sameConversation())return;
+   if(state.dmPending===pending)state.dmPending=null;
+   if(state.dmDraft===pending.text){
+    state.dmDraft='';
+    const currentInput=$('#dmPanel form[data-form="dm-send"] textarea[name="text"]');
+    if(currentInput)currentInput.value='';
+   }
+   const openedVersion=await openDm(uid);
+   if(!sameSession()||state.dmUid!==uid||openedVersion===null||state.dmLoadVersion!==openedVersion)return;
+   if(sent.message&&!state.dmMessages.some(message=>Number(message.id)===Number(sent.message.id))){
+    state.dmMessages=mergeDmMessages(state.dmMessages,[sent.message]);renderDmPanel();
+   }
+   return;
+  }
   if(type==='login'){await api('/api/login',{method:'POST',body:data});await init();toast('登录成功');return}
   if(type==='register'){const result=await api('/api/register',{method:'POST',body:data});history.replaceState(null,'',location.pathname);await loadLobby();toast(`注册成功，你的 UID 是 ${result.uid}`);return}
   if(type==='join'){const result=await api('/api/join',{method:'POST',body:{code:data.code,role:data.role||'player'}});await openRoom(result.room_id);toast(result.role==='judge'?'已作为真人裁判加入':'已加入比赛');return}
   if(type==='room'){const result=await api('/api/rooms',{method:'POST',body:data});await openRoom(result.room_id);toast('房间创建成功，可以分享邀请码');return}
   if(type==='profile-name'){
-   const result=await api('/api/me/profile',{method:'PUT',body:{display_name:data.display_name}});
+   const context=capturePersonalSessionContext();
+   let result;
+   try{result=await api('/api/me/profile',{method:'PUT',body:{display_name:data.display_name}});}
+   catch(error){if(!isCurrentPersonalSessionContext(context))return;throw error;}
+   if(!isCurrentPersonalSessionContext(context)||result.user?.uid!==context.uid)return;
    state.me.user=result.user;renderPersonalCenter();toast('名字已更新');return;
   }
   if(type==='change-password'){
@@ -926,6 +1396,13 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
     state.modelOperationOffset=0;await loadModelOperationRecords();
     if(!isCurrentPersonalCenterContext(context))return;
     renderPersonalCenter();return;
+   }
+   if(type==='round-timer'){
+    const raw=String(data.seconds||'').trim();
+    const seconds=raw===''?null:Number(raw);
+    if(seconds!==null&&(!Number.isSafeInteger(seconds)||seconds<30||seconds>3600))throw new Error('单轮限时必须为 30～3600 秒，或留空表示关闭。');
+    await api('/api/rooms/'+state.roomId+'/round-timer',{method:'PUT',body:{seconds}});
+    await refreshRoom();toast(seconds===null?'单轮限时已关闭':'单轮限时已设置为 '+seconds+' 秒');return;
    }
    if(type==='model-request-limit'){
     const value=String(data.limit||'').trim()===''?null:Number(data.limit);
@@ -979,6 +1456,26 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
    if(state.room?.status==='open'&&state.chatDraft===requestDraft){state.chatDraft='';const chatInput=$('[data-form="chat"] [name="text"]');if(chatInput)chatInput.value='';}
    toast('消息已发送');return;
   }
+  if(type==='seat-persona'){
+   const requestRoomId=id,requestMatch=state.room?.match_number,requestUid=state.me?.user?.uid,
+    requestCsrf=state.me?.user?.csrf,requestEpoch=state.personalModelEpoch;
+   const seatType=form.dataset.seatType,seatKey=form.dataset.seatKey;
+   const draftKey=personaDraftKey(seatType,seatKey,requestRoomId,requestMatch);
+   const submittedDraft={...data};
+   const payload={preset_id:data.preset_id,custom_system_prompt:data.custom_system_prompt||'',output_length:data.output_length,history_rounds:Number(data.history_rounds)};
+   if(!Number.isSafeInteger(payload.history_rounds)||payload.history_rounds<0||payload.history_rounds>100)throw new Error('历史上下文轮数必须为 0～100 的整数');
+   if(seatType==='participant')await api('/api/rooms/'+requestRoomId+'/ai/'+encodeURIComponent(seatKey)+'/persona',{method:'PUT',body:payload});
+   else await api('/api/rooms/'+requestRoomId+'/ai-judges/'+Number(seatKey)+'/persona',{method:'PUT',body:payload});
+   if(state.roomId!==requestRoomId||state.room?.match_number!==requestMatch||
+      state.me?.user?.uid!==requestUid||state.me?.user?.csrf!==requestCsrf||
+      state.personalModelEpoch!==requestEpoch)return;
+   const latestDraft=state.personaDrafts[draftKey];
+   if(!latestDraft||Object.keys(submittedDraft).every(k=>String(latestDraft[k]??'')===String(submittedDraft[k]??'')))delete state.personaDrafts[draftKey];
+   await refreshRoom();
+   if(state.roomId!==requestRoomId||state.room?.match_number!==requestMatch||
+      state.me?.user?.uid!==requestUid||state.personalModelEpoch!==requestEpoch)return;
+   toast('席位人设已保存');return;
+  }
   if(type==='bind-ai-player-model'||type==='bind-ai-judge-model'){
    const keep=data.model_profile_id==='__unchanged__';
    const payload=keep?{keep_existing:true}:{model_profile_id:data.model_profile_id?Number(data.model_profile_id):null};
@@ -1011,12 +1508,13 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
    if(!Object.values(predictions).every(Boolean))throw new Error('请填写全部参赛者的身份判断');
    if(!/^\d{1,3}$/.test(data.confidence)||Number(data.confidence)>100)throw new Error('置信度必须为 0–100');
    if(confirm('确定锁定裁判结论？一旦锁定就不能修改！')){await api(`/api/rooms/${id}/verdict`,{method:'POST',body:{predictions,evidence:data.evidence,confidence:Number(data.confidence),weakness:data.weakness,possible_error:data.possible_error}});await refreshRoom();toast('裁判结论已锁定')}}
- }catch(err){toast(err.message)}finally{if(btn)btn.disabled=false}
+ }catch(err){if(roomErrorGuard&&!roomErrorGuard())return;toast(err.message)}finally{if(btn)btn.disabled=false}
 });
 // 页面在后台休眠、网络断线或切回标签页时，重新核对轮次完成状态。
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&state.roomId&&state.me)refreshRoom()});
 window.addEventListener('focus',()=>{if(state.roomId&&state.me)refreshRoom()});
-window.addEventListener('hashchange',async()=>{if(!state.me)return;if(location.hash.startsWith('#profile')){if(!state.personalReturn)state.personalReturn=profileReturnFromHash();await openPersonalCenter({fromHash:true});return;}const m=/^#room=(\d+)$/.exec(location.hash);if(m&&Number(m[1])!==state.roomId)await openRoom(Number(m[1]));else if(!m&&state.roomId)await loadLobby()});
+window.addEventListener('hashchange',async event=>{if(!state.me)return;if(location.hash.startsWith('#profile')){if(!state.personalReturn)state.personalReturn=profileReturnFromHash();await openPersonalCenter({fromHash:true});return;}const m=/^#room=(\d+)$/.exec(location.hash);if(m&&Number(m[1])!==state.roomId)await openRoom(Number(m[1]));else if(!m&&(state.roomId||state.personalReturn?.roomId)){const oldHash=new URL(event.oldURL).hash;try{if(!await leaveCurrentRoom())history.replaceState(null,'',oldHash);}catch(err){history.replaceState(null,'',oldHash);toast(err.message);}}});
 setInterval(()=>{if(state.roomId && state.me && (!state.ws||state.ws.readyState!==WebSocket.OPEN))refreshRoom()},15000);
 init();
+
 

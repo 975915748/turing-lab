@@ -88,7 +88,11 @@ const { chromium } = require('playwright-core');
     const start = page.locator('[data-action="start-round"][data-generate-questions="false"]');
     await start.waitFor();
     await start.click();
-    await page.getByText('本轮已开始', { exact: false }).waitFor();
+    await page.getByText('服务端开局任务已提交', { exact: false }).waitFor();
+    await page.waitForFunction(() => {
+      const round = state.room?.rounds?.find(x => x.number === state.room.current_round);
+      return round?.status === 'collecting';
+    });
     const roomState = await api('GET', '/api/rooms/' + room.room_id);
     assert.equal(roomState.rounds[0].status, 'collecting');
     assert.equal(roomState.model_request_count, 2);

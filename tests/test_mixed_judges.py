@@ -102,9 +102,9 @@ def test_ai_only_judges_and_old_database_migrates(tmp_path):
         c.execute('DROP TABLE ai_judge_questions')
         c.execute('DROP TABLE ai_judges')
     a=create_app(db)
-    assert len(list(tmp_path.glob('legacy.pre-v1_2-*.sqlite3')))==1
+    assert len(list(tmp_path.glob('legacy.pre-v1_12-*.sqlite3')))==1
     create_app(db)
-    assert len(list(tmp_path.glob('legacy.pre-v1_2-*.sqlite3')))==1
+    assert len(list(tmp_path.glob('legacy.pre-v1_12-*.sqlite3')))==1
     admin=TestClient(a);one=TestClient(a);two=TestClient(a)
     call(admin,'/api/login',{'username':'admin008','password':'password123'})
     r=call(admin,'/api/rooms',{'title':'AI裁判房间'})

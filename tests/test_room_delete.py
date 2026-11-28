@@ -53,7 +53,7 @@ def test_delete_finished_room_cascades_all_room_data_but_preserves_other_rooms_a
         sender_id=int(player_user['uid'][2:])
         db.execute('''INSERT INTO chat_messages(room_id,match_number,sender_user_id,sender_uid,sender_name,text,created_at)
             VALUES(?,?,?,?,?,?,?)''',(rid,1,sender_id,player_user['uid'],'房间玩家','待级联清除','2026-11-24T00:00:00+00:00'))
-        db.execute("INSERT INTO room_judges VALUES(?,4,'真人裁判','2026')", (rid,))
+        db.execute("INSERT INTO room_judges(room_id,user_id,label,created_at) VALUES(?,4,'真人裁判','2026')", (rid,))
         db.execute("INSERT INTO judge_questions(room_id,round_number,judge_user_id,text,created_at) VALUES(?,1,4,'问题','2026')", (rid,))
         db.execute("INSERT INTO judge_verdicts VALUES(?,4,'{}','2026')", (rid,))
         jid = db.execute("INSERT INTO ai_judges(room_id,label,created_at) VALUES(?,'AI裁判','2026')", (rid,)).lastrowid
@@ -106,12 +106,12 @@ def test_room_id_migration_preserves_every_row_and_backup(tmp_path):
         assert snapshot(db) == before
         assert 'AUTOINCREMENT' in db.execute("SELECT sql FROM sqlite_master WHERE name='rooms'").fetchone()[0]
         assert not db.execute('PRAGMA foreign_key_check').fetchall()
-    backups = list(tmp_path.glob('v15.pre-v1_9-*.sqlite3'))
+    backups = list(tmp_path.glob('v15.pre-v1_12-*.sqlite3'))
     assert len(backups) == 1
     with db_open(backups[0]) as db:
         assert snapshot(db) == before
     create_app(path)
-    assert len(list(tmp_path.glob('v15.pre-v1_9-*.sqlite3'))) == 1
+    assert len(list(tmp_path.glob('v15.pre-v1_12-*.sqlite3'))) == 1
 
 
 def test_room_id_migration_rolls_back_on_copy_denial(tmp_path, monkeypatch):
@@ -129,3 +129,4 @@ def test_room_id_migration_rolls_back_on_copy_denial(tmp_path, monkeypatch):
     with db_open(path) as db:
         assert snapshot(db) == before
         assert not db.execute('PRAGMA foreign_key_check').fetchall()
+

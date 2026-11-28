@@ -157,8 +157,19 @@ def legacy_database(path):
 
 def snapshot(db):
     # Compare pre-existing application data, excluding later schema additions.
+    schema_additions = (
+        'model_profiles', 'chat_messages', 'model_operation_tasks', 'model_operation_idempotency',
+        'account_points', 'match_settlements', 'points_ledger',
+        'friend_requests', 'friendships', 'friend_notes',
+        'dm_conversations', 'dm_messages', 'dm_read_positions', 'api_rate_limits',
+        'round_workflows', 'round_timeouts',
+        'match_persona_freezes', 'match_seat_persona_snapshots',
+    )
+    placeholders = ','.join('?' for _ in schema_additions)
     tables = [r[0] for r in db.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('model_profiles','chat_messages','model_operation_tasks','model_operation_idempotency')")]
+        f"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ({placeholders})",
+        schema_additions,
+    )]
     result = {}
     for name in tables:
         rows = [dict(r) for r in db.execute(f'SELECT * FROM "{name}" ORDER BY rowid')]
@@ -168,6 +179,27 @@ def snapshot(db):
         if name == 'rooms':
             for row in rows:
                 row.pop('model_request_limit', None)
+                row.pop('match_started_at', None)
+        # Persona migration adds non-null defaults, which are not legacy data.
+        persona_columns={
+            'ai_players':('persona_preset_id','persona_preset_version','persona_custom_prompt',
+                          'persona_output_length','persona_history_rounds','persona_revision'),
+            'ai_judges':('persona_preset_id','persona_preset_version','persona_custom_prompt',
+                         'persona_output_length','persona_history_rounds','persona_revision'),
+        }.get(name,())
+        for column in persona_columns:
+            for row in rows:
+                row.pop(column,None)
+        # Exit, timer and workflow migrations add nullable columns.
+        added_columns={
+            'rooms':('closed_at','round_duration_seconds'),
+            'members':('leave_reason',),
+            'room_judges':('left_at',),
+            'rounds':('started_at','duration_seconds','deadline_at','timeout_ended_at'),
+        }.get(name,())
+        for column in added_columns:
+            for row in rows:
+                assert row.pop(column,None) is None
         result[name] = rows
     return result
 
@@ -187,12 +219,12 @@ def test_legacy_migration_preserves_all_records_backup_and_passwords(tmp_path):
             assert row.pop('records_deleted') == 0
         assert after == before
         assert db.execute('PRAGMA foreign_key_check').fetchall() == []
-    backups = list(tmp_path.glob('legacy.pre-v1_9-*.sqlite3'))
+    backups = list(tmp_path.glob('legacy.pre-v1_12-*.sqlite3'))
     assert len(backups) == 1
     with db_open(backups[0]) as db:
         assert snapshot(db) == before
     create_app(path)
-    assert len(list(tmp_path.glob('legacy.pre-v1_9-*.sqlite3'))) == 1
+    assert len(list(tmp_path.glob('legacy.pre-v1_12-*.sqlite3'))) == 1
     assert seed_admin(path, 'legacy_admin', '不覆盖', 'new-password') is False
     # All original identities retain their IDs; old username login is explicit.
     for old_name, uid in (('legacy_admin', 'TL00000007'), ('legacy_player', 'TL00000023'), ('TL00000023', 'TL00000030')):
@@ -268,3 +300,4 @@ def test_same_named_judges_assign_by_uid_and_remain_anonymous(accounts):
     assert '玩家公共聊天消息' not in json.dumps(judge_state,ensure_ascii=False)
     # The retired suggestions write path is explicitly disabled.
     post(two,base+'/suggestions',{'text':'旧版追问入口'},410)
+
