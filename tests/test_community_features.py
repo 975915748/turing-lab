@@ -228,6 +228,12 @@ def test_public_room_discovery_join_whitelist_and_auto_unlisting(env):
         'public_listing': True, 'public_description': '不能在本场开赛后重新公开',
     }, status=409)
 
+    # The prior public flag is retained; after restart the new draft match is discoverable again.
+    post(admin, f"/api/rooms/{public['room_id']}/leave", {'match_number': 1, 'confirm': True})
+    post(admin, f"/api/rooms/{public['room_id']}/restart", {'match_number': 1})
+    restarted = player.get('/api/public/rooms').json()['rooms']
+    assert public['room_id'] in {room['room_id'] for room in restarted}
+
 
 def test_invite_code_join_keeps_legacy_frozen_roster_recovery_but_discovery_join_does_not(env):
     path, _, admin, users = env
