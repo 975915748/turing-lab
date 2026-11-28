@@ -62,13 +62,14 @@ def test_friend_room_invite_notifications_acceptance_and_idempotency(env):
     with player.websocket_connect('/ws/messages', headers={'origin': 'http://testserver'}) as socket:
         assert socket.receive_json()['type'] == 'connected'
         sent = post(admin, f'/api/rooms/{room_id}/invites', {
-            'uids': [player_uid], 'role': 'player',
+            'uids': ['TL99999999', player_uid], 'role': 'player',
         })
         event = socket.receive_json()
         assert event['type'] == 'room_invite_created'
 
-    invite_id = sent['results'][0]['invite_id']
-    assert sent['results'][0]['status'] == 'sent'
+    assert sent['results'][0]['status'] == 'skipped'
+    assert sent['results'][1]['status'] == 'sent'
+    invite_id = sent['results'][1]['invite_id']
     received = player.get('/api/me/room-invites').json()
     assert received['pending_count'] == 1
     assert received['received'][0]['id'] == invite_id
@@ -99,6 +100,20 @@ def test_friend_room_invite_notifications_acceptance_and_idempotency(env):
     with db_open(path) as db:
         row = db.execute('SELECT status FROM room_invites WHERE id=?', (invite_id,)).fetchone()
         assert row['status'] == 'accepted'
+
+
+def test_invite_role_conflict_is_checked_when_the_invitation_is_accepted(env):
+    _, _, admin, users = env
+    player, player_uid = users[0]
+    make_friends(admin, player)
+    room = post(admin, '/api/rooms', {'title': '邀请角色冲突'})
+    post(player, '/api/join', {'code': room['code'], 'role': 'player'})
+
+    invitation = post(admin, f"/api/rooms/{room['room_id']}/invites", {
+        'uids': [player_uid], 'role': 'judge',
+    })['results'][0]
+    assert invitation['status'] == 'sent'
+    assert post(player, f"/api/room-invites/{invitation['invite_id']}/accept", status=409) is not None
 
 
 def test_invite_expiry_friend_removal_and_room_close_cancel_pending(env):
@@ -164,6 +179,9 @@ def test_public_room_discovery_join_whitelist_and_auto_unlisting(env):
     _, _, admin, users = env
     player, _ = users[0]
     private = post(admin, '/api/rooms', {'title': '默认私有'})
+    older_public = post(admin, '/api/rooms', {
+        'title': '公开大厅分页旧房间', 'public_listing': True,
+    })
     public = post(admin, '/api/rooms', {
         'title': '公开大厅测试',
         'public_listing': True,
@@ -173,6 +191,12 @@ def test_public_room_discovery_join_whitelist_and_auto_unlisting(env):
     assert response.status_code == 200
     rooms = response.json()['rooms']
     assert private['room_id'] not in {room['room_id'] for room in rooms}
+    first_page = player.get('/api/public/rooms?limit=1').json()
+    assert len(first_page['rooms']) == 1 and first_page['has_more'] is True
+    cursor = first_page['next_before_id']
+    second_page = player.get(f"/api/public/rooms?limit=1&before_id={cursor}").json()
+    assert second_page['rooms'] and second_page['rooms'][0]['room_id'] != first_page['rooms'][0]['room_id']
+    assert player.get('/api/public/rooms?limit=51').status_code == 422
     item = next(room for room in rooms if room['room_id'] == public['room_id'])
     assert item['public_description'] == '公开简介只允许展示房间信息。'
     assert item['max_players'] == 8
@@ -246,5 +270,6 @@ def test_question_bank_is_read_only_bounded_and_versioned(env):
     logic = player.get('/api/question-bank?category=logic&q=专家').json()['questions']
     assert [item['id'] for item in logic] == ['logic-004']
     assert len(player.get('/api/question-bank?limit=2').json()['questions']) == 2
+    assert all(len(item['text']) <= 3000 for item in data['questions'])
     assert player.get('/api/question-bank?category=unknown').status_code == 422
     assert player.post('/api/question-bank', json={}).status_code == 405
