@@ -2,6 +2,7 @@
 
 import re
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -164,6 +165,26 @@ def ensure_app_schema(db, now):
             count INTEGER NOT NULL,
             PRIMARY KEY(user_id,action,window_start)
         );
+
+        CREATE TABLE IF NOT EXISTS room_invites (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            inviter_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            invitee_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            role TEXT NOT NULL CHECK(role IN ('player','judge')),
+            status TEXT NOT NULL CHECK(status IN ('pending','accepted','rejected','cancelled','expired')),
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            responded_at TEXT,
+            updated_at TEXT NOT NULL,
+            CHECK(inviter_user_id<>invitee_user_id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_room_invites_pending_target
+            ON room_invites(room_id,invitee_user_id) WHERE status='pending';
+        CREATE INDEX IF NOT EXISTS idx_room_invites_incoming
+            ON room_invites(invitee_user_id,status,created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_room_invites_outgoing
+            ON room_invites(inviter_user_id,status,created_at DESC);
         """
     )
     room_columns = {row["name"] for row in db.execute("PRAGMA table_info(rooms)")}
@@ -212,6 +233,19 @@ def cleanup_deleted_account(db, user_id):
         (user_id, user_id, user_id),
     ).fetchall()
     friend_ids.update(int(row["friend_id"]) for row in rows)
+    invite_rows = db.execute(
+        """SELECT CASE WHEN inviter_user_id=? THEN invitee_user_id ELSE inviter_user_id END AS other_id
+           FROM room_invites WHERE status='pending' AND
+             (inviter_user_id=? OR invitee_user_id=?)""",
+        (user_id, user_id, user_id),
+    ).fetchall()
+    friend_ids.update(int(row["other_id"]) for row in invite_rows)
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    db.execute(
+        """UPDATE room_invites SET status='cancelled',responded_at=?,updated_at=?
+           WHERE status='pending' AND (inviter_user_id=? OR invitee_user_id=?)""",
+        (now, now, user_id, user_id),
+    )
     db.execute(
         "DELETE FROM friend_requests WHERE sender_user_id=? OR recipient_user_id=?",
         (user_id, user_id),
@@ -619,8 +653,18 @@ def register_social_routes(
                       OR (owner_user_id=? AND friend_user_id=?)""",
                 (user["id"], target_id, target_id, user["id"]),
             )
+            now = utcnow()
+            cancelled_invites = db.execute(
+                """UPDATE room_invites SET status='cancelled',responded_at=?,updated_at=?
+                   WHERE status='pending' AND
+                     ((inviter_user_id=? AND invitee_user_id=?) OR
+                      (inviter_user_id=? AND invitee_user_id=?))""",
+                (now, now, user["id"], target_id, target_id, user["id"]),
+            ).rowcount
         await hub.notify_account(target_id, {"type": "social_updated"})
         await hub.notify_account(user["id"], {"type": "social_updated"})
+        if cancelled_invites:
+            await hub.notify_accounts([user["id"], target_id], {"type": "room_invite_updated"})
         return {"ok": True, "history_retained": True}
 
     @app.put("/api/friends/{uid}/note")
