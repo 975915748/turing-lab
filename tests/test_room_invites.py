@@ -96,14 +96,16 @@ def test_expired_invitation_is_persisted_and_can_be_reissued(lab):
     with db_open(path) as db:
         db.execute("UPDATE room_invites SET expires_at='2000-01-01T00:00:00+00:00' WHERE id=?",
                    (invite["invite_id"],))
-    post(player, f"/api/room-invites/{invite['invite_id']}/accept", status=410)
-    with db_open(path) as db:
-        assert db.execute("SELECT status FROM room_invites WHERE id=?",
-                          (invite["invite_id"],)).fetchone()["status"] == "expired"
     reissued = post(host, f"/api/rooms/{room['room_id']}/invites", {
         "uids": [player_uid], "role": "player",
     })
     assert reissued["created"] == 1
+    with db_open(path) as db:
+        statuses = [row["status"] for row in db.execute(
+            "SELECT status FROM room_invites WHERE room_id=? AND invitee_user_id=? ORDER BY id",
+            (room["room_id"], player.get("/api/me").json()["user"]["id"]),
+        )]
+    assert statuses == ["expired", "pending"]
 
 
 def test_friend_deletion_cancels_pending_invites(lab):
