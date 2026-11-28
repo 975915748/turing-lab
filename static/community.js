@@ -160,11 +160,13 @@
       existing?.remove();
       return;
     }
-    if (existing?.dataset.count === String(count)) return;
+    const signature = (state.roomInvites?.received || []).map(item => item.id).join(',');
+    if (existing?.dataset.signature === signature) return;
     existing?.remove();
     const notice = document.createElement('section');
     notice.id = 'communityRoomInviteNotice';
     notice.dataset.count = String(count);
+    notice.dataset.signature = signature;
     notice.className = 'notice community-room-invite-notice';
     notice.innerHTML = `
       <div><strong>你收到 ${count} 条好友房间邀请。</strong>
@@ -290,7 +292,10 @@
     }
     if (!inviteState.questionOpen) {
       const html = '<button class="small" type="button" data-community-action="question-open">出题灵感库</button>';
-      if (panel.innerHTML !== html) panel.innerHTML = html;
+      if (panel.dataset.open !== 'false' || panel.innerHTML !== html) {
+        panel.innerHTML = html;
+        panel.dataset.open = 'false';
+      }
       return;
     }
     const categories = inviteState.questionData?.categories || [];
@@ -307,7 +312,10 @@
         <div class="buttonrow"><button class="small" type="button" data-community-action="question-random">随机抽取一题</button></div>
         <div id="communityQuestionResults"></div>
       </div>`;
-    if (panel.innerHTML !== html) panel.innerHTML = html;
+    if (panel.dataset.open !== 'true') {
+      panel.innerHTML = html;
+      panel.dataset.open = 'true';
+    }
     renderQuestionResults();
   }
 
@@ -323,6 +331,8 @@
         if (state.roomId !== context.roomId || state.room?.match_number !== context.matchNumber ||
             state.me?.user?.uid !== context.uid) return;
         inviteState.questionData = data;
+        const currentPanel = document.getElementById('communityQuestionBank');
+        if (currentPanel) currentPanel.dataset.open = 'false';
         renderQuestionBank(app.querySelector('form[data-form="judge-question"]') || form);
       } catch (error) {
         toast(error.message || '题库加载失败');
@@ -343,6 +353,11 @@
 
   function ensureCommunityUi() {
     const uid = state.me?.user?.uid || null;
+    if (inviteState.roomId !== (state.roomId || null)) {
+      inviteState.roomId = state.roomId || null;
+      inviteState.inviteOpen = false;
+      inviteState.questionOpen = false;
+    }
     if (inviteState.accountUid !== uid) {
       inviteState.accountUid = uid;
       inviteState.inviteOpen = false;
