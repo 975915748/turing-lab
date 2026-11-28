@@ -467,6 +467,11 @@ def register_social_routes(
                    WHERE invitee_user_id=? AND status='pending' AND expires_at>?""",
                 (user["id"], now),
             ).fetchone()[0]
+            sent_count = db.execute(
+                """SELECT COUNT(*) FROM room_invites
+                   WHERE inviter_user_id=? AND status='pending' AND expires_at>?""",
+                (user["id"], now),
+            ).fetchone()[0]
             received = db.execute(
                 """SELECT i.id,i.room_id,r.title AS room_title,i.role,i.created_at,i.expires_at,
                           u.display_name AS inviter_name
@@ -491,7 +496,7 @@ def register_social_routes(
                 "received": [dict(row) for row in received],
                 "sent": [dict(row) for row in sent],
                 "pending_count": int(pending_count),
-                "truncated": pending_count > len(received) or len(sent) >= 100,
+                "truncated": pending_count > len(received) or sent_count > len(sent),
             }
 
     @app.post("/api/rooms/{room_id}/invites")
