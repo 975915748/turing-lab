@@ -394,23 +394,29 @@
     const button = event.target.closest('[data-community-action]');
     if (!button) return;
     const action = button.dataset.communityAction;
+    const account = currentAccount();
+    if (!account.uid) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     try {
       if (action === 'invite-accept') {
         const result = await api('/api/room-invites/' + Number(button.dataset.id) + '/accept', { method: 'POST' });
+        if (!accountStillCurrent(account)) return;
         await loadRoomInvites();
+        if (!accountStillCurrent(account)) return;
         await openRoom(result.room_id);
         toast('已接受邀请并进入房间');
       } else if (action === 'invite-reject' || action === 'invite-cancel') {
         const endpoint = action === 'invite-reject' ? 'reject' : 'cancel';
         await api('/api/room-invites/' + Number(button.dataset.id) + '/' + endpoint, { method: 'POST' });
+        if (!accountStillCurrent(account)) return;
         await loadRoomInvites();
         toast(action === 'invite-reject' ? '已拒绝邀请' : '已撤回邀请');
       } else if (action === 'public-join') {
         const result = await api('/api/rooms/' + Number(button.dataset.id) + '/join', {
           method: 'POST', body: { role: button.dataset.role },
         });
+        if (!accountStillCurrent(account)) return;
         await openRoom(result.room_id);
         toast(result.role === 'judge' ? '已作为真人裁判加入公开房间' : '已作为参赛者加入公开房间');
       } else if (action === 'public-refresh') {
@@ -422,6 +428,7 @@
       } else if (action === 'invite-panel-toggle') {
         inviteState.inviteOpen = !inviteState.inviteOpen;
         if (inviteState.inviteOpen && !state.social) await loadSocial();
+        if (!accountStillCurrent(account)) return;
         await renderRoomManagementControls();
       } else if (action === 'question-open') {
         await openQuestionBank();
@@ -445,6 +452,11 @@
     if (!form) return;
     const type = form.dataset.communityForm || form.dataset.form;
     if (!['room', 'room-invite', 'room-visibility'].includes(type)) return;
+    const account = currentAccount();
+    if (!account.uid) return;
+    const roomIdAtSubmit = state.roomId;
+    const matchAtSubmit = state.room?.match_number;
+    const roomEpochAtSubmit = state.roomContextEpoch;
     event.preventDefault();
     event.stopImmediatePropagation();
     const submit = form.querySelector('button[type="submit"]');
@@ -461,27 +473,39 @@
             public_description: values.public_description || '',
           },
         });
+        if (!accountStillCurrent(account) || state.roomId !== roomIdAtSubmit ||
+            state.roomContextEpoch !== roomEpochAtSubmit) return;
         await openRoom(result.room_id);
         toast('房间创建成功，可以分享邀请码');
       } else if (type === 'room-invite') {
         const uids = [...form.querySelectorAll('input[name="uids"]:checked')].map(input => input.value);
         if (!uids.length) throw new Error('请至少选择一位好友。');
-        const result = await api('/api/rooms/' + state.roomId + '/invites', {
+        if (roomIdAtSubmit === null) throw new Error('当前房间已变化，请刷新后重试。');
+        const result = await api('/api/rooms/' + roomIdAtSubmit + '/invites', {
           method: 'POST', body: { uids, role: values.role },
         });
+        if (!accountStillCurrent(account) || state.roomId !== roomIdAtSubmit ||
+            state.room?.match_number !== matchAtSubmit || state.roomContextEpoch !== roomEpochAtSubmit) return;
         inviteState.inviteOpen = false;
         await loadRoomInvites();
+        if (!accountStillCurrent(account) || state.roomId !== roomIdAtSubmit ||
+            state.room?.match_number !== matchAtSubmit || state.roomContextEpoch !== roomEpochAtSubmit) return;
         await refreshRoom();
         const sent = (result.results || []).filter(item => item.status === 'sent').length;
         const skipped = (result.results || []).filter(item => item.status === 'skipped').length;
         toast('已发送 ' + sent + ' 条邀请' + (skipped ? '，跳过 ' + skipped + ' 位' : ''));
       } else if (type === 'room-visibility') {
         const public_listing = !!form.elements.public_listing?.checked;
-        await api('/api/rooms/' + state.roomId + '/visibility', {
+        if (roomIdAtSubmit === null) throw new Error('当前房间已变化，请刷新后重试。');
+        await api('/api/rooms/' + roomIdAtSubmit + '/visibility', {
           method: 'PUT',
           body: { public_listing, public_description: values.public_description || '' },
         });
+        if (!accountStillCurrent(account) || state.roomId !== roomIdAtSubmit ||
+            state.room?.match_number !== matchAtSubmit || state.roomContextEpoch !== roomEpochAtSubmit) return;
         await refreshRoom();
+        if (!accountStillCurrent(account) || state.roomId !== roomIdAtSubmit ||
+            state.room?.match_number !== matchAtSubmit || state.roomContextEpoch !== roomEpochAtSubmit) return;
         await loadPublicRooms();
         toast(public_listing ? '房间已加入公开大厅' : '已关闭公开大厅展示');
       }
