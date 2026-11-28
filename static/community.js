@@ -203,6 +203,16 @@
     }
     const editable = roomDiscoveryEditable(room);
     const friends = state.social?.friends || [];
+    const signature = JSON.stringify({
+      roomId: state.roomId,
+      matchNumber: room.match_number,
+      publicListing: !!room.public_listing,
+      publicDescription: room.public_description || '',
+      editable,
+      inviteOpen: inviteState.inviteOpen,
+      friends: friends.map(friend => [friend.uid, friend.note || '', friend.display_name || '']),
+    });
+    if (panel.dataset.signature === signature) return;
     const html = `
       <div class="divider"></div>
       ${editable ? `
@@ -230,7 +240,8 @@
           </form>` : '<p class="hint">尚无好友。请先在个人中心添加好友。</p><button class="small" type="button" data-action="personal-center">前往个人中心添加好友</button>') : ''}
       ` : (room.public_listing ? '<p class="hint">首轮已开始或名单已冻结，公开大厅展示已停止；本场不能重新公开。</p>' : '')}
     `;
-    if (panel.innerHTML !== html) panel.innerHTML = html;
+    panel.innerHTML = html;
+    panel.dataset.signature = signature;
   }
 
   function ensureLobbyPanels() {
