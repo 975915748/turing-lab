@@ -236,7 +236,7 @@ def test_public_room_discovery_join_whitelist_and_auto_unlisting(env):
 
     # The prior public flag is retained; after restart the new draft match is discoverable again.
     post(admin, f"/api/rooms/{public['room_id']}/leave", {'match_number': 1, 'confirm': True})
-    post(admin, f"/api/rooms/{public['room_id']}/restart", {'match_number': 1})
+    post(admin, f"/api/rooms/{public['room_id']}/restart", {'confirm': True, 'match_number': 1})
     restarted = player.get('/api/public/rooms').json()['rooms']
     assert public['room_id'] in {room['room_id'] for room in restarted}
 
