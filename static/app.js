@@ -215,6 +215,7 @@ function renderReadyRoom(r){
  renderRoomInviteNotice();
 }
 async function openRoom(id,options={}){
+ state.roomInvitePanelOpen=false;state.roomInviteSelectedUids=[];state.roomInviteSelectedRole='player';state.questionBankOpen=false;
  clearDmState();const epoch=++state.roomContextEpoch,accountEpoch=state.personalModelEpoch,uid=state.me?.user?.uid,csrf=state.me?.user?.csrf;
  state.roomRefreshVersion=(state.roomRefreshVersion||0)+1;state.roomId=id;state.room=null;state.selectedRound=options.round||null;state.roomView=options.view||'match';state.chat=[];state.chatDraft='';
  const current=()=>state.roomContextEpoch===epoch&&state.personalModelEpoch===accountEpoch&&state.roomId===id&&state.me?.user?.uid===uid&&state.me?.user?.csrf===csrf;
@@ -972,8 +973,8 @@ function renderRoomInvitePanel(){
  if(!state.social){root.innerHTML=D('正在加载好友列表…');return;}
  const friends=state.social.friends||[];
  if(!friends.length){root.innerHTML=D('你还没有好友。可先到个人中心添加好友。')+'<button class="small" data-action="personal-center">打开个人中心</button>';return;}
- root.innerHTML='<form data-form="room-invite-send"><label class="field">邀请身份</label><select name="role"><option value="player">参赛者</option><option value="judge">真人裁判</option></select><div class="feed spaced">'+
-  friends.map(friend=>'<label class="feed-item" style="display:flex;align-items:center;gap:10px"><input type="checkbox" name="uids" value="'+esc(friend.uid)+'"><span><strong>'+esc(friend.note||friend.display_name)+'</strong><span class="hint">'+esc(friend.uid)+'</span></span></label>').join('')+
+ root.innerHTML='<form data-form="room-invite-send"><label class="field">邀请身份</label><select name="role"><option value="player" '+(state.roomInviteSelectedRole==='player'?'selected':'')+'>参赛者</option><option value="judge" '+(state.roomInviteSelectedRole==='judge'?'selected':'')+'>真人裁判</option></select><div class="feed spaced">'+
+  friends.map(friend=>'<label class="feed-item" style="display:flex;align-items:center;gap:10px"><input type="checkbox" name="uids" value="'+esc(friend.uid)+'" '+(state.roomInviteSelectedUids.includes(friend.uid)?'checked':'')+'><span><strong>'+esc(friend.note||friend.display_name)+'</strong><span class="hint">'+esc(friend.uid)+'</span></span></label>').join('')+
   '</div><div class="form-actions"><button class="primary small" type="submit">发送邀请</button></div></form>';
 }
 function serverNowMs(){return Date.now()+(Number(state.serverTimeOffset)||0)}
@@ -1221,6 +1222,10 @@ app.addEventListener('input',e=>{
 });
 app.addEventListener('change',e=>{
  if(e.target.matches('#questionBankCategory')){state.questionBankCategory=e.target.value;renderQuestionBankResults();return;}
+ if(e.target.matches('form[data-form="room-invite-send"] input[name="uids"]')){
+  state.roomInviteSelectedUids=Array.from(app.querySelectorAll('form[data-form="room-invite-send"] input[name="uids"]:checked')).map(input=>input.value);return;
+ }
+ if(e.target.matches('form[data-form="room-invite-send"] select[name="role"]')){state.roomInviteSelectedRole=e.target.value;return;}
  const personaPreset=e.target.closest('form[data-form="seat-persona"] select[name="preset_id"]');
  if(personaPreset){
   const customPrompt=personaPreset.form.elements.namedItem('custom_system_prompt');
@@ -1587,6 +1592,7 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
     const uids=formData.getAll('uids').map(value=>String(value));
     if(!uids.length)throw new Error('请至少选择一位好友。');
     const result=await api('/api/rooms/'+state.roomId+'/invites',{method:'POST',body:{uids,role:data.role}});
+    state.roomInviteSelectedUids=[];state.roomInviteSelectedRole='player';
     await loadRoomInvites();renderRoomInvitePanel();
     toast('邀请已处理：新建 '+result.created+'，已存在 '+result.existing+'，跳过 '+result.skipped);
     return;
