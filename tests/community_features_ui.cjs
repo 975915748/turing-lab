@@ -139,8 +139,15 @@ async function createRoom(page, title, isPublic) {
     const fillButton = judge.locator('#communityQuestionResults [data-community-action="question-fill"]');
     await visible(fillButton);
     await fillButton.click();
-    const draft = await questionForm.locator('textarea[name="text"]').inputValue();
+    const draftArea = questionForm.locator('textarea[name="text"]');
+    const draft = await draftArea.inputValue();
     assert(draft.includes('专家'));
+    await draftArea.fill('保留这段尚未提交的手工草稿');
+    judge.once('dialog', dialog => dialog.dismiss());
+    await fillButton.click();
+    assert.equal(await draftArea.inputValue(), '保留这段尚未提交的手工草稿');
+    await judge.locator('[data-community-question-category]').selectOption('language');
+    assert.equal(await draftArea.inputValue(), '保留这段尚未提交的手工草稿');
     const room = await api(judge, 'GET', `/api/rooms/${privateRoomId}`);
     assert.equal(room.rounds[0].questions.length, 0, 'selecting a prompt must not submit it');
     assert.equal(room.rounds[0].question, '');
