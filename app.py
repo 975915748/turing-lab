@@ -1145,8 +1145,8 @@ def ensure_roster_unlocked(db, room, *, allow_frozen=False, allow_poststart_reco
         raise HTTPException(409, '首轮裁判问题已提交，无法再修改参赛名单。')
 
 
-def validate_discovery_room(db, room):
-    """Require an open, unfrozen room whose first round has no submitted questions."""
+def validate_discovery_room(db, room, *, require_unfrozen=True):
+    """Require an open room whose first round has no submitted questions."""
     if room['status'] != 'open' or room['match_started_at']:
         raise HTTPException(409, '比赛已经开始或房间已关闭，不能通过发现入口加入。')
     if room['verdict_locked_at'] or db.execute(
@@ -1166,13 +1166,14 @@ def validate_discovery_room(db, room):
         'SELECT 1 FROM ai_judge_questions WHERE room_id=? AND round_number=1 LIMIT 1', (room['id'],)
     ).fetchone():
         raise HTTPException(409, '首轮裁判问题已提交，不能再通过发现入口加入。')
-    if is_match_persona_frozen(db, room['id'], room['match_number']):
+    if require_unfrozen and is_match_persona_frozen(db, room['id'], room['match_number']):
         raise HTTPException(409, '本场名单及 AI 席位配置已冻结，不能再通过发现入口加入。')
     return first
 
 
 def validate_discovery_join(db, room, user, role):
-    validate_discovery_room(db, room)
+    # Existing same-role seats remain idempotent even after preparation freezes the roster.
+    validate_discovery_room(db, room, require_unfrozen=False)
     if role == 'player':
         if is_judge(db, room['id'], user):
             raise HTTPException(409, '本房间裁判不能作为参赛者加入。')
@@ -3602,7 +3603,7 @@ def create_app(db_path=None):
 
     @app.get('/api/public/rooms')
     def list_public_rooms(request:Request, limit:int=Query(30,ge=1,le=50),
-                          before_id:Optional[int]=Query(None,ge=1)):
+                          before_id:Optional[int]=Query(None,ge=1), q:str=Query('',max_length=80)):
         with connection() as db:
             user=caller(request,db)
             scan_limit=max(100,limit*10)
@@ -3616,9 +3617,11 @@ def create_app(db_path=None):
                 FROM rooms r JOIN users u ON u.id=r.owner_id
                 WHERE {where} ORDER BY r.id DESC LIMIT ?''',params).fetchall()
             items=[]
+            needle=q.strip().casefold()
             for room in rows:
+                if needle and needle not in (room['title'] or '').casefold() and needle not in (room['public_description'] or '').casefold():
+                    continue
                 try:
-                    validate_discovery_room(db,room)
                     can_join_player=True
                     try:
                         validate_discovery_join(db,room,user,'player')
@@ -3642,20 +3645,22 @@ def create_app(db_path=None):
                     UNION SELECT 1 FROM ai_judges WHERE room_id=? AND model_profile_id IS NOT NULL LIMIT 1''',
                     (room['id'],room['id'])).fetchone())
                 tags=[]
-                if human_judges: tags.append('真人裁判')
-                if ai_judges: tags.append('AI 裁判')
-                if ais: tags.append('含 AI 参赛位')
+                if human_judges and not ai_judges: tags.append('纯真人裁判')
+                if ai_judges: tags.append('含 AI 裁判')
+                if ais: tags.append('含 AI 参赛席')
                 if has_model_ai: tags.append('含模型 AI')
-                if room['round_duration_seconds']: tags.append(f"单轮限时 {room['round_duration_seconds']} 秒")
+                if room['round_duration_seconds']: tags.append(f"限时 {room['round_duration_seconds']}s")
                 items.append({
                     'room_id':int(room['id']),
                     'title':room['title'],
-                    'description':room['public_description'] or '',
+                    'public_description':room['public_description'] or '',
                     'owner_display_name':room['owner_display_name'],
                     'created_at':room['created_at'],
                     'player_count':len(humans)+len(ais),
+                    'max_players':MAX_PLAYERS,
                     'human_judge_count':human_judges,
                     'ai_judge_count':ai_judges,
+                    'max_judges':MAX_JUDGES,
                     'ai_player_count':len(ais),
                     'has_model_ai':has_model_ai,
                     'round_duration_seconds':room['round_duration_seconds'],
@@ -4073,7 +4078,7 @@ def create_app(db_path=None):
             db.execute('''DELETE FROM room_judges WHERE room_id=? AND (left_at IS NOT NULL OR user_id IN
                 (SELECT id FROM users WHERE deleted_at IS NOT NULL))''',(room_id,))
             db.execute('''UPDATE rooms SET status='open',current_round=1,records_deleted=0,
-                match_started_at=NULL,closed_at=NULL,public_listing=0,match_number=match_number+1 WHERE id=?''',(room_id,))
+                match_started_at=NULL,closed_at=NULL,match_number=match_number+1 WHERE id=?''',(room_id,))
             db.execute('INSERT INTO rounds(room_id,number,created_at) VALUES(?,?,?)',(room_id,1,utcnow()))
             new_match_number=room['match_number']+1
             log_event(db,room_id,1,'match_restarted','主持人','重新开赛，上一场比赛记录已清空')
