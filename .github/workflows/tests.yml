@@ -49,7 +49,7 @@ jobs:
         run: docker build --pull -t turing-lab:ci .
       - name: Verify runtime imports inside Docker image
         run: |
-          docker run --rm --entrypoint python turing-lab:ci -c "import app, model_api, railway_start; print('Docker runtime imports passed')"
+          docker run --rm --entrypoint python turing-lab:ci -c "import app, model_api, railway_start, question_bank; print('Docker runtime imports passed')"
       - name: Upload browser acceptance screenshots
         if: always()
         uses: actions/upload-artifact@v4
