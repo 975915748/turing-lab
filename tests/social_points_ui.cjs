@@ -327,19 +327,17 @@ function friendDmButton(page, uid) {
       const timer = setTimeout(() => reject(new Error('Timed out waiting for delayed DM response')), 10000);
       signalDelayedResponseReady = () => { clearTimeout(timer); resolve(); };
     });
-    const delayedResponsePromise = pageA.waitForResponse(response =>
-      response.url().endsWith('/api/messages/' + encodeURIComponent(uidB)) &&
-      response.request().method() === 'POST', { timeout: 0 });
     await pageA.route('**/api/messages/' + uidB, async route => {
       if (route.request().method() !== 'POST') { await route.continue(); return; }
       const response = await route.fetch();
-      signalDelayedResponseReady();
+      signalDelayedResponseReady(response.status());
       await delayedGate;
       await route.fulfill({ response });
     });
     await delayedDmForm.locator('textarea[name="text"]').fill(delayedText);
     await delayedDmForm.locator('button[type="submit"]').click();
-    await delayedReady;
+    const delayedResponseStatus = await delayedReady;
+    assert.equal(delayedResponseStatus, 200);
     await pageA.locator('#logoutBtn').click();
     await pageA.locator('form[data-form="login"]').waitFor();
     await pageA.locator('form[data-form="login"] [name="uid"]').fill(uidC);
@@ -351,8 +349,6 @@ function friendDmButton(page, uid) {
     await pageA.waitForFunction(uid => state.dmUid === uid, uidB);
     assert.equal(await pageA.locator('.dm-message').filter({ hasText: delayedText }).count(), 0);
     releaseDelayedResponse();
-    const delayedResponse = await delayedResponsePromise;
-    assert.equal(delayedResponse.status(), 200);
     await pageA.waitForTimeout(250);
     assert.equal(await pageA.evaluate(text => state.dmMessages.some(message => message.text === text), delayedText), false);
     assert.equal(await pageA.locator('.dm-message').filter({ hasText: delayedText }).count(), 0);

@@ -463,8 +463,8 @@ function connectDmWs(){
  ws.onclose=async event=>{
   if(state.dmSocket!==ws)return;
   const context=capturePersonalCenterContext();
-  if(context.uid!==uid)return;
   state.dmSocket=null;
+  if(context.uid!==uid)return;
   if(event.code===1008){
    try{
     const current=await api('/api/me');
