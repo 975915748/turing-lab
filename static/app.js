@@ -436,6 +436,7 @@ function connectDmWs(){
   if(!current())return;
   try{
    await loadSocial();
+   if(!current())return;
    if(typeof loadRoomInvites==='function')await loadRoomInvites();
    if(!current())return;
    if(location.hash.startsWith('#profile')){if(state.dmUid)await openDm(state.dmUid);else refreshSocialPanel();}
@@ -444,14 +445,27 @@ function connectDmWs(){
  ws.onmessage=async event=>{
   if(!current())return;
   let message;try{message=JSON.parse(event.data)}catch{return;}
-  if(message.type==='social_updated'){await refreshSocialUi();if(typeof loadRoomInvites==='function')await loadRoomInvites().catch(()=>{});return;}
+  if(message.type==='social_updated'){
+   await refreshSocialUi();
+   if(!current())return;
+   if(typeof loadRoomInvites==='function')await loadRoomInvites().catch(()=>{});
+   if(!current())return;
+   return;
+  }
   if(message.type==='room_invite_created'||message.type==='room_invite_updated'){
    if(typeof loadRoomInvites==='function')await loadRoomInvites().catch(()=>{});
+   if(!current())return;
    if(typeof loadPublicRooms==='function')await loadPublicRooms().catch(()=>{});
+   if(!current())return;
    if(message.type==='room_invite_created')toast('收到新的好友房间邀请，可在大厅查看。');
    return;
   }
-  if(message.type==='points_updated'){await refreshSocialUi();if(state.pointsLedgerLoaded)await loadPointsLedger({reset:true});return;}
+  if(message.type==='points_updated'){
+   await refreshSocialUi();
+   if(!current())return;
+   if(state.pointsLedgerLoaded)await loadPointsLedger({reset:true});
+   return;
+  }
   if(message.type==='name_lock_updated'){
    if(!location.hash.startsWith('#profile'))return;
    try{const refreshedMe=await api('/api/me');if(!current()||refreshedMe.user?.uid!==uid)return;state.me=refreshedMe;renderPersonalCenter();}catch{}
@@ -459,8 +473,13 @@ function connectDmWs(){
   }
   if(message.type==='dm_message'){
    const otherUid=message.other_uid,entry=message.message;if(!otherUid||!entry)return;
-   if(location.hash.startsWith('#profile')&&state.dmUid===otherUid){state.dmMessages=mergeDmMessages(state.dmMessages,[entry]);renderDmPanel();if(!entry.mine)await markDmRead(otherUid,entry.id,{refresh:false,accountUid:uid}).catch(()=>{});}
+   if(location.hash.startsWith('#profile')&&state.dmUid===otherUid){
+    state.dmMessages=mergeDmMessages(state.dmMessages,[entry]);renderDmPanel();
+    if(!entry.mine)await markDmRead(otherUid,entry.id,{refresh:false,accountUid:uid}).catch(()=>{});
+    if(!current())return;
+   }
    await refreshSocialUi();
+   if(!current())return;
   }
  };
  ws.onclose=async event=>{
