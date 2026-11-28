@@ -462,6 +462,11 @@ def register_social_routes(
                      AND (invitee_user_id=? OR inviter_user_id=?)""",
                 (now, now, now, user["id"], user["id"]),
             )
+            pending_count = db.execute(
+                """SELECT COUNT(*) FROM room_invites
+                   WHERE invitee_user_id=? AND status='pending' AND expires_at>?""",
+                (user["id"], now),
+            ).fetchone()[0]
             received = db.execute(
                 """SELECT i.id,i.room_id,r.title AS room_title,i.role,i.created_at,i.expires_at,
                           u.display_name AS inviter_name
@@ -469,7 +474,7 @@ def register_social_routes(
                    JOIN rooms r ON r.id=i.room_id
                    JOIN users u ON u.id=i.inviter_user_id
                    WHERE i.invitee_user_id=? AND i.status='pending' AND i.expires_at>?
-                   ORDER BY i.created_at DESC,i.id DESC""",
+                   ORDER BY i.created_at DESC,i.id DESC LIMIT 100""",
                 (user["id"], now),
             ).fetchall()
             sent = db.execute(
@@ -479,13 +484,14 @@ def register_social_routes(
                    JOIN rooms r ON r.id=i.room_id
                    JOIN users u ON u.id=i.invitee_user_id
                    WHERE i.inviter_user_id=? AND i.status='pending' AND i.expires_at>?
-                   ORDER BY i.created_at DESC,i.id DESC""",
+                   ORDER BY i.created_at DESC,i.id DESC LIMIT 100""",
                 (user["id"], now),
             ).fetchall()
             return {
                 "received": [dict(row) for row in received],
                 "sent": [dict(row) for row in sent],
-                "pending_count": len(received),
+                "pending_count": int(pending_count),
+                "truncated": pending_count > len(received) or len(sent) >= 100,
             }
 
     @app.post("/api/rooms/{room_id}/invites")
@@ -592,13 +598,14 @@ def register_social_routes(
                     "UPDATE room_invites SET status='expired',responded_at=?,updated_at=? WHERE id=?",
                     (now, now, invite_id),
                 )
+                notify_users.update((int(invite["inviter_user_id"]), int(user["id"])))
                 expired = True
             elif not friendship_exists(db, invite["inviter_user_id"], user["id"]):
                 db.execute(
                     "UPDATE room_invites SET status='cancelled',responded_at=?,updated_at=? WHERE id=?",
                     (now, now, invite_id),
                 )
-                notify_users.add(int(invite["inviter_user_id"]))
+                notify_users.update((int(invite["inviter_user_id"]), int(user["id"])))
             else:
                 room = db.execute("SELECT * FROM rooms WHERE id=?", (room_id,)).fetchone()
                 if not room:
@@ -606,6 +613,7 @@ def register_social_routes(
                         "UPDATE room_invites SET status='cancelled',responded_at=?,updated_at=? WHERE id=?",
                         (now, now, invite_id),
                     )
+                    notify_users.update((int(invite["inviter_user_id"]), int(user["id"])))
                     expired = True
                 else:
                     validate_discovery_join(db, room, user, invite["role"])
@@ -619,8 +627,12 @@ def register_social_routes(
                     notify_users.add(int(invite["inviter_user_id"]))
                     notify_users.add(int(user["id"]))
         if expired:
+            for target_id in sorted(notify_users):
+                await hub.notify_account(target_id, {"type": "room_invite_updated", "invite_id": invite_id})
             raise HTTPException(409, "邀请已过期或房间已不可加入。")
         if joined is None:
+            for target_id in sorted(notify_users):
+                await hub.notify_account(target_id, {"type": "room_invite_updated", "invite_id": invite_id})
             raise HTTPException(409, "好友关系已解除，邀请已失效。")
         await hub.notify(room_id, "judge_added" if joined["role"] == "judge" else "joined")
         for target_id in sorted(notify_users):
