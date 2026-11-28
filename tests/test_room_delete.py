@@ -68,7 +68,7 @@ def test_delete_finished_room_cascades_all_room_data_but_preserves_other_rooms_a
         assert [dict(r) for r in db.execute('SELECT * FROM users')] == users
         assert not db.execute('SELECT 1 FROM answers').fetchone()
         for table in ('members','ai_players','rounds','suggestions','chat_messages','events','room_judges','judge_questions',
-                      'judge_verdicts','ai_judges','ai_judge_questions','ai_judge_verdicts','ai_answer_revisions','packets'):
+                      'judge_verdicts','ai_judges','ai_judge_questions','ai_judge_verdicts','ai_answer_revisions','packets','room_invites'):
             assert not db.execute(f'SELECT 1 FROM {table} WHERE room_id=?', (rid,)).fetchone(), table
         assert not db.execute('PRAGMA foreign_key_check').fetchall()
 
