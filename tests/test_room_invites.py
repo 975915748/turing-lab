@@ -180,7 +180,7 @@ def test_concurrent_duplicate_invite_creation_and_acceptance_are_idempotent(lab)
         ))
     assert sum(result["created"] for result in results) == 1
     assert sum(result["existing"] for result in results) == 1
-    invite_id = next(item["invite_id"] for result in results for item in result["results"] if item["status"] == "pending")
+    invite_id = results[0]["results"][0]["invite_id"]
 
     second_player = TestClient(app)
     post(second_player, "/api/login", {"uid": player_uid, "password": "player-password"})
