@@ -31,6 +31,7 @@ from seat_personas import (compose_system_prompt, freeze_match_personas, is_matc
                             normalize_persona_config, output_token_limit, persona_catalog,
                             persona_config_from_row, revealed_persona_rows,
                             freeze_new_manual_participant_seat)
+from question_bank import BANK_VERSION, CATEGORIES as QUESTION_BANK_CATEGORIES, list_questions
 
 ROOT = Path(__file__).resolve().parent
 DATABASE = ROOT / 'data' / 'game.sqlite3'
@@ -3892,6 +3893,19 @@ def create_app(db_path=None):
             invitee_id=int(row['invitee_user_id'])
         await app.state.hub.notify_accounts([u['id'],invitee_id],{'type':'room_invite_updated'})
         return {'ok':True}
+
+    @app.get('/api/question-bank')
+    def get_question_bank(request:Request,category:Optional[str]=Query(default=None,max_length=30),
+                          q:Optional[str]=Query(default=None,max_length=120),
+                          limit:int=Query(default=50,ge=1,le=100)):
+        with connection() as db:
+            caller(request,db)
+        try:
+            questions=list_questions(category=category,query=q,limit=limit)
+        except ValueError as exc:
+            raise HTTPException(422,str(exc))
+        return {'version':BANK_VERSION,'categories':list(QUESTION_BANK_CATEGORIES),
+                'questions':questions}
 
     @app.get('/api/admin/users')
     def list_users(request:Request):
