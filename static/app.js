@@ -1189,6 +1189,31 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
   if(action==='tab-login'||action==='tab-register'){state.tab=action==='tab-login'?'login':'register';renderAuth()}
   if(action==='toggle-legacy-login'){state.legacyLogin=!state.legacyLogin;renderAuth()}
   if(action==='copy-uid'){if(!b.dataset.uid)throw new Error('UID 不可用');await navigator.clipboard.writeText(b.dataset.uid);toast('UID 已复制')}
+  if(action==='public-rooms-refresh')await loadPublicRooms({reset:true});
+  if(action==='public-rooms-more')await loadPublicRooms({append:true});
+  if(action==='public-room-join'){
+   const result=await api('/api/rooms/'+Number(b.dataset.id)+'/join',{method:'POST',body:{role:b.dataset.role}});
+   await openRoom(result.room_id);toast(result.role==='judge'?'已作为真人裁判加入公开房间':'已加入公开房间');
+  }
+  if(action==='room-invite-toggle'){
+   state.roomInvitePanelOpen=!state.roomInvitePanelOpen;
+   if(state.roomInvitePanelOpen&&!state.social)await loadSocial();
+   renderRoomInvitePanel();
+  }
+  if(action==='room-invite-accept'){
+   const result=await api('/api/room-invites/'+Number(b.dataset.id)+'/accept',{method:'POST'});
+   await loadRoomInvites();await openRoom(result.room_id);
+   toast(result.role==='judge'?'已接受邀请并加入裁判席':'已接受邀请并加入房间');
+  }
+  if(action==='room-invite-reject'){
+   await api('/api/room-invites/'+Number(b.dataset.id)+'/reject',{method:'POST'});
+   await loadRoomInvites();toast('已拒绝房间邀请');
+  }
+  if(action==='room-invite-cancel'){
+   await api('/api/room-invites/'+Number(b.dataset.id)+'/cancel',{method:'POST'});
+   await loadRoomInvites();toast('已撤回房间邀请');
+  }
+  if(action==='invites-go-lobby')await leaveCurrentRoom();
   if(action==='dm-open')await openDm(b.dataset.uid);
   if(action==='dm-close'){state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;state.dmPending=null;state.dmDraft='';renderDmPanel();}
   if(action==='dm-older')await loadOlderDm(b.dataset.uid);
@@ -1443,7 +1468,7 @@ app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]')
   if(action==='reveal'){if(confirm('裁判结论锁定后将向全部玩家公开身份和计分。确定结束比赛并揭晓？')){await api(`/api/rooms/${state.roomId}/reveal`,{method:'POST'});await refreshRoom();toast('已结束并揭晓比赛')}}
  }catch(err){if(roomErrorGuard&&!roomErrorGuard())return;toast(err.message)}
 });
-app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-form]');if(!form)return;e.preventDefault();const type=form.dataset.form;const data=Object.fromEntries(new FormData(form));const btn=form.querySelector('[type=submit]');if(btn)btn.disabled=true;
+app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-form]');if(!form)return;e.preventDefault();const type=form.dataset.form;const formData=new FormData(form);const data=Object.fromEntries(formData);const btn=form.querySelector('[type=submit]');if(btn)btn.disabled=true;
  try{
   if(type==='friend-search'){
    const result=await api('/api/users/search?uid='+encodeURIComponent(data.uid.trim()));
@@ -1484,7 +1509,20 @@ app.addEventListener('submit',async e=>{const form=e.target.closest('form[data-f
   if(type==='login'){await api('/api/login',{method:'POST',body:data});await init();toast('登录成功');return}
   if(type==='register'){const result=await api('/api/register',{method:'POST',body:data});history.replaceState(null,'',location.pathname);await loadLobby();toast(`注册成功，你的 UID 是 ${result.uid}`);return}
   if(type==='join'){const result=await api('/api/join',{method:'POST',body:{code:data.code,role:data.role||'player'}});await openRoom(result.room_id);toast(result.role==='judge'?'已作为真人裁判加入':'已加入比赛');return}
-  if(type==='room'){const result=await api('/api/rooms',{method:'POST',body:data});await openRoom(result.room_id);toast('房间创建成功，可以分享邀请码');return}
+  if(type==='room'){const payload={...data,public_listing:formData.get('public_listing')==='on',public_description:String(data.public_description||'').trim()};const result=await api('/api/rooms',{method:'POST',body:payload});await openRoom(result.room_id);toast('房间创建成功，可以分享邀请码');return}
+   if(type==='room-visibility'){
+    const payload={public_listing:formData.get('public_listing')==='on',public_description:String(data.public_description||'').trim()};
+    await api('/api/rooms/'+state.roomId+'/visibility',{method:'PUT',body:payload});
+    await refreshRoom();toast(payload.public_listing?'房间已公开设置':'房间公开展示已关闭');return;
+   }
+   if(type==='room-invite-send'){
+    const uids=formData.getAll('uids').map(value=>String(value));
+    if(!uids.length)throw new Error('请至少选择一位好友。');
+    const result=await api('/api/rooms/'+state.roomId+'/invites',{method:'POST',body:{uids,role:data.role}});
+    await loadRoomInvites();renderRoomInvitePanel();
+    toast('邀请已处理：新建 '+result.created+'，已存在 '+result.existing+'，跳过 '+result.skipped);
+    return;
+   }
   if(type==='profile-name'){
    const context=capturePersonalSessionContext();
    let result;
