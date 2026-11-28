@@ -199,6 +199,8 @@ def test_public_room_disappears_when_first_judge_question_is_submitted(lab):
     _, _, _, host, player, other, judge = lab
     room = create_room(host, "Question submitted", public_listing=True)
     base = f"/api/rooms/{room['room_id']}"
+    post(host, "/api/join", {"code": room["code"], "role": "player"})
+    post(player, "/api/join", {"code": room["code"], "role": "player"})
     post(judge, "/api/join", {"code": room["code"], "role": "judge"})
     post(judge, base + "/judge-questions", {"text": "已提交的裁判问题"}, match=1)
     items = other.get("/api/public/rooms").json()["rooms"]
