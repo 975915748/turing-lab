@@ -3635,6 +3635,7 @@ def create_app(db_path=None):
                 if needle and needle not in (room['title'] or '').casefold() and needle not in (room['public_description'] or '').casefold():
                     continue
                 try:
+                    validate_discovery_room(db,room)
                     can_join_player=True
                     try:
                         validate_discovery_join(db,room,user,'player')
