@@ -178,11 +178,14 @@
     app.prepend(notice);
   }
 
-  function roomDiscoveryEditable(room) {
+  function roomVisibilityEditable(room) {
     const first = room?.rounds?.find(round => round.number === 1);
     return !!(room?.can_manage && room.status === 'open' && !room.match_started &&
-      first?.status === 'draft' && !first.question && !(first.questions || []).length &&
-      !room.persona_frozen && !room.personas_frozen);
+      first?.status === 'draft' && !first.question && !(first.questions || []).length);
+  }
+
+  function roomInvitesAllowed(room) {
+    return roomVisibilityEditable(room) && !room.persona_frozen && !room.personas_frozen;
   }
 
   async function renderRoomManagementControls() {
@@ -201,44 +204,58 @@
       panel.className = 'community-room-controls';
       anchor.appendChild(panel);
     }
-    const editable = roomDiscoveryEditable(room);
+    const visibilityEditable = roomVisibilityEditable(room);
+    const invitesAllowed = roomInvitesAllowed(room);
+    const rosterFrozen = !!(room.persona_frozen || room.personas_frozen);
     const friends = state.social?.friends || [];
     const signature = JSON.stringify({
       roomId: state.roomId,
       matchNumber: room.match_number,
       publicListing: !!room.public_listing,
       publicDescription: room.public_description || '',
-      editable,
+      visibilityEditable,
+      invitesAllowed,
+      rosterFrozen,
       inviteOpen: inviteState.inviteOpen,
       friends: friends.map(friend => [friend.uid, friend.note || '', friend.display_name || '']),
     });
     if (panel.dataset.signature === signature) return;
     const html = `
       <div class="divider"></div>
-      ${editable ? `
+      ${visibilityEditable ? `
         <form data-community-form="room-visibility">
-          <label class="check-row"><input type="checkbox" name="public_listing" ${room.public_listing ? 'checked' : ''}> 在公开大厅展示</label>
+          <label class="check-row"><input type="checkbox" name="public_listing" ${room.public_listing ? 'checked' : ''} ${rosterFrozen && !room.public_listing ? 'disabled' : ''}> 在公开大厅展示</label>
           <label class="field">公开简介（最多 160 字）</label>
           <textarea name="public_description" maxlength="160" rows="2" placeholder="介绍比赛主题、参与要求或裁判安排">${esc(room.public_description || '')}</textarea>
           <div class="form-actions"><button class="small" type="submit">保存公开设置</button></div>
         </form>
+        ${rosterFrozen ? `<p class="hint">名单已冻结，${room.public_listing ? '当前房间不会出现在公开大厅；你仍可关闭公开展示。若要重新公开，请先取消准备。' : '暂不能开启公开展示；取消准备后可以重新公开。'}</p>` : ''}
         <div class="divider"></div>
-        <div class="label-line"><h3>邀请好友加入</h3><button class="small" type="button" data-community-action="invite-panel-toggle">${inviteState.inviteOpen ? '收起' : '展开'}</button></div>
-        ${inviteState.inviteOpen ? (friends.length ? `
-          <form data-community-form="room-invite">
-            <label class="field">加入身份</label>
-            <select name="role"><option value="player">参赛者</option><option value="judge">真人裁判</option></select>
-            <div class="community-friend-list">
-              ${friends.map(friend => `
-                <label class="check-row">
-                  <input type="checkbox" name="uids" value="${esc(friend.uid)}">
-                  <span>${esc(friend.note || friend.display_name)} · ${esc(friend.uid)}</span>
-                </label>`).join('')}
-            </div>
-            <div class="form-actions"><button class="primary" type="submit">发送所选邀请</button></div>
-            <p class="hint">邀请有效期 30 分钟；只能邀请当前好友。相同身份的待处理邀请会复用。</p>
-          </form>` : '<p class="hint">尚无好友。请先在个人中心添加好友。</p><button class="small" type="button" data-action="personal-center">前往个人中心添加好友</button>') : ''}
-      ` : (room.public_listing ? '<p class="hint">首轮已开始或名单已冻结，公开大厅展示已停止；本场不能重新公开。</p>' : '')}
+        ${invitesAllowed ? `
+          <div class="label-line"><h3>邀请好友加入</h3><button class="small" type="button" data-community-action="invite-panel-toggle">${inviteState.inviteOpen ? '收起' : '展开'}</button></div>
+          ${inviteState.inviteOpen ? (friends.length ? `
+            <form data-community-form="room-invite">
+              <label class="field">加入身份</label>
+              <select name="role"><option value="player">参赛者</option><option value="judge">真人裁判</option></select>
+              <div class="community-friend-list">
+                ${friends.map(friend => {
+                  const note = friend.note || friend.display_name;
+                  const name = friend.display_name || note;
+                  const label = note && name && note !== name
+                    ? `${esc(note)}（${esc(name)}）`
+                    : esc(name || note);
+                  return `
+                    <label class="check-row">
+                      <input type="checkbox" name="uids" value="${esc(friend.uid)}">
+                      <span>${label} · ${esc(friend.uid)}</span>
+                    </label>`;
+                }).join('')}
+              </div>
+              <div class="form-actions"><button class="primary" type="submit">发送所选邀请</button></div>
+              <p class="hint">邀请有效期 30 分钟；只能邀请当前好友。相同身份的待处理邀请会复用。</p>
+            </form>` : '<p class="hint">尚无好友。请先在个人中心添加好友。</p><button class="small" type="button" data-action="personal-center">前往个人中心添加好友</button>') : ''}
+        ` : '<p class="hint">名单已冻结，暂不能发送新的好友邀请。</p>'}
+      ` : (room.public_listing ? '<p class="hint">首轮已开始或问题已提交，公开大厅展示已停止；本场不能重新公开。</p>' : '')}
     `;
     panel.innerHTML = html;
     panel.dataset.signature = signature;
