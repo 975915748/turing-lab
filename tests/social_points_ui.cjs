@@ -325,7 +325,7 @@ function friendDmButton(page, uid) {
     pendingGateReleases.push(releaseDelayedResponse);
     const delayedReady = new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('Timed out waiting for delayed DM response')), 10000);
-      signalDelayedResponseReady = () => { clearTimeout(timer); resolve(); };
+      signalDelayedResponseReady = status => { clearTimeout(timer); resolve(status); };
     });
     await pageA.route('**/api/messages/' + uidB, async route => {
       if (route.request().method() !== 'POST') { await route.continue(); return; }
