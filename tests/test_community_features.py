@@ -397,6 +397,29 @@ def test_concurrent_invite_acceptance_creates_one_seat_and_is_idempotent(env):
             'SELECT status FROM room_invites WHERE id=?', (invite_id,),
         ).fetchone()['status'] == 'accepted'
 
+def test_room_deletion_notifies_invited_accounts_and_cascades_pending_invites(env):
+    path, _, admin, users = env
+    invitee, invitee_uid = users[0]
+    make_friends(admin, invitee)
+    room = post(admin, '/api/rooms', {'title': '删除房间时撤销邀请'})
+    invite_id = post(admin, f"/api/rooms/{room['room_id']}/invites", {
+        'uids': [invitee_uid], 'role': 'player',
+    })['results'][0]['invite_id']
+
+    with invitee.websocket_connect('/ws/messages', headers={'origin': 'http://testserver'}) as socket:
+        assert socket.receive_json()['type'] == 'connected'
+        request(admin, 'DELETE', f"/api/rooms/{room['room_id']}", {
+            'match_number': 1, 'confirm': True,
+        })
+        event = socket.receive_json()
+        assert event['type'] == 'room_invite_updated'
+        assert event['invite_id'] == invite_id
+
+    assert invitee.get('/api/me/room-invites').json()['received'] == []
+    with db_open(path) as db:
+        assert db.execute('SELECT 1 FROM room_invites WHERE id=?', (invite_id,)).fetchone() is None
+
+
 def test_question_bank_is_read_only_bounded_and_versioned(env):
     _, _, admin, users = env
     player, _ = users[0]
