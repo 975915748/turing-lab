@@ -165,9 +165,9 @@
 
 ### 3.6 WebSocket 与前端通知
 
-- 复用 /ws/messages 和 hub.notify_account，不把邀请写入聊天记录。
-- 增加 room_invite_created、room_invite_updated 事件；事件只携带邀请 ID 和必要的刷新提示，不携带邀请码、CSRF、模型配置或完整好友数据。
-- 复用 `/ws/messages`，但必须把**账号 socket 的生命周期**与**个人中心 / 私信 UI 状态**分开。账号 socket 在登录会话内持续连接大厅、房间和个人中心；`clearDmState()` 只清理当前私信会话数据，不得关闭账号 socket。只有退出登录、账号 / CSRF 会话变化或会话失效时，才由独立的 `stopAccountSocket()` 关闭连接。
+- 邀请事件复用 `/ws/messages` 和 `hub.notify_account`，不把邀请写入聊天记录。
+- 增加 `room_invite_created`、`room_invite_updated` 事件；事件只携带邀请 ID 和必要的刷新提示，不携带邀请码、CSRF、模型配置或完整好友数据。
+- 必须把**账号 socket 的生命周期**与**个人中心 / 私信 UI 状态**分开。账号 socket 在登录会话内持续连接大厅、房间和个人中心；`clearDmState()` 只清理当前私信会话数据，不得关闭账号 socket。只有退出登录、账号 / CSRF 会话变化或会话失效时，才由独立的 `stopAccountSocket()` 关闭连接；`clearPersonalModelState()` 仅在账号 / 会话上下文确实失效时才可触发该关闭，不能因页面切换而关闭。
 - socket 连接、重连、事件处理和异步刷新必须捕获并复核 UID、CSRF、账号 epoch、socket 实例；旧账号迟到事件不得更新新账号状态。
 - 登录成功和 socket 每次重连后，必须主动拉取 `/api/me/room-invites` 补回离线期间错过的邀请事件；同时刷新好友 / 未读摘要。不能把 WebSocket 推送当作唯一数据来源。
 - 邀请、私信、锁名事件只更新对应状态或局部区域。处于大厅或比赛页面时，不得调用 `renderPersonalCenter()` 把当前页面替换成个人中心；仅当个人中心确实处于前台时才刷新其社交面板。

@@ -64,6 +64,7 @@
 - [ ] 扩展 /ws/messages 的事件类型，增加 room_invite_created 和 room_invite_updated。
 - [ ] 将 `/ws/messages` 调整为登录会话级账号 socket：大厅、房间、个人中心切换时连接保持不变；退出登录、账号 / CSRF 会话变化时才关闭。
 - [ ] 将 `clearDmState()` 限定为清理私信面板与草稿状态，不再关闭账号 socket；新增独立 `stopAccountSocket()` 管理连接生命周期。
+- [ ] 检查 `clearPersonalModelState()` 的调用点：只有登出、账号 / CSRF 会话变化或会话失效才停止账号 socket；大厅 / 房间 / 个人中心导航不能借由状态清理间接断开它。
 - [ ] 登录成功和每次 socket 重连后主动拉取 `/api/me/room-invites`，并刷新好友 / 未读摘要，补回离线期间错过的通知。
 - [ ] socket 建立、重连、消息处理和异步刷新均核对 UID、CSRF、账号 epoch、socket 实例。
 - [ ] 大厅增加待处理邀请角标和邀请列表，展示房间名、邀请人、受邀身份和剩余有效期。
