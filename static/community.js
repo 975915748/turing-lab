@@ -136,7 +136,7 @@
           <span class="pill">${room.player_count}/${room.max_players} 位参赛者</span>
         </div>
         <p class="hint community-public-description">${esc(room.public_description || '房主尚未填写公开简介')}</p>
-        <div class="tiny muted">房主：${esc(room.owner_display_name)} · 真人裁判 ${room.human_judge_count} 位 · AI 裁判 ${room.ai_judge_count}/${room.max_judges} 位 · AI 参赛位 ${room.ai_player_count} 位</div>
+        <div class="tiny muted">房主：${esc(room.owner_display_name)} · 真人裁判 ${room.human_judge_count} 位 · AI 裁判 ${room.ai_judge_count} 位（共 ${room.human_judge_count + room.ai_judge_count}/${room.max_judges} 位裁判）· AI 参赛位 ${room.ai_player_count} 位</div>
         <div class="community-tags">${(room.tags || []).map(tag => `<span class="pill">${esc(tag)}</span>`).join('')}</div>
         <div class="buttonrow">
           ${room.can_join_player ? `<button class="small primary" type="button" data-community-action="public-join" data-id="${room.room_id}" data-role="player">以参赛者身份加入</button>` : ''}
@@ -343,7 +343,8 @@
         if (currentPanel) currentPanel.dataset.open = 'false';
         renderQuestionBank(app.querySelector('form[data-form="judge-question"]') || form);
       } catch (error) {
-        toast(error.message || '题库加载失败');
+        if (accountStillCurrent(context) && state.roomId === context.roomId &&
+            state.roomContextEpoch === context.roomEpoch) toast(error.message || '题库加载失败');
       }
     }
   }
@@ -396,14 +397,18 @@
     const action = button.dataset.communityAction;
     const account = currentAccount();
     if (!account.uid) return;
+    const roomIdAtClick = state.roomId;
+    const roomEpochAtClick = state.roomContextEpoch;
     event.preventDefault();
     event.stopImmediatePropagation();
     try {
       if (action === 'invite-accept') {
         const result = await api('/api/room-invites/' + Number(button.dataset.id) + '/accept', { method: 'POST' });
-        if (!accountStillCurrent(account)) return;
+        if (!accountStillCurrent(account) || state.roomId !== roomIdAtClick ||
+            state.roomContextEpoch !== roomEpochAtClick) return;
         await loadRoomInvites();
-        if (!accountStillCurrent(account)) return;
+        if (!accountStillCurrent(account) || state.roomId !== roomIdAtClick ||
+            state.roomContextEpoch !== roomEpochAtClick) return;
         await openRoom(result.room_id);
         toast('已接受邀请并进入房间');
       } else if (action === 'invite-reject' || action === 'invite-cancel') {
@@ -416,7 +421,8 @@
         const result = await api('/api/rooms/' + Number(button.dataset.id) + '/join', {
           method: 'POST', body: { role: button.dataset.role },
         });
-        if (!accountStillCurrent(account)) return;
+        if (!accountStillCurrent(account) || state.roomId !== roomIdAtClick ||
+            state.roomContextEpoch !== roomEpochAtClick) return;
         await openRoom(result.room_id);
         toast(result.role === 'judge' ? '已作为真人裁判加入公开房间' : '已作为参赛者加入公开房间');
       } else if (action === 'public-refresh') {
@@ -428,7 +434,8 @@
       } else if (action === 'invite-panel-toggle') {
         inviteState.inviteOpen = !inviteState.inviteOpen;
         if (inviteState.inviteOpen && !state.social) await loadSocial();
-        if (!accountStillCurrent(account)) return;
+        if (!accountStillCurrent(account) || state.roomId !== roomIdAtClick ||
+            state.roomContextEpoch !== roomEpochAtClick) return;
         await renderRoomManagementControls();
       } else if (action === 'question-open') {
         await openQuestionBank();
