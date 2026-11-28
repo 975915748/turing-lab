@@ -168,8 +168,8 @@ function friendDmButton(page, uid) {
 
     await closePersonalCenter(pageA);
     await closePersonalCenter(pageB);
-    await pageA.waitForFunction(() => state.dmSocket === null);
-    await pageB.waitForFunction(() => state.dmSocket === null);
+    await pageA.waitForFunction(() => state.dmSocket?.readyState === WebSocket.OPEN);
+    await pageB.waitForFunction(() => state.dmSocket?.readyState === WebSocket.OPEN);
 
     for (let index = 1; index <= 51; index++) {
       const sequence = String(index).padStart(2, '0');
