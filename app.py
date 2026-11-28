@@ -97,6 +97,8 @@ def init_db(path):
             room_sql = old.execute("SELECT sql FROM sqlite_master WHERE name='rooms'").fetchone()
             needs_room_ids = bool(room_sql) and 'AUTOINCREMENT' not in room_sql['sql'].upper()
             old_room_columns={x['name'] for x in old.execute('PRAGMA table_info(rooms)')} if 'rooms' in old_tables else set()
+            needs_discovery_schema=('room_invites' not in old_tables or
+                not {'public_listing','public_description'}.issubset(old_room_columns))
             old_round_columns={x['name'] for x in old.execute('PRAGMA table_info(rounds)')} if 'rounds' in old_tables else set()
             old_task_columns={x['name'] for x in old.execute('PRAGMA table_info(model_operation_tasks)')} if 'model_operation_tasks' in old_tables else set()
             old_workflow_columns={x['name'] for x in old.execute('PRAGMA table_info(round_workflows)')} if 'round_workflows' in old_tables else set()
@@ -135,14 +137,15 @@ def init_db(path):
                 'legacy_username' not in {x['name'] for x in old.execute('PRAGMA table_info(users)')} or
                 'owner_id' not in {x['name'] for x in old.execute('PRAGMA table_info(rooms)')} or
                 'deleted_at' not in {x['name'] for x in old.execute('PRAGMA table_info(users)')} or
-                needs_room_ids or
+                needs_room_ids or needs_discovery_schema or
                 ('members' in old_tables and 'removed_at' not in {
                     x['name'] for x in old.execute('PRAGMA table_info(members)')}) or
                 ('answers' in old_tables and 'edited_at' not in {
                     x['name'] for x in old.execute('PRAGMA table_info(answers)')}) or
                 needs_workflow_schema):
                 stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
-                backup_tag = ('v1_12' if needs_persona_schema else
+                backup_tag = ('v1_13' if needs_discovery_schema else
+                              'v1_12' if needs_persona_schema else
                               'v1_10' if needs_workflow_schema else
                               'v1_9' if 'model_operation_tasks' not in old_tables or
                                   ('rooms' in old_tables and 'model_request_limit' not in {
