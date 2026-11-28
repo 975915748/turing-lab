@@ -541,13 +541,20 @@
         const uids = [...form.querySelectorAll('input[name="uids"]:checked')].map(input => input.value);
         if (!uids.length) throw new Error('请至少选择一位好友。');
         if (roomIdAtSubmit === null) throw new Error('当前房间已变化，请刷新后重试。');
+        const submittedInviteRole = values.role || 'player';
         const result = await api('/api/rooms/' + roomIdAtSubmit + '/invites', {
-          method: 'POST', body: { uids, role: values.role },
+          method: 'POST', body: { uids, role: submittedInviteRole },
         });
         if (!accountStillCurrent(account) || state.roomId !== roomIdAtSubmit ||
             state.room?.match_number !== matchAtSubmit || state.roomContextEpoch !== roomEpochAtSubmit) return;
-        inviteState.inviteOpen = false;
-        inviteState.inviteDraft = null;
+        const currentInviteDraft = inviteState.inviteDraft;
+        const inviteDraftChanged = !!currentInviteDraft && (
+          currentInviteDraft.roomKey !== String(roomIdAtSubmit) + ':' + String(matchAtSubmit) ||
+          currentInviteDraft.role !== submittedInviteRole ||
+          [...currentInviteDraft.uids].sort().join(',') !== [...uids].sort().join(',')
+        );
+        inviteState.inviteOpen = inviteDraftChanged;
+        if (!inviteDraftChanged) inviteState.inviteDraft = null;
         await loadRoomInvites();
         if (!accountStillCurrent(account) || state.roomId !== roomIdAtSubmit ||
             state.room?.match_number !== matchAtSubmit || state.roomContextEpoch !== roomEpochAtSubmit) return;
@@ -558,13 +565,24 @@
       } else if (type === 'room-visibility') {
         const public_listing = !!form.elements.public_listing?.checked;
         if (roomIdAtSubmit === null) throw new Error('当前房间已变化，请刷新后重试。');
+        const submittedVisibilityDraft = {
+          roomKey: String(roomIdAtSubmit) + ':' + String(matchAtSubmit),
+          public_listing,
+          public_description: values.public_description || '',
+        };
         await api('/api/rooms/' + roomIdAtSubmit + '/visibility', {
           method: 'PUT',
           body: { public_listing, public_description: values.public_description || '' },
         });
         if (!accountStillCurrent(account) || state.roomId !== roomIdAtSubmit ||
             state.room?.match_number !== matchAtSubmit || state.roomContextEpoch !== roomEpochAtSubmit) return;
-        inviteState.visibilityDraft = null;
+        const currentVisibilityDraft = inviteState.visibilityDraft;
+        if (!currentVisibilityDraft ||
+            (currentVisibilityDraft.roomKey === submittedVisibilityDraft.roomKey &&
+             currentVisibilityDraft.public_listing === submittedVisibilityDraft.public_listing &&
+             currentVisibilityDraft.public_description === submittedVisibilityDraft.public_description)) {
+          inviteState.visibilityDraft = null;
+        }
         await refreshRoom();
         if (!accountStillCurrent(account) || state.roomId !== roomIdAtSubmit ||
             state.room?.match_number !== matchAtSubmit || state.roomContextEpoch !== roomEpochAtSubmit) return;
