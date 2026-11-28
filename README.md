@@ -12,7 +12,7 @@
 - **真人与 AI 裁判**：支持独立裁判提交问题和最终判断，也保留外部裁判问题的手动录入流程。
 - **模型 AI**：通过 OpenAI Chat Completions 兼容接口生成参赛者回答、裁判问题和最终判断；模型配置归个人账号所有，API Key 在服务器端加密保存。
 - **比赛执行**：服务端持久化开局工作流、席位模型任务和单轮 deadline；浏览器刷新或断线不会取消已接受的工作流。
-- **社交功能**：房间公共聊天、好友申请与备注、一对一私信、未读计数和账号积分流水。
+- **社交功能**：房间公共聊天、好友申请与备注、一对一私信、好友邀房、公开大厅、未读计数和账号积分流水。
 - **部署方式**：Docker 镜像部署到 Railway；当前 SQLite 与工作流执行模型要求单实例、单 Uvicorn worker。
 
 ## 技术栈与代码结构
@@ -22,7 +22,7 @@
 | 后端 | Python、FastAPI、Uvicorn |
 | 数据存储 | SQLite |
 | 前端 | 原生 HTML、CSS、JavaScript |
-| 实时通信 | WebSocket：房间状态 / 公共聊天，以及账号私信 |
+| 实时通信 | WebSocket：房间状态 / 公共聊天，以及账号私信、积分和房间邀请通知 |
 | 模型服务 | OpenAI Chat Completions 兼容 API；Fernet 加密保存 API Key |
 | 测试 | pytest、Playwright 浏览器验收 |
 | 部署 | Docker、Railway |
@@ -37,6 +37,7 @@
 | `model_api.py` | OpenAI 兼容模型请求、Base URL 校验和 API Key 加解密 |
 | `match_orchestration.py` | SQLite 持久化轮次工作流的单进程 worker |
 | `seat_personas.py` | AI 席位人设、提示词组合和本场人设快照 |
+| `question_bank.py` | 真人裁判只读出题灵感库和分类 / 搜索逻辑 |
 | `railway_start.py` | 初始化数据库、检查已保存模型凭据、必要时创建首个管理员并启动 Uvicorn |
 | `static/` | 浏览器端页面、样式和交互代码 |
 | `tests/` | 后端测试及 Playwright 浏览器验收脚本 |
