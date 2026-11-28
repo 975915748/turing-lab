@@ -515,7 +515,7 @@ def test_account_soft_deletion_cancels_pending_invites_and_notifies_inviter(env)
 
     with admin.websocket_connect('/ws/messages', headers={'origin': 'http://testserver'}) as socket:
         assert socket.receive_json()['type'] == 'connected'
-        post(admin, f'/api/admin/users/{invitee_uid}', {'confirm': True})
+        request(admin, 'DELETE', f'/api/admin/users/{invitee_uid}', {'confirm': True})
         event = socket.receive_json()
         assert event['type'] == 'social_updated'
 
