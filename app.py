@@ -1702,6 +1702,7 @@ def public_room(db, room, user, mine):
             'my_points_result':my_points_result,'match_started':bool(room['match_started_at']),
             'public_listing':bool(room['public_listing']),
             'public_description':room['public_description'] or '',
+            'persona_frozen':bool(persona_frozen) if manager else False,
             'can_manage':manager,'is_owner':room['owner_id']==user['id'],
             'roster_recovery':manager and needs_roster_recovery(db,room),
             'status':room['status'],'current_round':room['current_round'],
