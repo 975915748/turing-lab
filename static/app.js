@@ -461,16 +461,21 @@ function connectDmWs(){
   }
  };
  ws.onclose=async event=>{
-  if(state.dmSocket!==ws)return;state.dmSocket=null;
+  if(state.dmSocket!==ws)return;
+  const context=capturePersonalCenterContext();
+  if(context.uid!==uid)return;
+  state.dmSocket=null;
   if(event.code===1008){
    try{
     const current=await api('/api/me');
+    if(!isCurrentPersonalModelAccountContext(context))return;
     if(current.user?.uid!==uid){state.me=current;clearPersonalModelState();await init();}
     else{
      state.me=current;
      state.dmReconnect=setTimeout(()=>{if(location.hash.startsWith('#profile')&&state.me?.user?.uid===uid)connectDmWs();},1000);
     }
    }catch{
+    if(!isCurrentPersonalModelAccountContext(context))return;
     state.me=null;clearPersonalModelState();renderAuth();
    }
    return;

@@ -78,6 +78,7 @@ function friendDmButton(page, uid) {
   for (const page of [pageA, pageB, pageC]) page.setDefaultTimeout(10000);
   const errors = [];
   const dmRequests = [];
+  const pendingGateReleases = [];
   pageA.on('request', request => {
     if (request.url().includes('/api/messages/')) dmRequests.push({ method: request.method(), url: request.url() });
   });
@@ -321,7 +322,11 @@ function friendDmButton(page, uid) {
     const delayedText = 'A 账号切换后的迟到私信';
     let releaseDelayedResponse, signalDelayedResponseReady;
     const delayedGate = new Promise(resolve => { releaseDelayedResponse = resolve; });
-    const delayedReady = new Promise(resolve => { signalDelayedResponseReady = resolve; });
+    pendingGateReleases.push(releaseDelayedResponse);
+    const delayedReady = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Timed out waiting for delayed DM response')), 10000);
+      signalDelayedResponseReady = () => { clearTimeout(timer); resolve(); };
+    });
     const delayedResponsePromise = pageA.waitForResponse(response =>
       response.url().endsWith('/api/messages/' + encodeURIComponent(uidB)) &&
       response.request().method() === 'POST', { timeout: 0 });
@@ -362,6 +367,7 @@ function friendDmButton(page, uid) {
     let releaseProfileResponse;
     let signalProfileResponseReady;
     const profileGate = new Promise(resolve => { releaseProfileResponse = resolve; });
+    pendingGateReleases.push(releaseProfileResponse);
     const profileResponseReady = new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('Timed out waiting for delayed profile-name response')), 10000);
       signalProfileResponseReady = status => { clearTimeout(timer); resolve(status); };
@@ -406,6 +412,7 @@ function friendDmButton(page, uid) {
     let releaseNameLockResponse;
     let signalNameLockResponseReady;
     const nameLockGate = new Promise(resolve => { releaseNameLockResponse = resolve; });
+    pendingGateReleases.push(releaseNameLockResponse);
     const nameLockResponseReady = new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('Timed out waiting for delayed name_lock_updated refresh')), 10000);
       signalNameLockResponseReady = status => { clearTimeout(timer); resolve(status); };
@@ -422,7 +429,12 @@ function friendDmButton(page, uid) {
       }
       await route.continue();
     });
-    await api(pageA, 'POST', lockBase + '/question', { text: '触发改名锁定通知' }, 1);
+    await pageB.evaluate(() => {
+      if (!state.dmSocket || state.dmSocket.readyState !== WebSocket.OPEN) {
+        throw new Error('Expected an open personal-center WebSocket');
+      }
+      state.dmSocket.onmessage({ data: JSON.stringify({ type: 'name_lock_updated' }) });
+    });
     assert.equal(await nameLockResponseReady, 200);
     await switchAccount(pageB, uidC);
     await openPersonalCenter(pageB);
@@ -445,12 +457,113 @@ function friendDmButton(page, uid) {
     );
     await pageB.unroute('**/api/me');
 
+    // A delayed successful /api/me response from an old 1008 close must not replace the next account.
+    await switchAccount(pageA, uidA);
+    await openPersonalCenter(pageA);
+    await pageA.waitForFunction(() => state.dmSocket?.readyState === WebSocket.OPEN);
+    let releaseCloseSuccessResponse;
+    let signalCloseSuccessResponseReady;
+    const closeSuccessGate = new Promise(resolve => { releaseCloseSuccessResponse = resolve; });
+    pendingGateReleases.push(releaseCloseSuccessResponse);
+    const closeSuccessReady = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Timed out waiting for delayed 1008 success response')), 10000);
+      signalCloseSuccessResponseReady = status => { clearTimeout(timer); resolve(status); };
+    });
+    let holdCloseSuccessResponse = true;
+    await pageA.route('**/api/me', async route => {
+      if (holdCloseSuccessResponse && route.request().method() === 'GET') {
+        holdCloseSuccessResponse = false;
+        const response = await route.fetch();
+        signalCloseSuccessResponseReady(response.status());
+        await closeSuccessGate;
+        await route.fulfill({ response });
+        return;
+      }
+      await route.continue();
+    });
+    await pageA.evaluate(() => {
+      const ws = state.dmSocket;
+      if (!ws || ws.readyState !== WebSocket.OPEN || typeof ws.onclose !== 'function') {
+        throw new Error('Expected a live personal-center WebSocket close handler');
+      }
+      void ws.onclose({ code: 1008, reason: 'test stale close' });
+      ws.close();
+    });
+    assert.equal(await closeSuccessReady, 200);
+    await switchAccount(pageA, uidB);
+    const accountBAfterClose = await pageA.evaluate(() => ({
+      uid: state.me?.user?.uid,
+      csrf: state.me?.user?.csrf,
+      epoch: state.personalModelEpoch,
+    }));
+    assert.equal(accountBAfterClose.uid, uidB);
+    releaseCloseSuccessResponse();
+    await pageA.waitForTimeout(200);
+    assert.equal(await pageA.evaluate(() => state.me?.user?.uid), uidB);
+    assert.equal(await pageA.evaluate(() => state.me?.user?.csrf), accountBAfterClose.csrf);
+    assert.equal(await pageA.evaluate(() => state.personalModelEpoch), accountBAfterClose.epoch);
+    await pageA.unroute('**/api/me');
+
+    // A delayed 401 from an old 1008 close must not clear the next account either.
+    await openPersonalCenter(pageA);
+    await pageA.waitForFunction(() => state.dmSocket?.readyState === WebSocket.OPEN);
+    let releaseCloseFailureResponse;
+    let signalCloseFailureResponseReady;
+    const closeFailureGate = new Promise(resolve => { releaseCloseFailureResponse = resolve; });
+    pendingGateReleases.push(releaseCloseFailureResponse);
+    const closeFailureReady = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Timed out waiting for delayed 1008 failure response')), 10000);
+      signalCloseFailureResponseReady = () => { clearTimeout(timer); resolve(); };
+    });
+    let holdCloseFailureResponse = true;
+    await pageA.route('**/api/me', async route => {
+      if (holdCloseFailureResponse && route.request().method() === 'GET') {
+        holdCloseFailureResponse = false;
+        signalCloseFailureResponseReady();
+        await closeFailureGate;
+        await route.fulfill({
+          status: 401,
+          contentType: 'application/json',
+          body: JSON.stringify({ detail: '登录会话已失效。' }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+    await pageA.evaluate(() => {
+      const ws = state.dmSocket;
+      if (!ws || ws.readyState !== WebSocket.OPEN || typeof ws.onclose !== 'function') {
+        throw new Error('Expected a live personal-center WebSocket close handler');
+      }
+      void ws.onclose({ code: 1008, reason: 'test stale close' });
+      ws.close();
+    });
+    await closeFailureReady;
+    await switchAccount(pageA, uidC);
+    const accountCAfterClose = await pageA.evaluate(() => ({
+      uid: state.me?.user?.uid,
+      csrf: state.me?.user?.csrf,
+      epoch: state.personalModelEpoch,
+    }));
+    assert.equal(accountCAfterClose.uid, uidC);
+    releaseCloseFailureResponse();
+    await pageA.waitForTimeout(200);
+    assert.equal(await pageA.evaluate(() => state.me?.user?.uid), uidC);
+    assert.equal(await pageA.evaluate(() => state.me?.user?.csrf), accountCAfterClose.csrf);
+    assert.equal(await pageA.evaluate(() => state.personalModelEpoch), accountCAfterClose.epoch);
+    await pageA.unroute('**/api/me');
+
     assert.deepEqual(errors, []);
   } finally {
-    await contextA.close();
-    await contextB.close();
-    await contextC.close();
-    await browser.close();
+    for (const release of pendingGateReleases) {
+      try { release(); } catch {}
+    }
+    await Promise.all([
+      contextA.close().catch(() => {}),
+      contextB.close().catch(() => {}),
+      contextC.close().catch(() => {}),
+    ]);
+    await browser.close().catch(() => {});
   }
 })().catch(error => {
   console.error(error);
