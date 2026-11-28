@@ -131,10 +131,10 @@
       <article class="card flat community-public-room">
         <div class="label-line">
           <div><div class="overline">ROOM ${room.room_id}</div><h3>${esc(room.title)}</h3></div>
-          <span class="pill">${room.player_count}/8 位参赛者</span>
+          <span class="pill">${room.player_count}/${room.max_players} 位参赛者</span>
         </div>
-        <p class="hint community-public-description">${esc(room.description || '房主尚未填写公开简介')}</p>
-        <div class="tiny muted">房主：${esc(room.owner_display_name)} · 真人裁判 ${room.human_judge_count} 位 · AI 裁判 ${room.ai_judge_count} 位 · AI 参赛位 ${room.ai_player_count} 位</div>
+        <p class="hint community-public-description">${esc(room.public_description || '房主尚未填写公开简介')}</p>
+        <div class="tiny muted">房主：${esc(room.owner_display_name)} · 真人裁判 ${room.human_judge_count} 位 · AI 裁判 ${room.ai_judge_count}/${room.max_judges} 位 · AI 参赛位 ${room.ai_player_count} 位</div>
         <div class="community-tags">${(room.tags || []).map(tag => `<span class="pill">${esc(tag)}</span>`).join('')}</div>
         <div class="buttonrow">
           ${room.can_join_player ? `<button class="small primary" type="button" data-community-action="public-join" data-id="${room.room_id}" data-role="player">以参赛者身份加入</button>` : ''}
