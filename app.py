@@ -3855,6 +3855,7 @@ def create_app(db_path=None):
     @app.post('/api/room-invites/{invite_id}/reject')
     async def reject_room_invite(invite_id:int,request:Request):
         inviter_id=None
+        failure=None
         with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             row=db.execute('SELECT * FROM room_invites WHERE id=? AND invitee_user_id=?',
@@ -3865,18 +3866,22 @@ def create_app(db_path=None):
                 raise HTTPException(409,'该邀请已失效或已处理。')
             now=utcnow()
             if row['expires_at']<=now:
-                db.execute('UPDATE room_invites SET status=? ,responded_at=?,updated_at=? WHERE id=?',
+                db.execute('UPDATE room_invites SET status=?,responded_at=?,updated_at=? WHERE id=?',
                            ('expired',now,now,invite_id))
-                raise HTTPException(410,'邀请已过期。')
-            inviter_id=int(row['inviter_user_id'])
-            db.execute('''UPDATE room_invites SET status='rejected',responded_at=?,updated_at=?
-                WHERE id=? AND status='pending' ''',(now,now,invite_id))
+                failure=(410,'邀请已过期。')
+            else:
+                inviter_id=int(row['inviter_user_id'])
+                db.execute('''UPDATE room_invites SET status='rejected',responded_at=?,updated_at=?
+                    WHERE id=? AND status='pending' ''',(now,now,invite_id))
+        if failure:
+            raise HTTPException(failure[0],failure[1])
         await app.state.hub.notify_accounts([u['id'],inviter_id],{'type':'room_invite_updated'})
         return {'ok':True}
 
     @app.post('/api/room-invites/{invite_id}/cancel')
     async def cancel_room_invite(invite_id:int,request:Request):
         invitee_id=None
+        failure=None
         with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             row=db.execute('SELECT * FROM room_invites WHERE id=?',(invite_id,)).fetchone()
@@ -3888,24 +3893,18 @@ def create_app(db_path=None):
             if row['status']!='pending':
                 raise HTTPException(409,'该邀请已失效或已处理。')
             now=utcnow()
-            db.execute('''UPDATE room_invites SET status='cancelled',responded_at=?,updated_at=?
-                WHERE id=? AND status='pending' ''',(now,now,invite_id))
-            invitee_id=int(row['invitee_user_id'])
+            if row['expires_at']<=now:
+                db.execute('''UPDATE room_invites SET status='expired',responded_at=?,updated_at=?
+                    WHERE id=? AND status='pending' ''',(now,now,invite_id))
+                failure=(410,'邀请已过期。')
+            else:
+                db.execute('''UPDATE room_invites SET status='cancelled',responded_at=?,updated_at=?
+                    WHERE id=? AND status='pending' ''',(now,now,invite_id))
+                invitee_id=int(row['invitee_user_id'])
+        if failure:
+            raise HTTPException(failure[0],failure[1])
         await app.state.hub.notify_accounts([u['id'],invitee_id],{'type':'room_invite_updated'})
         return {'ok':True}
-
-    @app.get('/api/question-bank')
-    def get_question_bank(request:Request,category:Optional[str]=Query(default=None,max_length=30),
-                          q:Optional[str]=Query(default=None,max_length=120),
-                          limit:int=Query(default=50,ge=1,le=100)):
-        with connection() as db:
-            caller(request,db)
-        try:
-            questions=list_questions(category=category,query=q,limit=limit)
-        except ValueError as exc:
-            raise HTTPException(422,str(exc))
-        return {'version':BANK_VERSION,'categories':list(QUESTION_BANK_CATEGORIES),
-                'questions':questions}
 
     @app.get('/api/admin/users')
     def list_users(request:Request):
