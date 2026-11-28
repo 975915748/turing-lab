@@ -8,6 +8,7 @@ from app import (
     create_app,
     db_open,
     freeze_match_personas,
+    needs_roster_recovery,
     participant_roster_revision,
     seed_admin,
 )
@@ -266,6 +267,68 @@ def test_invite_code_join_keeps_legacy_frozen_roster_recovery_but_discovery_join
     listed = discovery_player.get('/api/public/rooms').json()['rooms']
     assert room['room_id'] not in {item['room_id'] for item in listed}
 
+
+
+def test_discovery_join_cannot_use_roster_recovery_to_bypass_persona_freeze(env):
+    path, _, admin, users = env
+    existing_player, _ = users[0]
+    deleted_player, deleted_uid = users[1]
+    invitee, invitee_uid = users[2]
+    public_player, _ = users[3]
+    make_friends(admin, invitee)
+
+    room = post(admin, '/api/rooms', {
+        'title': '冻结名单恢复不能绕过发现入口',
+        'public_listing': True,
+    })
+    post(existing_player, '/api/join', {'code': room['code'], 'role': 'player'})
+    post(deleted_player, '/api/join', {'code': room['code'], 'role': 'player'})
+    invitation = post(admin, f"/api/rooms/{room['room_id']}/invites", {
+        'uids': [invitee_uid], 'role': 'player',
+    })['results'][0]['invite_id']
+
+    with db_open(path) as db:
+        row = db.execute('SELECT * FROM rooms WHERE id=?', (room['room_id'],)).fetchone()
+        freeze_match_personas(
+            db, row, source='test',
+            participant_roster_revision=participant_roster_revision(db, room['room_id']),
+        )
+        db.execute(
+            'UPDATE users SET deleted_at=? WHERE id=?',
+            ('2026-11-28T00:00:00+00:00', int(deleted_uid[2:])),
+        )
+        assert needs_roster_recovery(db, row) is True
+
+    # An existing same-role seat remains idempotent even while the roster is frozen.
+    existing = post(existing_player, f"/api/rooms/{room['room_id']}/join", {'role': 'player'})
+    assert existing['already_joined'] is True
+
+    accepted = post(invitee, f"/api/room-invites/{invitation}/accept", status=409)
+    assert '冻结' in accepted['detail']
+    direct = post(public_player, f"/api/rooms/{room['room_id']}/join", {'role': 'player'}, status=409)
+    assert '冻结' in direct['detail']
+    with db_open(path) as db:
+        assert db.execute(
+            'SELECT status FROM room_invites WHERE id=?', (invitation,),
+        ).fetchone()['status'] == 'pending'
+
+
+def test_discovery_judge_conflict_does_not_disclose_other_room_details(env):
+    _, _, admin, users = env
+    judge, judge_uid = users[0]
+    make_friends(admin, judge)
+
+    other_room = post(admin, '/api/rooms', {'title': '不应泄露的其他房间名称'})
+    post(judge, '/api/join', {'code': other_room['code'], 'role': 'judge'})
+    invited_room = post(admin, '/api/rooms', {'title': '好友邀请裁判目标'})
+    invitation = post(admin, f"/api/rooms/{invited_room['room_id']}/invites", {
+        'uids': [judge_uid], 'role': 'judge',
+    })['results'][0]['invite_id']
+
+    rejected = post(judge, f"/api/room-invites/{invitation}/accept", status=409)
+    assert '其他未完赛房间' in rejected['detail']
+    assert '不应泄露的其他房间名称' not in rejected['detail']
+    assert f"ROOM {other_room['room_id']}" not in rejected['detail']
 
 
 def test_expired_invite_can_be_resent_without_loading_inbox(env):
