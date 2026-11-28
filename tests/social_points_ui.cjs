@@ -452,6 +452,7 @@ function friendDmButton(page, uid) {
     // A delayed name-lock refresh must not replace the room after leaving the personal center.
     await pageB.goto(site + '/#room=' + roomId);
     await pageB.waitForFunction(id => state.roomId === id, roomId);
+    await pageB.waitForFunction(id => state.room?.id === id, roomId);
     const roomJudgeNotice = pageB.locator('#judgeNotice');
     if (await roomJudgeNotice.isVisible().catch(() => false)) {
       await pageB.locator('#judgeNoticeClose').click();
