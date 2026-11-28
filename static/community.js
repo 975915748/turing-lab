@@ -84,10 +84,10 @@
     const received = state.roomInvites?.received || [];
     const sent = state.roomInvites?.sent || [];
     if (!received.length && !sent.length) {
-      target.innerHTML = '';
+      if (target.innerHTML) target.innerHTML = '';
       return;
     }
-    target.innerHTML = `
+    const html = `
       <section class="card community-invites">
         <div class="label-line"><h2>好友房间邀请</h2><span class="pill">${received.length} 条待处理</span></div>
         ${received.length ? `
@@ -120,6 +120,7 @@
               </article>`).join('')}
           </div>` : ''}
       </section>`;
+    if (target.innerHTML !== html) target.innerHTML = html;
   }
 
   function renderPublicLobbyPanel() {
@@ -140,7 +141,7 @@
           ${room.can_join_judge ? `<button class="small" type="button" data-community-action="public-join" data-id="${room.room_id}" data-role="judge">以真人裁判身份加入</button>` : ''}
         </div>
       </article>`).join('');
-    target.innerHTML = `
+    const html = `
       <section class="card community-public-list">
         <div class="label-line">
           <div><h2>公开大厅</h2><p class="hint">只展示尚未开始、仍允许加入的公开房间。</p></div>
@@ -149,14 +150,21 @@
         ${cards || (state.communityPublicLoading ? '<p class="muted">正在加载公开房间…</p>' : '<p class="muted">目前没有可加入的公开房间。</p>')}
         ${state.communityPublicHasMore ? '<button class="small spaced" type="button" data-community-action="public-more">加载更多</button>' : ''}
       </section>`;
+    if (target.innerHTML !== html) target.innerHTML = html;
   }
 
   function renderInviteRoomNotice() {
-    document.getElementById('communityRoomInviteNotice')?.remove();
     const count = state.roomInvites?.received?.length || 0;
-    if (!state.roomId || !count) return;
+    const existing = document.getElementById('communityRoomInviteNotice');
+    if (!state.roomId || !count) {
+      existing?.remove();
+      return;
+    }
+    if (existing?.dataset.count === String(count)) return;
+    existing?.remove();
     const notice = document.createElement('section');
     notice.id = 'communityRoomInviteNotice';
+    notice.dataset.count = String(count);
     notice.className = 'notice community-room-invite-notice';
     notice.innerHTML = `
       <div><strong>你收到 ${count} 条好友房间邀请。</strong>
@@ -191,7 +199,7 @@
     }
     const editable = roomDiscoveryEditable(room);
     const friends = state.social?.friends || [];
-    panel.innerHTML = `
+    const html = `
       <div class="divider"></div>
       ${editable ? `
         <form data-community-form="room-visibility">
@@ -218,6 +226,7 @@
           </form>` : '<p class="hint">尚无好友。请先在个人中心添加好友。</p>') : ''}
       ` : (room.public_listing ? '<p class="hint">首轮已开始或名单已冻结，公开大厅展示已停止；本场不能重新公开。</p>' : '')}
     `;
+    if (panel.innerHTML !== html) panel.innerHTML = html;
   }
 
   function ensureLobbyPanels() {
@@ -261,12 +270,13 @@
     const target = document.getElementById('communityQuestionResults');
     if (!target) return;
     const rows = filteredQuestions();
-    target.innerHTML = rows.length ? rows.map(item => `
+    const html = rows.length ? rows.map(item => `
       <article class="feed-item community-question-item">
         <div class="label-line"><strong>${esc(item.title)}</strong><button class="small" type="button" data-community-action="question-fill" data-id="${esc(item.id)}">填入问题</button></div>
         <p class="community-question-text">${esc(item.text)}</p>
         <div class="community-tags">${(item.tags || []).map(tag => `<span class="pill">${esc(tag)}</span>`).join('')}</div>
       </article>`).join('') : '<p class="muted">没有匹配的题目，可以更换分类或搜索词。</p>';
+    if (target.innerHTML !== html) target.innerHTML = html;
   }
 
   function renderQuestionBank(form) {
@@ -279,11 +289,12 @@
       textarea.before(panel);
     }
     if (!inviteState.questionOpen) {
-      panel.innerHTML = '<button class="small" type="button" data-community-action="question-open">出题灵感库</button>';
+      const html = '<button class="small" type="button" data-community-action="question-open">出题灵感库</button>';
+      if (panel.innerHTML !== html) panel.innerHTML = html;
       return;
     }
     const categories = inviteState.questionData?.categories || [];
-    panel.innerHTML = `
+    const html = `
       <div class="community-question-bank">
         <div class="label-line"><strong>出题灵感库</strong><button class="small" type="button" data-community-action="question-close">收起</button></div>
         <div class="community-question-filters">
@@ -296,6 +307,7 @@
         <div class="buttonrow"><button class="small" type="button" data-community-action="question-random">随机抽取一题</button></div>
         <div id="communityQuestionResults"></div>
       </div>`;
+    if (panel.innerHTML !== html) panel.innerHTML = html;
     renderQuestionResults();
   }
 
@@ -345,7 +357,7 @@
     }
     if (!uid) return;
     ensureLobbyPanels();
-    renderRoomManagementControls().catch(() => {});
+    renderRoomManagementControls();
     const judgeForm = app.querySelector('form[data-form="judge-question"]');
     if (judgeForm) renderQuestionBank(judgeForm);
     renderInviteRoomNotice();
@@ -465,6 +477,9 @@
       renderQuestionResults();
     }
   });
+
+  window.loadRoomInvites = loadRoomInvites;
+  window.loadPublicRooms = loadPublicRooms;
 
   const observer = new MutationObserver(() => ensureCommunityUi());
   observer.observe(app, { childList: true, subtree: true });
