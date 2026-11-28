@@ -156,7 +156,7 @@ main{isolation:isolate;perspective:1600px}
 #room-banner{max-width:1240px;margin:0 auto 18px!important}
 #dashboard{max-width:1240px;margin:0 auto 18px}
 #dashboard .metric:nth-child(even){margin-top:12px}
-#room-game,#room-discern,#room-host,#room-judge-manage,#room-ai-judge{max-width:1280px;margin:0 auto}
+#room-game,#room-host,#room-judge-manage,#room-ai-judge{max-width:1280px;margin:0 auto}
 
 /* 卡片像悬浮图纸：切角、细线、轻微三维倾转。 */
 .card{
@@ -186,7 +186,7 @@ main{isolation:isolate;perspective:1600px}
 }
 .btn:hover{transform:translateY(-2px);background:var(--paper-bright);border-color:var(--cobalt);box-shadow:0 8px 24px rgba(17,19,24,.08)}
 .btn:active{transform:translateY(0) scale(.98)}
-.btn.primary,.source-toggle button.on{background:var(--cobalt);color:#fff;border-color:var(--cobalt);box-shadow:0 9px 24px color-mix(in srgb,var(--cobalt) 19%,transparent)}
+.btn.primary{background:var(--cobalt);color:#fff;border-color:var(--cobalt);box-shadow:0 9px 24px color-mix(in srgb,var(--cobalt) 19%,transparent)}
 .btn.primary:hover{background:color-mix(in srgb,var(--cobalt) 86%,black);color:#fff}
 .btn.sm{border-radius:2px 9px 2px 9px}
 .btn.danger{border-color:color-mix(in srgb,var(--err) 48%,transparent);color:var(--err)}
@@ -198,11 +198,6 @@ input,textarea,select{
 input:focus,textarea:focus,select:focus{border-color:var(--cobalt);box-shadow:0 0 0 3px color-mix(in srgb,var(--cobalt) 10%,transparent);background:var(--paper-bright)}
 input::placeholder,textarea::placeholder{color:var(--dim)}
 .field label{color:var(--muted);font-size:11px;letter-spacing:.08em}
-.mode-card,.submit-zone{background:color-mix(in srgb,var(--paper-bright) 45%,transparent);border-color:var(--line);border-radius:2px 14px 2px 14px;transition:transform .3s var(--ease-out),border-color .3s,background .3s}
-.mode-card:hover,.submit-zone:hover{transform:translateY(-3px);border-color:var(--cobalt)}
-.mode-card.on{border-color:var(--cobalt);background:color-mix(in srgb,var(--cobalt) 8%,var(--paper-bright));box-shadow:none}
-.mode-card b{color:var(--text)}
-.mode-card i{color:var(--dim)}
 
 .login-tabs{background:transparent;border-bottom:1px solid var(--line);gap:18px}
 .login-tabs button{color:var(--dim);border-radius:0;background:transparent;padding:10px 2px;position:relative}
@@ -247,30 +242,6 @@ input::placeholder,textarea::placeholder{color:var(--dim)}
 .tl-item::before{background:var(--paper-bright);border:2px solid var(--cobalt);box-shadow:none}
 .radar-wrap{background:transparent}
 
-/* 进阶比赛：AI 解说采用实色分段小卡片，避免半透明文字叠在星系背景上。 */
-@media(min-width:761px){#room-grid.discern-mode>div:nth-child(2){padding-top:0}}
-#explain-panel{width:100%;margin:0;padding:12px 14px;opacity:1;background:var(--paper-bright);backdrop-filter:none;color:var(--text);overflow:clip}
-#explain-panel h3{margin-bottom:8px;font-size:14px}
-#explain-panel.is-collapsed h3{margin-bottom:0}
-#explain-panel .explain-toggle{margin-left:auto;padding:3px 9px;border:1px solid var(--line-strong);border-radius:2px 8px 2px 8px;background:var(--paper-bright);color:var(--cobalt);font-size:11px;font-weight:600;line-height:1.4;cursor:pointer}
-#explain-panel .explain-toggle:hover{background:var(--cobalt);color:#fff}
-#explain-box{max-height:280px;overflow:auto;padding-right:4px;font-size:12px;color:var(--text);opacity:1}
-#explain-box::-webkit-scrollbar{width:5px}
-#explain-box::-webkit-scrollbar-track{background:transparent}
-#explain-box::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--cobalt) 28%,transparent);border-radius:3px}
-#explain-box::-webkit-scrollbar-thumb:hover{background:var(--cobalt)}
-#explain-box[hidden]{display:none}
-#explain-panel .ai-result{margin:0;padding:0;background:transparent;border:0;overflow:visible;opacity:1}
-#explain-panel .ai-result::before{display:none}
-#explain-panel .verdict-big{display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px;margin:0;padding:9px 10px;background:var(--paper-bright);border:1px solid var(--line-strong);border-left:3px solid var(--cobalt);border-radius:2px 10px 2px 10px;color:var(--text);font-size:15px;line-height:1.45;opacity:1}
-#explain-panel .verdict-big .conf{margin-left:auto;color:var(--muted);font-size:11px;font-weight:600}
-#explain-panel .explain-meta{margin:8px 0 4px;color:var(--muted);font-size:11px;font-weight:600}
-#explain-panel .explain-source{margin-bottom:8px;color:var(--muted);font-size:11px}
-#explain-panel .explain-box{display:grid;gap:8px;margin:0;padding:0;background:transparent;border:0;color:var(--text);font-size:12px;line-height:1.75;white-space:normal;opacity:1}
-#explain-panel .explain-box::before{display:none}
-#explain-panel .explain-section{margin:0;padding:8px 10px;background:var(--paper-bright);border:1px solid var(--line);border-left:2px solid var(--cobalt);border-radius:2px 10px 2px 10px;color:var(--text);font-size:12px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere;opacity:1;box-shadow:0 4px 12px rgba(17,19,24,.04)}
-#explain-panel .dim{color:var(--muted);opacity:1}
-
 #toasts{filter:drop-shadow(0 16px 28px rgba(17,19,24,.14))}
 .toast{color:var(--text);background:var(--paper-bright);border:1px solid var(--line-strong);border-radius:2px 14px 2px 14px;backdrop-filter:blur(20px)}
 #reveal-modal .modal-box{background:var(--paper-bright);color:var(--text);border:1px solid var(--cobalt);border-radius:3px 24px 3px 24px;box-shadow:0 30px 100px rgba(17,19,24,.24)}
@@ -295,7 +266,8 @@ input::placeholder,textarea::placeholder{color:var(--dim)}
 .blueprint-defs{position:absolute;width:0;height:0;overflow:hidden;pointer-events:none}
 .blueprint-layer{position:absolute;pointer-events:none;overflow:hidden}
 .blueprint-layer *{vector-effect:non-scaling-stroke}
-.paper-blueprint-layer{left:2%;top:3%;z-index:1;width:48%;height:94%;color:#303b4b;opacity:.22;mix-blend-mode:multiply}
+.paper-blueprint-layer{left:auto;right:50%;top:auto;bottom:-33.33vh;z-index:1;width:200vw;height:202vh;color:#303b4b;opacity:.36;mix-blend-mode:multiply}
+.castle-lines-layer{background:url(castle-lines.png) right bottom/100.8vh auto no-repeat}
 .celestial-hud-clip{position:absolute;left:50%;top:0;z-index:2;width:50%;height:100%;overflow:hidden;pointer-events:none}
 .celestial-hud-layer{left:26%;top:45.7%;width:190%;height:auto;aspect-ratio:1;color:#e6ebf3;opacity:.36;mix-blend-mode:screen;transform:translate(-50%,-50%);animation:galaxy-orbit-rotate 80s linear infinite}
 .celestial-hud-layer use{animation:galaxy-dash-flow 12s linear infinite}
@@ -305,7 +277,6 @@ input::placeholder,textarea::placeholder{color:var(--dim)}
   radial-gradient(circle at 30% 26%,rgba(255,255,255,.09) 0 1px,transparent 1.5px) 0 0/17px 21px,
   linear-gradient(145deg,#16181c,#08090b);z-index:0}
 .orbit-page::after{content:"";position:absolute;inset:0;pointer-events:none;z-index:20;opacity:.22;mix-blend-mode:multiply;background:repeating-linear-gradient(0deg,transparent 0 3px,rgba(54,47,35,.035) 4px)}
-.gothic-architecture{position:absolute;left:-2%;bottom:-9%;width:min(56vw,650px);height:94%;z-index:1;color:#5f6267;opacity:.2;pointer-events:none;transform:rotate(-2deg);transform-origin:bottom left}
 .manuscript-date{position:absolute;left:4.5vw;top:4.5vh;z-index:5;display:flex;flex-direction:column;color:#33363a;font-family:Georgia,"Times New Roman",serif;font-weight:400}
 .manuscript-date b{font-size:19px;font-weight:400;letter-spacing:.12em}
 .manuscript-date span{margin-top:4px;font-size:9px;letter-spacing:.27em}
@@ -366,26 +337,32 @@ input::placeholder,textarea::placeholder{color:var(--dim)}
 .orbit-entry.is-active i{transform:scale(1.45);box-shadow:0 0 0 7px rgba(0,47,167,.09)}
 .orbit-entry.is-active b{color:#002fa7}
 .entry-login{left:27%;top:54%}
-.entry-register{left:41%;top:73%}
+.entry-register{left:34%;top:70%}
 .entry-register i{width:22px;height:22px}
+/* 登录 / 注册：沿用观测台入口的大号克莱因蓝斜体，直接立于手稿之上 */
+.auth-entry{
+  gap:13px;padding:6px 2px;border:0;background:transparent;box-shadow:none;backdrop-filter:none;
+}
+.auth-entry b{
+  color:#002fa7;font:italic 600 clamp(22px,2.6vw,38px)/1.04 Georgia,"Times New Roman",serif;
+  letter-spacing:-.015em;text-shadow:0 1px 0 rgba(255,255,255,.72),0 0 14px rgba(244,241,232,.65);
+}
+.auth-entry small{margin-top:7px;font-size:10px;font-weight:600;letter-spacing:.2em;color:#002fa7;opacity:.72}
+.auth-entry i{width:14px;height:14px;background:#002fa7;box-shadow:0 0 0 6px rgba(0,47,167,.08)}
+.auth-entry:hover{transform:translateY(-4px)}
+.auth-entry:hover b{color:#0036bd}
+.auth-entry:hover small{opacity:.9}
 .hub-core{pointer-events:none}
 .hub-entry{text-align:left}
 .hub-entry i{width:18px;height:18px}
 .entry-classic{left:25%;top:52%}
-.entry-discern{left:39%;top:73%}
-.entry-discern i{width:26px;height:26px}
-.entry-discern b{font-size:28px}
 .entry-rank{left:79%;top:28%;color:#f4f1e8}
 .entry-rank::before{content:"";position:absolute;right:calc(100% + 4px);top:50%;width:75px;height:1px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.4))}
-/* 三个主入口加强字重与明暗对比，层级始终高于所有背景素材。 */
+/* 主入口加强字重与明暗对比，层级始终高于所有背景素材。 */
 .hub-entry b{
   color:#002fa7;font:italic 600 clamp(28px,2.5vw,38px)/1.02 Georgia,"Times New Roman",serif;
   letter-spacing:-.015em;-webkit-text-stroke:.3px rgba(244,241,232,.5);
   text-shadow:0 1px 0 rgba(255,255,255,.78),0 0 14px rgba(244,241,232,.7);
-}
-.hub-entry.entry-discern b{
-  font-size:clamp(30px,2.7vw,42px);-webkit-text-stroke:.55px rgba(244,241,232,.88);
-  text-shadow:0 0 12px rgba(244,241,232,.58),0 1px 2px rgba(17,19,24,.2);
 }
 .hub-entry small{margin-top:7px;font-size:10px;font-weight:600;letter-spacing:.2em;opacity:.84}
 .hub-entry.entry-rank b{color:#fff;text-shadow:0 2px 14px rgba(0,0,0,.78)}
@@ -442,16 +419,17 @@ input::placeholder,textarea::placeholder{color:var(--dim)}
   #page-login.orbit-page{justify-content:flex-start;padding:0;overflow:auto;flex-direction:column}
   #page-login .orbit-navigation,#page-hub .orbit-navigation{position:relative;inset:auto;width:100%;height:max(620px,100%);min-height:620px;flex:0 0 auto}
   #page-hub.orbit-page{overflow:auto}
-  .paper-blueprint-layer{left:-8%;width:66%;opacity:.16}
+  .paper-blueprint-layer{opacity:.24}
+  .castle-lines-layer{background-size:93.6vw auto}
   .celestial-hud-layer{left:0;top:44%;width:260%;opacity:.28}
-  .gothic-architecture{left:-35%;width:120%;opacity:.12}
   .manuscript-date{left:20px;right:auto;top:20px}.manuscript-date b{font-size:15px}.manuscript-date span{font-size:7px}
   .manuscript-heading{left:20px;top:72px}.manuscript-heading h1{font-size:25px}.manuscript-heading p{display:none}
   .orbit-core{left:50%;top:44%;width:190px}
   .entry-login{left:14%;top:30%}.entry-register{left:16%;top:66%}
-  .entry-classic{left:10%;top:52%}.entry-discern{left:16%;top:73%}.entry-rank{left:66%;top:22%}
-  .orbit-entry b{font-size:20px}.entry-discern b{font-size:23px}.entry-register i{width:18px;height:18px}.entry-discern i{width:22px;height:22px}
-  .hub-entry b{font-size:26px}.hub-entry.entry-discern b{font-size:28px}.hub-entry small{font-size:9px}
+  .entry-classic{left:10%;top:52%}.entry-rank{left:66%;top:22%}
+  .auth-entry{padding:4px 0;gap:10px}
+  .orbit-entry b{font-size:20px}
+  .hub-entry b{font-size:26px}.hub-entry small{font-size:9px}
   .entry-rank::before{width:34px}
   .rank-card{margin:2vh auto}
   .rank-row{grid-template-columns:42px minmax(0,1fr) 60px 72px;gap:10px;padding:11px 14px}
@@ -481,14 +459,13 @@ input::placeholder,textarea::placeholder{color:var(--dim)}
   .login-card::after{display:none}
   .orbit-core{width:165px}
   .manuscript-heading h1{font-size:21px}.manuscript-heading>span{font-size:7px}
-  .orbit-entry{gap:7px}.orbit-entry b{font-size:17px}.orbit-entry small{font-size:8px}.entry-discern b{font-size:20px}
-  .hub-entry b{font-size:21px}.hub-entry.entry-discern b{font-size:23px}.hub-entry small{font-size:8px}
-  .entry-register i{width:15px;height:15px}.entry-discern i{width:19px;height:19px}
+  .orbit-entry{gap:7px}.orbit-entry b{font-size:17px}.orbit-entry small{font-size:8px}
+  .hub-entry b{font-size:21px}.hub-entry small{font-size:8px}
+  .entry-register i{width:15px;height:15px}
   .core-label{font-size:7px}
   .rank-row{grid-template-columns:32px minmax(0,1fr) 54px;gap:8px}
   .rank-games{display:none}
   .auth-sheet{padding:23px 20px}.auth-sheet h2{font-size:27px}
-  .mode-select{flex-direction:column}
 }
 
 @media(hover:none){.card{transform:none}.card:hover{--card-y:0px}.dimension-flight{animation:none}}

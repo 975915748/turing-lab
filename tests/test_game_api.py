@@ -28,10 +28,10 @@ def test_game_page_and_api_flow(tmp_path):
         assert post(client, '/api/login', {'name': '房主', 'pwd': 'owner-password'})['uid'] == owner['uid']
 
         created = post(client, '/api/createRoom', {
-            'name': '网页对局', 'mode': 'discern', 'owner': owner['uid'], 'ownerName': '房主'
+            'name': '网页对局', 'owner': owner['uid'], 'ownerName': '房主'
         })['room']
         code = created['id']
-        assert created['mode'] == 'discern'
+        assert created['mode'] == 'classic'
         assert client.get('/game/api/rooms', params={'uid': owner['uid']}).json()['rooms'][0]['id'] == code
 
         judge = post(client, '/api/register', {'name': '裁判', 'pwd': 'judge-password'})

@@ -42,14 +42,14 @@ def new_code(rooms):
     raise RuntimeError("邀请码空间耗尽")
 
 
-def default_room(code, name, mode, owner, owner_name):
+def default_room(code, name, owner, owner_name):
     return {
         "id": code,
         "name": name,
         "invite": code,
         "owner": owner,
         "ownerName": owner_name,
-        "mode": mode if mode in ("classic", "discern") else "classic",
+        "mode": "classic",
         "status": "ready",
         "round": 0,
         "startedAt": None,
@@ -58,14 +58,10 @@ def default_room(code, name, mode, owner, owner_name):
         "judges": [],
         "aiJudges": [],
         "questions": {},
-        "questionImages": {},
         "answers": {},
         "pendingQ": [],
         "roundSources": {},
         "finalJudgments": {},
-        "items": [],
-        "votes": {},
-        "aiVerdicts": {},
         "scores": {},
         "revealed": False,
         "revealResult": None,
@@ -85,16 +81,13 @@ def merge_room(old, new):
 
     if new.get("_resetGame"):
         r.update({
-            "questions": {}, "questionImages": {}, "answers": {}, "pendingQ": [],
+            "questions": {}, "answers": {}, "pendingQ": [],
             "roundSources": {}, "finalJudgments": {}, "round": 0,
             "revealed": False, "revealResult": None, "startedAt": None,
             "roundStart": None, "status": "ready",
         })
         for j in r.get("judges") or []:
             j["locked"] = False
-
-    if new.get("_clearItems"):
-        r.update({"items": [], "votes": {}, "aiVerdicts": {}, "scores": {}, "revealed": False})
 
     for k in ("name", "mode", "status", "round", "startedAt", "roundStart",
               "revealed", "revealResult", "owner", "ownerName", "invite"):
@@ -120,19 +113,12 @@ def merge_room(old, new):
 
     merge_list("players", "uid")
     merge_list("judges", "uid")
-    merge_list("items", "id")
 
     if "aiJudges" in new:
         r["aiJudges"] = new["aiJudges"]
-    for key in ("aiVerdicts", "scores", "finalJudgments", "questionImages", "questions"):
+    for key in ("scores", "finalJudgments", "questions"):
         if key in new:
             r[key] = new[key]
-
-    votes = dict(r.get("votes") or {})
-    for iid, m in (new.get("votes") or {}).items():
-        votes[iid] = dict(votes.get(iid) or {})
-        votes[iid].update(m or {})
-    r["votes"] = votes
 
     ans = dict(r.get("answers") or {})
     for rnd, m in (new.get("answers") or {}).items():
@@ -148,7 +134,7 @@ def merge_room(old, new):
     for uid in new.get("_removeFromJudges") or []:
         r["judges"] = [j for j in r.get("judges") or [] if j.get("uid") != uid]
 
-    for flag in ("_resetGame", "_clearItems", "_removeFromPlayers", "_removeFromJudges"):
+    for flag in ("_resetGame", "_removeFromPlayers", "_removeFromJudges"):
         r.pop(flag, None)
     return r
 
@@ -252,7 +238,7 @@ def api_create_room(store, body):
     if owner and owner not in store.state["users"]:
         return 401, {"error": "账号不存在，请重新登录"}
     code = new_code(store.state["rooms"])
-    room = default_room(code, name, body.get("mode") or "classic", owner, owner_name)
+    room = default_room(code, name, owner, owner_name)
     store.state["rooms"][code] = room
     store.save()
     return 200, {"room": room}

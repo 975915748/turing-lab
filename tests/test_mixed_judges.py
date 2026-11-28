@@ -137,7 +137,7 @@ def test_ui_static_assets_versioned(tmp_path):
     assert style is not None and script is not None
     for asset in ('style.css?v='+style.group(1), 'app.js?v='+script.group(1)):
         assert c.get('/static/' + asset).status_code == 200
-    for field in ('普通比赛','进阶比赛','排行榜','观测台','公共聊天','addAiJudge'):
+    for field in ('普通比赛','排行榜','观测台','公共聊天','addAiJudge'):
         assert field in homepage.text
     assert '真人 / AI 裁判管理' not in homepage.text
 
