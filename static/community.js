@@ -9,6 +9,8 @@
     questionQuery: '',
     questionCategory: '',
     accountUid: null,
+    accountCsrf: null,
+    accountEpoch: null,
   };
 
   function formatInviteTime(value) {
@@ -225,7 +227,7 @@
             </div>
             <div class="form-actions"><button class="primary" type="submit">发送所选邀请</button></div>
             <p class="hint">邀请有效期 30 分钟；只能邀请当前好友。相同身份的待处理邀请会复用。</p>
-          </form>` : '<p class="hint">尚无好友。请先在个人中心添加好友。</p>') : ''}
+          </form>` : '<p class="hint">尚无好友。请先在个人中心添加好友。</p><button class="small" type="button" data-action="personal-center">前往个人中心添加好友</button>') : ''}
       ` : (room.public_listing ? '<p class="hint">首轮已开始或名单已冻结，公开大厅展示已停止；本场不能重新公开。</p>' : '')}
     `;
     if (panel.innerHTML !== html) panel.innerHTML = html;
@@ -272,12 +274,16 @@
     const target = document.getElementById('communityQuestionResults');
     if (!target) return;
     const rows = filteredQuestions();
-    const html = rows.length ? rows.map(item => `
+    const categories = inviteState.questionData?.categories || [];
+    const html = rows.length ? rows.map(item => {
+      const category = categories.find(entry => entry.id === item.category)?.name || item.category;
+      return `
       <article class="feed-item community-question-item">
-        <div class="label-line"><strong>${esc(item.title)}</strong><button class="small" type="button" data-community-action="question-fill" data-id="${esc(item.id)}">填入问题</button></div>
+        <div class="label-line"><div><strong>${esc(item.title)}</strong><div class="tiny muted">${esc(category)}</div></div><button class="small" type="button" data-community-action="question-fill" data-id="${esc(item.id)}">填入问题</button></div>
         <p class="community-question-text">${esc(item.text)}</p>
         <div class="community-tags">${(item.tags || []).map(tag => `<span class="pill">${esc(tag)}</span>`).join('')}</div>
-      </article>`).join('') : '<p class="muted">没有匹配的题目，可以更换分类或搜索词。</p>';
+      </article>`;
+    }).join('') : '<p class="muted">没有匹配的题目，可以更换分类或搜索词。</p>';
     if (target.innerHTML !== html) target.innerHTML = html;
   }
 
@@ -325,11 +331,13 @@
     if (!form) return;
     renderQuestionBank(form);
     if (!inviteState.questionData) {
-      const context = { roomId: state.roomId, matchNumber: state.room?.match_number, uid: state.me?.user?.uid };
+      const account = currentAccount();
+      const context = { ...account, roomId: state.roomId, matchNumber: state.room?.match_number,
+        roomEpoch: state.roomContextEpoch };
       try {
         const data = await api('/api/question-bank?limit=100');
-        if (state.roomId !== context.roomId || state.room?.match_number !== context.matchNumber ||
-            state.me?.user?.uid !== context.uid) return;
+        if (!accountStillCurrent(context) || state.roomId !== context.roomId ||
+            state.room?.match_number !== context.matchNumber || state.roomContextEpoch !== context.roomEpoch) return;
         inviteState.questionData = data;
         const currentPanel = document.getElementById('communityQuestionBank');
         if (currentPanel) currentPanel.dataset.open = 'false';
@@ -358,8 +366,12 @@
       inviteState.inviteOpen = false;
       inviteState.questionOpen = false;
     }
-    if (inviteState.accountUid !== uid) {
+    const csrf = state.me?.user?.csrf || null;
+    const epoch = state.personalModelEpoch;
+    if (inviteState.accountUid !== uid || inviteState.accountCsrf !== csrf || inviteState.accountEpoch !== epoch) {
       inviteState.accountUid = uid;
+      inviteState.accountCsrf = csrf;
+      inviteState.accountEpoch = epoch;
       inviteState.inviteOpen = false;
       inviteState.questionOpen = false;
       inviteState.questionData = null;
