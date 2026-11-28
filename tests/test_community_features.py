@@ -438,3 +438,89 @@ def test_question_bank_is_read_only_bounded_and_versioned(env):
     assert all(len(item['text']) <= 3000 for item in data['questions'])
     assert player.get('/api/question-bank?category=unknown').status_code == 422
     assert player.post('/api/question-bank', json={}).status_code == 405
+
+
+def test_invite_inbox_is_bounded_and_reports_full_pending_count(env):
+    path, _, admin, users = env
+    invitee, invitee_uid = users[0]
+    make_friends(admin, invitee)
+    inviter_id = int(admin.get('/api/me').json()['user']['uid'][2:])
+    invitee_id = int(invitee_uid[2:])
+    created_at = '2026-11-28T00:00:00+00:00'
+    expires_at = '2999-01-01T00:00:00+00:00'
+
+    with db_open(path) as db:
+        for index in range(101):
+            cursor = db.execute(
+                'INSERT INTO rooms(title,code,judge,created_at,owner_id) VALUES(?,?,?,?,?)',
+                (f'邀请分页房间 {index}', f'INBOX{index:05d}', '裁判', created_at, inviter_id),
+            )
+            db.execute(
+                '''INSERT INTO room_invites(
+                    room_id,inviter_user_id,invitee_user_id,role,status,created_at,expires_at,updated_at
+                ) VALUES(?,?,?,'player','pending',?,?,?)''',
+                (cursor.lastrowid, inviter_id, invitee_id, created_at, expires_at, created_at),
+            )
+
+    received = invitee.get('/api/me/room-invites').json()
+    assert len(received['received']) == 100
+    assert received['pending_count'] == 101
+    assert received['truncated'] is True
+
+    sent = admin.get('/api/me/room-invites').json()
+    assert len(sent['sent']) == 100
+    assert sent['truncated'] is True
+
+
+def test_accepting_expired_invite_notifies_both_accounts(env):
+    path, _, admin, users = env
+    invitee, invitee_uid = users[0]
+    make_friends(admin, invitee)
+    room = post(admin, '/api/rooms', {'title': '接受时过期通知'})
+    invite_id = post(admin, f"/api/rooms/{room['room_id']}/invites", {
+        'uids': [invitee_uid], 'role': 'player',
+    })['results'][0]['invite_id']
+    with db_open(path) as db:
+        db.execute(
+            "UPDATE room_invites SET expires_at='2000-01-01T00:00:00+00:00' WHERE id=?",
+            (invite_id,),
+        )
+
+    with admin.websocket_connect('/ws/messages', headers={'origin': 'http://testserver'}) as inviter_socket, \
+         invitee.websocket_connect('/ws/messages', headers={'origin': 'http://testserver'}) as invitee_socket:
+        assert inviter_socket.receive_json()['type'] == 'connected'
+        assert invitee_socket.receive_json()['type'] == 'connected'
+        result = post(invitee, f'/api/room-invites/{invite_id}/accept', status=409)
+        assert '过期' in result['detail']
+        inviter_event = inviter_socket.receive_json()
+        invitee_event = invitee_socket.receive_json()
+        assert inviter_event == {'type': 'room_invite_updated', 'invite_id': invite_id}
+        assert invitee_event == {'type': 'room_invite_updated', 'invite_id': invite_id}
+
+    assert invitee.get('/api/me/room-invites').json()['received'] == []
+    with db_open(path) as db:
+        assert db.execute(
+            'SELECT status FROM room_invites WHERE id=?', (invite_id,),
+        ).fetchone()['status'] == 'expired'
+
+
+def test_account_soft_deletion_cancels_pending_invites_and_notifies_inviter(env):
+    path, _, admin, users = env
+    invitee, invitee_uid = users[0]
+    make_friends(admin, invitee)
+    room = post(admin, '/api/rooms', {'title': '账号删除撤销邀请'})
+    invite_id = post(admin, f"/api/rooms/{room['room_id']}/invites", {
+        'uids': [invitee_uid], 'role': 'player',
+    })['results'][0]['invite_id']
+
+    with admin.websocket_connect('/ws/messages', headers={'origin': 'http://testserver'}) as socket:
+        assert socket.receive_json()['type'] == 'connected'
+        post(admin, f'/api/admin/users/{invitee_uid}', {'confirm': True})
+        event = socket.receive_json()
+        assert event['type'] == 'social_updated'
+
+    with db_open(path) as db:
+        assert db.execute(
+            'SELECT status FROM room_invites WHERE id=?', (invite_id,),
+        ).fetchone()['status'] == 'cancelled'
+    assert admin.get('/api/me/room-invites').json()['sent'] == []
