@@ -1,6 +1,76 @@
-# 图灵实验室使用指南
+# 图灵实验室
 
-本文覆盖当前开发分支的公共聊天、独立裁判管理、个人中心、好友私信、账号积分，以及服务端比赛编排和单轮计时。生产环境实际可用功能以 Railway 已部署的提交为准；尚未合并或部署的开发分支功能不会自动出现在生产网站。历史升级记录保留在仓库的 `UPGRADE_*.md` 文件中；历史文档中的旧界面步骤不应代替本指南。
+多人在线图灵测试主持台 · 项目说明与使用指南
+
+图灵实验室是一个支持多人参赛、独立裁判和匿名揭晓的在线图灵测试平台。真人与模型 AI 可以共同参赛，真人裁判和 AI 裁判分别提交问题与最终判断；平台还提供房间公共聊天、好友关系、一对一私信、账号积分、个人模型 API 配置及调用记录。
+
+本文以仓库 `main` 分支当前代码为准。生产站点实际可用功能取决于 Railway 当前部署的提交；`main` 中尚未部署的更新不会自动出现在生产网站。历史升级记录保留在仓库的 `UPGRADE_*.md` 文件中；历史文档中的旧界面步骤不应代替本指南。
+
+## 项目概览
+
+- **多人比赛**：房主创建房间并管理参赛者、真人裁判、AI 席位、轮次和正式揭晓；参赛者以匿名席位参与作答。
+- **真人与 AI 裁判**：支持独立裁判提交问题和最终判断，也保留外部裁判问题的手动录入流程。
+- **模型 AI**：通过 OpenAI Chat Completions 兼容接口生成参赛者回答、裁判问题和最终判断；模型配置归个人账号所有，API Key 在服务器端加密保存。
+- **比赛执行**：服务端持久化开局工作流、席位模型任务和单轮 deadline；浏览器刷新或断线不会取消已接受的工作流。
+- **社交功能**：房间公共聊天、好友申请与备注、一对一私信、未读计数和账号积分流水。
+- **部署方式**：Docker 镜像部署到 Railway；当前 SQLite 与工作流执行模型要求单实例、单 Uvicorn worker。
+
+## 技术栈与代码结构
+
+| 部分 | 实现 |
+|---|---|
+| 后端 | Python、FastAPI、Uvicorn |
+| 数据存储 | SQLite |
+| 前端 | 原生 HTML、CSS、JavaScript |
+| 实时通信 | WebSocket：房间状态 / 公共聊天，以及账号私信 |
+| 模型服务 | OpenAI Chat Completions 兼容 API；Fernet 加密保存 API Key |
+| 测试 | pytest、Playwright 浏览器验收 |
+| 部署 | Docker、Railway |
+
+主要代码文件：
+
+| 路径 | 职责 |
+|---|---|
+| `app.py` | FastAPI 应用入口、账号与房间业务、比赛流程、房间 WebSocket 和数据库访问 |
+| `social.py` | 好友关系、好友申请、备注、私信、账号 WebSocket 和社交数据接口 |
+| `points.py` | 连胜奖励计算、积分变化和比赛积分结算 |
+| `model_api.py` | OpenAI 兼容模型请求、Base URL 校验和 API Key 加解密 |
+| `match_orchestration.py` | SQLite 持久化轮次工作流的单进程 worker |
+| `seat_personas.py` | AI 席位人设、提示词组合和本场人设快照 |
+| `railway_start.py` | 初始化数据库、检查已保存模型凭据、必要时创建首个管理员并启动 Uvicorn |
+| `static/` | 浏览器端页面、样式和交互代码 |
+| `tests/` | 后端测试及 Playwright 浏览器验收脚本 |
+| `Dockerfile`、`railway.json` | Docker 镜像构建和 Railway 部署配置 |
+
+## 本地开发与启动
+
+推荐使用 Python 3.13（与 CI 一致）和 Node.js 22。以下命令以 Windows PowerShell 为例：
+
+```powershell
+py -3.13 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-dev.txt
+
+New-Item -ItemType Directory -Force .\data | Out-Null
+$env:DB_PATH = "$PWD\data\game.sqlite3"
+$env:PORT = "8000"
+$env:BOOTSTRAP_ADMIN_USERNAME = "admin"
+$env:BOOTSTRAP_ADMIN_DISPLAY = "主持人"
+$env:BOOTSTRAP_ADMIN_PASSWORD = "请替换为至少12位的强密码"
+
+python railway_start.py
+```
+
+首次启动且数据库中还没有管理员时，启动脚本会使用 `BOOTSTRAP_ADMIN_*` 变量创建管理员；用户名须为 3～30 位 ASCII 字母、数字或下划线，密码至少 12 位。之后启动会沿用数据库中的管理员账号。服务默认监听 `http://127.0.0.1:8000`。
+
+如需在个人中心使用模型 API，还要设置 `MODEL_CREDENTIAL_KEY`。可用下面的命令生成 Fernet 密钥：
+
+```powershell
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+$env:MODEL_CREDENTIAL_KEY = "替换为生成的密钥"
+```
+
+请将生成的密钥妥善保存，并在后续启动时使用同一个值。更换或丢失密钥后，旧密钥加密的 API Key 将无法解密，需要重新录入。只使用手动转录流程时，不需要配置模型密钥。
 
 ## 1. 账号注册与登录
 
@@ -84,7 +154,7 @@ deadline 到达后，服务器拒绝新的真人回答、手动 AI 回答和自�
 
 独立裁判流程的补触发入口位于“AI 裁判管理”：当前轮尚未开启且有可用模型 AI 裁判未交题时，可点击 **“让模型自动生成本轮问题”**；最终判断在全部轮次完成后另行触发。
 
-### AI 席位人设（开发分支功能）
+### AI 席位人设
 
 房主可在 AI 参赛席和 AI 裁判席分别设置人设，不会修改个人模型配置，也不会影响同一模型绑定到的其他席位。
 
@@ -226,55 +296,7 @@ deadline 到达后，服务器拒绝新的真人回答、手动 AI 回答和自�
 - AI 席位的新增与换绑都由服务器验证“房间管理权限 + 当前用户拥有该配置”。保留原有他人配置绑定不等于授予其配置列表、密钥、编辑或独立测试权限。
 - 旧的 `POST /api/rooms/{room_id}/suggestions` 写入口已停用，返回 HTTP 410。历史 `suggestions` 记录保留原样，不会被转换为公共聊天；正式题目和回答仍走原来的独立接口。
 
-## 6. 房间复用、记录与 UID
-
-### 退出、仅退赛和关闭房间
-
-- **返回大厅就是主动退出房间**。普通人类参赛者退出后不再参与本场作答及积分结算；历史回答保留。真人裁判退出后不再参与本场有效裁判集合，历史问题和判断保留。
-- 退出或被移除后，立即释放该房间的参赛者／裁判锁名；如果账号仍在其他已开局的开放比赛中担任有效角色，仍不能改名。刷新、断网、进入个人中心和退出登录不会自动退房。
-- **房主返回大厅会关闭房间**，操作前需要确认。比赛停止，所有在线成员返回大厅；问题、回答、裁判判断、快照、聊天及调用记录保留。不视为正式完赛，不结算积分。关闭后可按原权限查看保留记录和下载 Log，不能继续作答或生成模型内容。
-- 房主只想退出参赛但继续管理时，在 **参赛者管理** 选择 **“退赛（保留管理权限）”**。房间继续开放；房主身份仍受比赛锁名约束。
-- 开局前主动退出的参赛者可以在名单仍可加入、人数未满时重新加入；保留原匿名代号。房主开局前仅退赛后也可在参赛者管理重新加入。开局后退出者不能重入本场，下一场可以加入；被移除者不能重入本场。退出的真人裁判不能改换玩家身份重入已开局比赛。
-- 已正式完赛后返回大厅不会修改完赛状态、名单或已结算积分。
-
-### 复用与记录清理
-
-- 比赛完成或房间关闭后，房主／管理员可以使用“再次开赛”复用房间。必须确认清空上一场的比赛问题、回答、裁判判断、日志、快照、聊天和调用记录；房间和邀请码继续使用。已退出／移除的成员、已退出的裁判不自动加入新场。
-- 再次开赛前，系统会检查保留的真人裁判是否仍在其他未完赛房间任职；存在冲突时会拒绝开赛，不会先清空上一场记录。
-- 比赛结束后可下载整场 Log。需要保留历史记录时，请先下载并妥善保存。
-- 删除房间会永久删除该房间及其比赛数据；这与“清空完赛记录后复用房间”不是同一操作。个人模型配置不随房间删除。
-
-## 7. 本地测试与 CI
-
-在项目根目录使用 Python 3.13、Node.js 20 或更新版本（CI 使用 Node.js 22），先安装 Python 测试依赖：`python -m pip install -r requirements-dev.txt`。
-
-项目的浏览器验收测试包括 `tests/test_uid_ui.py`、`tests/test_host_ui.py` 和 `tests/test_room_departures_ui.py`。前两者覆盖 UID、参赛者管理、模型配置与调用、好友私信、积分及房间删除；后者覆盖退赛、退房、关闭确认、实时返回大厅、个人中心刷新后退房、只读记录与再次开赛。它们都会启动 Playwright 浏览器。
-
-不准备运行浏览器验收时，运行后端测试应排除浏览器测试文件：
-
-```powershell
-python -m pytest -q --ignore=tests/test_uid_ui.py --ignore=tests/test_host_ui.py --ignore=tests/test_model_config_ui.py --ignore=tests/test_room_departures_ui.py
-```
-
-本机安装 Playwright Chromium 后，可在 PowerShell 中运行完整测试：
-
-```powershell
-npm install --no-save playwright
-npx playwright install chromium
-$env:PLAYWRIGHT_CHANNEL = "default"
-python -m pytest -q
-```
-
-新增后端覆盖：`tests/test_match_readiness.py`、`tests/test_model_operations.py`、`tests/test_name_lock.py`、`tests/test_round_workflows.py`、`tests/test_social_points.py`；`tests/test_points.py` 覆盖积分计算和已移除参赛者的历史判断兼容。浏览器覆盖：`tests/model_operations_ui.cjs`、`tests/social_points_ui.cjs`，均由 `tests/test_uid_ui.py` 接入 pytest。`tests/test_round_workflows.py` 覆盖持久任务、幂等、重试预算、重启后的未知请求恢复、计时 deadline 和房主超时结束。GitHub Actions 的 `.github/workflows/tests.yml` 安装 Chromium，并设置 `PLAYWRIGHT_CHANNEL=default` 后执行完整的 `python -m pytest -q`；CI 不依赖 Microsoft Edge。
-
-## 8. 部署与历史文档
-
-- Railway 首次部署、现有生产环境升级、数据卷备份和回退：见 [RAILWAY_部署说明.md](RAILWAY_部署说明.md)。
-- 历史升级记录：[v1.3](UPGRADE_v1.3.md)、[v1.4](UPGRADE_v1.4.md)、[v1.5](UPGRADE_v1.5.md)、[v1.5.1](UPGRADE_v1.5.1.md)、[v1.6.0](UPGRADE_v1.6.0.md)。
-- 历史文档中的旧界面入口、旧测试命令和旧部署步骤仅用于理解对应版本，不应直接照搬到当前版本。
-
-
-## 好友、私信与账号积分
+## 6. 好友、私信与账号积分
 
 ### 好友关系
 
@@ -307,3 +329,60 @@ python -m pytest -q
 - 仅以管理员身份旁观、没有担任房主 / 真人裁判 / 参赛者的账号不锁名。比赛正式完赛、房间关闭或删除后，相关身份不再锁名。刷新、断网、进入个人中心和退出登录本身不是退房。
 - 个人中心根据服务器返回的状态禁用名字输入框；保存接口会在数据库写事务中再次检查，开局与改名并发时只会出现“改名先完成”或“开局先锁定”两种一致结果。
 
+## 7. 房间复用、记录与 UID
+
+### 退出、仅退赛和关闭房间
+
+- **返回大厅就是主动退出房间**。普通人类参赛者退出后不再参与本场作答及积分结算；历史回答保留。真人裁判退出后不再参与本场有效裁判集合，历史问题和判断保留。
+- 退出或被移除后，立即释放该房间的参赛者／裁判锁名；如果账号仍在其他已开局的开放比赛中担任有效角色，仍不能改名。刷新、断网、进入个人中心和退出登录不会自动退房。
+- **房主返回大厅会关闭房间**，操作前需要确认。比赛停止，所有在线成员返回大厅；问题、回答、裁判判断、快照、聊天及调用记录保留。不视为正式完赛，不结算积分。关闭后可按原权限查看保留记录和下载 Log，不能继续作答或生成模型内容。
+- 房主只想退出参赛但继续管理时，在 **参赛者管理** 选择 **“退赛（保留管理权限）”**。房间继续开放；房主身份仍受比赛锁名约束。
+- 开局前主动退出的参赛者可以在名单仍可加入、人数未满时重新加入；保留原匿名代号。房主开局前仅退赛后也可在参赛者管理重新加入。开局后退出者不能重入本场，下一场可以加入；被移除者不能重入本场。退出的真人裁判不能改换玩家身份重入已开局比赛。
+- 已正式完赛后返回大厅不会修改完赛状态、名单或已结算积分。
+
+### 复用与记录清理
+
+- 比赛完成或房间关闭后，房主／管理员可以使用“再次开赛”复用房间。必须确认清空上一场的比赛问题、回答、裁判判断、日志、快照、聊天和调用记录；房间和邀请码继续使用。已退出／移除的成员、已退出的裁判不自动加入新场。
+- 再次开赛前，系统会检查保留的真人裁判是否仍在其他未完赛房间任职；存在冲突时会拒绝开赛，不会先清空上一场记录。
+- 比赛结束后可下载整场 Log。需要保留历史记录时，请先下载并妥善保存。
+- 删除房间会永久删除该房间及其比赛数据；这与“清空完赛记录后复用房间”不是同一操作。个人模型配置不随房间删除。
+
+## 8. 本地测试与 CI
+
+项目 CI 使用 Python 3.13 和 Node.js 22。安装 Python 依赖：
+
+```powershell
+python -m pip install -r requirements-dev.txt
+```
+
+浏览器验收测试需要 Playwright Chromium：
+
+```powershell
+npm install --no-save playwright
+npx playwright install chromium
+$env:PLAYWRIGHT_CHANNEL = "default"
+python -m pytest -q
+```
+
+由 pytest 启动的浏览器验收入口：
+
+- `tests/test_uid_ui.py`：账号注册与 UID、真人裁判加入、个人模型配置、人设和问题入口、模型调用记录、好友私信、积分，以及账号切换和页面导航竞态。
+- `tests/test_model_config_ui.py`：模型配置交互和模型问题生成流程。
+- `tests/test_host_ui.py`：房主操作和房间删除。
+- `tests/test_room_departures_ui.py`：退赛、退房、关闭确认、返回大厅和再次开赛。
+
+后端与业务回归还覆盖房间公共聊天和个人中心（`tests/test_chat_personal_center.py`）、好友与私信接口（`tests/test_social_points.py`）、积分计算（`tests/test_points.py`）、账号与锁名（`tests/test_uid_accounts.py`、`tests/test_name_lock.py`）、裁判和比赛流程（`tests/test_flow.py`、`tests/test_human_judge_self_service.py`、`tests/test_mixed_judges.py`、`tests/test_multi_judge.py`、`tests/test_match_readiness.py`、`tests/test_round_workflows.py`）、模型 API 与任务（`tests/test_model_api.py`、`tests/test_model_operations.py`）、人设（`tests/test_seat_personas.py`）、房间管理（`tests/test_room_delete.py`、`tests/test_room_departures.py`、`tests/test_room_hosts.py`），以及文案和 Docker 打包检查（`tests/test_copy_cleanup.py`、`tests/test_docker_package.py`）。
+
+不准备运行浏览器验收时，可排除四个浏览器测试入口，只运行其余 pytest 测试：
+
+```powershell
+python -m pytest -q --ignore=tests/test_uid_ui.py --ignore=tests/test_host_ui.py --ignore=tests/test_model_config_ui.py --ignore=tests/test_room_departures_ui.py
+```
+
+GitHub Actions 的 `.github/workflows/tests.yml` 会检查前端及浏览器测试脚本的 JavaScript 语法，安装 Chromium 并运行完整的 `python -m pytest -q`，随后构建生产 Docker 镜像并验证运行时模块导入。CI 使用 Chromium 默认通道，不依赖 Microsoft Edge.
+
+## 9. 部署与历史文档
+
+- Railway 首次部署、现有生产环境升级、数据卷备份和回退：见 [RAILWAY_部署说明.md](RAILWAY_部署说明.md)。
+- 历史升级记录：[v1.3](UPGRADE_v1.3.md)、[v1.4](UPGRADE_v1.4.md)、[v1.5](UPGRADE_v1.5.md)、[v1.5.1](UPGRADE_v1.5.1.md)、[v1.6.0](UPGRADE_v1.6.0.md)。
+- 历史文档中的旧界面入口、旧测试命令和旧部署步骤仅用于理解对应版本，不应直接照搬到当前版本。
