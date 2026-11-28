@@ -1,7 +1,7 @@
 'use strict';
 const $ = (selector) => document.querySelector(selector);
 const app = $('#app');
-const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelSavePending:{},social:null,dmMessages:[],dmBeforeId:null,dmHasMore:false,dmSocket:null,personalModelEpoch:0,modelOperationRecords:[],modelOperationStats:{},modelOperationProfileOptions:[],modelOperationTotal:0,modelOperationOffset:0,modelOperationFilters:{profile_id:'',purpose:'',status:''},modelOperationsExpanded:false,modelOperationRequestVersion:0,modelOperationHistoryPanels:{},personaDrafts:{},personaEditorOpen:{},serverTimeOffset:0,dmUid:null,dmOtherName:'',dmCanSend:false,dmPending:null,dmDraft:'',dmReconnect:null,dmLoadVersion:0,socialEpoch:0,pointsLedgerEntries:[],pointsLedgerBeforeId:null,pointsLedgerHasMore:false,pointsLedgerLoaded:false,roomContextEpoch:0,roomRefreshVersion:0,personalModelListRequestVersion:0,pendingIdempotencyKeys:{}};
+const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelSavePending:{},social:null,dmMessages:[],dmBeforeId:null,dmHasMore:false,accountSocket:null,accountSocketUid:null,accountSocketCsrf:null,accountSocketEpoch:0,accountReconnect:null,personalModelEpoch:0,modelOperationRecords:[],modelOperationStats:{},modelOperationProfileOptions:[],modelOperationTotal:0,modelOperationOffset:0,modelOperationFilters:{profile_id:'',purpose:'',status:''},modelOperationsExpanded:false,modelOperationRequestVersion:0,modelOperationHistoryPanels:{},personaDrafts:{},personaEditorOpen:{},serverTimeOffset:0,dmUid:null,dmOtherName:'',dmCanSend:false,dmPending:null,dmDraft:'',roomInvites:{incoming:[],outgoing:[],pending_incoming_count:0},roomInviteRequestVersion:0,publicRooms:[],publicRoomsBeforeId:null,publicRoomsHasMore:false,publicRoomsRequestVersion:0,questionBankOpen:false,questionBankData:null,questionBankCategory:'',questionBankQuery:'',dmLoadVersion:0,socialEpoch:0,pointsLedgerEntries:[],pointsLedgerBeforeId:null,pointsLedgerHasMore:false,pointsLedgerLoaded:false,roomContextEpoch:0,roomRefreshVersion:0,personalModelListRequestVersion:0,pendingIdempotencyKeys:{}};
 ;
 const esc = (v) => String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const shortDate = s => s ? new Date(s).toLocaleString('zh-CN',{hour12:false}) : '';
@@ -9,7 +9,7 @@ const val = (id) => document.getElementById(id)?.value??'';
 const D = (txt='暂无记录') => `<p class="muted hint">${esc(txt)}</p>`;
 let toastTimer;
 function clearPersonalModelState(){
- stopDmWs();state.social=null;state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;state.dmOtherName='';state.dmCanSend=false;state.dmPending=null;state.dmDraft='';state.dmLoadVersion++;state.socialEpoch++;state.pointsLedgerEntries=[];state.pointsLedgerBeforeId=null;state.pointsLedgerHasMore=false;state.pointsLedgerLoaded=false;
+ state.social=null;state.roomInvites={incoming:[],outgoing:[],pending_incoming_count:0};state.roomInviteRequestVersion++;state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;state.dmOtherName='';state.dmCanSend=false;state.dmPending=null;state.dmDraft='';state.dmLoadVersion++;state.socialEpoch++;state.pointsLedgerEntries=[];state.pointsLedgerBeforeId=null;state.pointsLedgerHasMore=false;state.pointsLedgerLoaded=false;
  state.personalModelEpoch=(state.personalModelEpoch||0)+1;state.personalModelListRequestVersion=(state.personalModelListRequestVersion||0)+1;state.modelOperationRequestVersion=(state.modelOperationRequestVersion||0)+1;state.roomContextEpoch=(state.roomContextEpoch||0)+1;state.roomRefreshVersion=(state.roomRefreshVersion||0)+1;state.pendingIdempotencyKeys={};
  state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};state.personalModelTestVersions={};state.personalModelTestPending={};state.personalModelSavePending={};state.modelOperationRecords=[];state.modelOperationStats={};state.modelOperationProfileOptions=[];state.modelOperationTotal=0;state.modelOperationOffset=0;state.modelOperationFilters={profile_id:'',purpose:'',status:''};state.modelOperationsExpanded=false;state.modelOperationHistoryPanels={};state.personaDrafts={};state.personaEditorOpen={};
 }
@@ -18,7 +18,7 @@ function setConnection(txt,online){const el=$('#connection');el.textContent=(onl
 function applyPrefs(){let theme=localStorage.getItem('turing_theme')||'light';document.body.dataset.theme=theme;$('#themeBtn').textContent=theme==='light'?'☾ 深色':'☀ 日间';let f=Number(localStorage.getItem('turing_font')||15);if(f<12||f>22)f=15;document.documentElement.style.setProperty('--font',f+'px');$('#fontSize').value=f;$('#fontValue').textContent=f;}
 $('#themeBtn').addEventListener('click',()=>{localStorage.setItem('turing_theme',document.body.dataset.theme==='light'?'dark':'light');applyPrefs()});
 $('#fontSize').addEventListener('input',e=>{localStorage.setItem('turing_font',e.target.value);applyPrefs()});
-$('#logoutBtn').addEventListener('click',async()=>{try{await api('/api/logout',{method:'POST'});}catch(e){toast(e.message)} state.me=null;state.room=null;state.roomId=null;state.personalModels=[];clearPersonalModelState();state.chat=[];state.chatDraft='';state.drafts={};state.personalReturn=null;state.tab='login';state.legacyLogin=false;stopWs();history.replaceState(null,'',location.pathname);await init()});
+$('#logoutBtn').addEventListener('click',async()=>{try{await api('/api/logout',{method:'POST'});}catch(e){toast(e.message)} stopAccountSocket();state.me=null;state.room=null;state.roomId=null;state.personalModels=[];clearPersonalModelState();state.chat=[];state.chatDraft='';state.drafts={};state.personalReturn=null;state.tab='login';state.legacyLogin=false;stopWs();history.replaceState(null,'',location.pathname);await init()});
 async function api(path,{method='GET',body,raw=false,headers:extraHeaders={},matchNumber,roundNumber,idempotencyKey}={}){
  const requestAccountEpoch=state.personalModelEpoch??0,requestUid=state.me?.user?.uid??null,requestCsrf=state.me?.user?.csrf??null;
  const opts={method,headers:{...extraHeaders}};
@@ -32,7 +32,7 @@ async function api(path,{method='GET',body,raw=false,headers:extraHeaders={},mat
  if(raw){if(!response.ok){const error=new Error('下载失败');error.status=response.status;throw error;}return response.blob()}
  const data=await response.json().catch(()=>({detail:'网络连接错误'}));
  if(!response.ok){
-  if(response.status===401&&state.me&&state.personalModelEpoch===requestAccountEpoch&&state.me?.user?.uid===requestUid&&state.me?.user?.csrf===requestCsrf){state.me=null;state.room=null;state.roomId=null;state.personalModels=[];clearPersonalModelState();state.chat=[];state.chatDraft='';state.drafts={};stopWs();renderAuth();}
+  if(response.status===401&&state.me&&state.personalModelEpoch===requestAccountEpoch&&state.me?.user?.uid===requestUid&&state.me?.user?.csrf===requestCsrf){stopAccountSocket();state.me=null;state.room=null;state.roomId=null;state.personalModels=[];clearPersonalModelState();state.chat=[];state.chatDraft='';state.drafts={};stopWs();renderAuth();}
   const error=new Error(typeof data.detail==='string'?data.detail:'请求失败');error.status=response.status;throw error;
  }
  return data;
@@ -102,9 +102,9 @@ async function refreshRoom(expectedContext=null){
   return false;
  }
 }
-async function init(){applyPrefs();try{const previousUid=state.me?.user?.uid;state.me=await api('/api/me');if(previousUid&&previousUid!==state.me?.user?.uid)clearPersonalModelState();$('#logoutBtn').classList.remove('hide');const q=/^#room=(\d+)$/.exec(location.hash);if(location.hash.startsWith('#profile')){state.personalReturn=profileReturnFromHash();await openPersonalCenter({fromHash:true});}else if(q){await openRoom(Number(q[1]));}else renderLobby()}catch(e){state.me=null;state.roomId=null;state.personalModels=[];state.chat=[];$('#logoutBtn').classList.add('hide');renderAuth();}}
+async function init(){applyPrefs();try{const previousUid=state.me?.user?.uid,previousCsrf=state.me?.user?.csrf;state.me=await api('/api/me');if((previousUid&&previousUid!==state.me?.user?.uid)||(previousCsrf&&previousCsrf!==state.me?.user?.csrf)){stopAccountSocket();clearPersonalModelState();}connectAccountSocket();$('#logoutBtn').classList.remove('hide');const q=/^#room=(\d+)$/.exec(location.hash);if(location.hash.startsWith('#profile')){state.personalReturn=profileReturnFromHash();await openPersonalCenter({fromHash:true});}else if(q){await openRoom(Number(q[1]));}else renderLobby()}catch(e){stopAccountSocket();state.me=null;state.roomId=null;state.personalModels=[];state.chat=[];$('#logoutBtn').classList.add('hide');renderAuth();}}
 function renderAuth(){
- clearDmState();state.social=null;stopWs();$('#logoutBtn').classList.add('hide');setConnection('未登录',false);
+ stopAccountSocket();clearDmState();state.social=null;state.roomInvites={incoming:[],outgoing:[],pending_incoming_count:0};stopWs();$('#logoutBtn').classList.add('hide');setConnection('未登录',false);
  const reg=state.tab==='register',legacy=!!state.legacyLogin;
  app.innerHTML=`<div class="auth"><div class="intro"><div class="hero-mark">T.</div><div class="overline">HUMAN × AI / ANONYMOUS JUDGING</div><h1>在同一个房间里，<br>验证谁更像人类。</h1><p class="muted">支持真人裁判独立登录与 AI 裁判由房主手动转录；各裁判独立判断。AI 回答仍由房主手动录入；全部参赛者提交后统一公布回答。</p><div class="stat-row"><div class="stat">◈ 自由注册</div><div class="stat">◈ 匿名裁判包</div><div class="stat">◈ 完整轮次日志</div></div></div>
  <section class="card"><div class="overline">欢迎加入</div><h2 style="margin:7px 0 0">${reg?'创建你的账号':'登录图灵实验室'}</h2>
@@ -300,18 +300,19 @@ function makeRoster(r){
  return people.map(p=>`<div class="roster-person"><div class="person-left"><span class="alias">${esc(p.alias)}</span><div style="min-width:0"><span class="person-name" title="${esc(p.label)}">${esc(p.label)}</span><span class="roster-role">${p.role==='人类'?'人类 · '+esc(p.uid):'AI 参赛位'}${p.alias===r.mine?' · 我':''}</span></div></div><span class="pill ${submitted.has(p.alias)?'ok':''}" ${p.role==='人类'&&p.alias===r.mine?`data-typing-alias="${esc(p.alias)}"`:''} title="本轮提交状态">${submitted.has(p.alias)?'√':p.role==='人类'&&p.alias===r.mine?(state.selectedRound===r.current_round&&state.typing[p.alias]?'....':'X'):'—'}</span>${p.role==='人类'&&p.alias!==r.mine?`<button class="small" data-action="friend-from-room" data-uid="${esc(p.uid)}">加好友</button>`:''}</div>`).join('')||D('等待人类玩家加入');
 }
 function profileReturnFromHash(){const m=/^#profile\?room=(\d+)&view=([^&]+)&round=(\d+)(?:&match=(\d+))?$/.exec(location.hash);return m?{roomId:Number(m[1]),view:decodeURIComponent(m[2]),round:Number(m[3]),matchNumber:m[4]?Number(m[4]):null}:null;}
-function stopDmWs(){
- if(state.dmReconnect)clearTimeout(state.dmReconnect);state.dmReconnect=null;
- if(state.dmSocket){const ws=state.dmSocket;state.dmSocket=null;ws.onclose=null;try{ws.close();}catch{}}
+function stopAccountSocket(){
+ if(state.accountReconnect)clearTimeout(state.accountReconnect);state.accountReconnect=null;
+ const ws=state.accountSocket;state.accountSocket=null;state.accountSocketUid=null;state.accountSocketCsrf=null;state.accountSocketEpoch=0;
+ if(ws){ws.onclose=null;try{ws.close();}catch{}}
 }
 function clearDmState(){
- stopDmWs();state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;
+ state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;
  state.dmOtherName='';state.dmCanSend=false;state.dmPending=null;state.dmDraft='';state.dmLoadVersion++;
 }
 async function loadSocial(){
- const uid=state.me?.user?.uid,version=++state.socialEpoch;
+ const uid=state.me?.user?.uid,csrf=state.me?.user?.csrf,epoch=state.personalModelEpoch,version=++state.socialEpoch;
  const data=await api('/api/me/social');
- if(state.socialEpoch!==version||state.me?.user?.uid!==uid)return state.social;
+ if(state.socialEpoch!==version||state.me?.user?.uid!==uid||state.me?.user?.csrf!==csrf||state.personalModelEpoch!==epoch)return state.social;
  state.social=data;
  if(state.dmUid){
   const conv=state.social.conversations?.find(x=>x.uid===state.dmUid);
