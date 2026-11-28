@@ -168,8 +168,19 @@ function friendDmButton(page, uid) {
 
     await closePersonalCenter(pageA);
     await closePersonalCenter(pageB);
-    await pageA.waitForFunction(() => state.dmSocket === null);
-    await pageB.waitForFunction(() => state.dmSocket === null);
+    await pageA.waitForFunction(() => state.accountSocket && state.accountSocket.readyState === WebSocket.OPEN);
+    await pageB.waitForFunction(() => state.accountSocket && state.accountSocket.readyState === WebSocket.OPEN);
+
+    await api(pageB, 'POST', '/api/messages/' + encodeURIComponent(uidA), {
+      text: '个人中心关闭时收到的私信',
+      client_message_id: 'social-points-background-message-probe',
+    });
+    await pageA.waitForFunction(uid => {
+      const conversation = state.social?.conversations?.find(item => item.uid === uid);
+      return conversation?.unread_count > 0;
+    }, uidB);
+    assert.equal(await pageA.evaluate(() => state.dmUid), null);
+    assert.equal(await pageA.evaluate(() => state.dmMessages.length), 0);
 
     for (let index = 1; index <= 51; index++) {
       const sequence = String(index).padStart(2, '0');
@@ -185,8 +196,9 @@ function friendDmButton(page, uid) {
     await visible(dmFormA);
     await pageA.waitForFunction(() => state.dmMessages.length === 50 && state.dmHasMore);
     await pageA.locator('[data-action="dm-older"]').click();
-    await pageA.waitForFunction(() => state.dmMessages.length === 51 && !state.dmHasMore);
-    assert.equal(await pageA.evaluate(() => state.dmMessages[0]?.text), '分页消息 01');
+    await pageA.waitForFunction(() => state.dmMessages.length === 52 && !state.dmHasMore);
+    assert.equal(await pageA.evaluate(() => state.dmMessages[0]?.text), '个人中心关闭时收到的私信');
+    assert.equal(await pageA.evaluate(() => state.dmMessages[1]?.text), '分页消息 01');
     assert.equal(await pageA.evaluate(() => state.dmMessages.at(-1)?.text), '分页消息 51');
 
     const passwordFormA = pageA.locator('form[data-form="change-password"]');
