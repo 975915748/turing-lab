@@ -81,6 +81,8 @@ async function createRoom(page, title, isPublic) {
 
     await makeFriend(host, player, playerUid);
     await makeFriend(host, judge, judgeUid);
+    await api(host, 'PUT', `/api/friends/${playerUid}/note`, { note: '玩家备注' });
+    await host.evaluate(() => loadSocial());
     await host.waitForFunction(() => (state.social?.friends || []).length === 2);
 
     // A public room is visible to a logged-in non-member, and the public join action works.
@@ -95,6 +97,23 @@ async function createRoom(page, title, isPublic) {
     await player.waitForFunction(() => !state.roomId && !!document.querySelector('#communityPublicRooms'));
     await player.waitForFunction(() => state.dmSocket?.readyState === WebSocket.OPEN);
 
+    // Public visibility can still be disabled before the first round even if the roster is frozen.
+    await host.locator('[data-action="room-view"][data-view="admin"]').click();
+    await host.evaluate(() => {
+      state.room.persona_frozen = true;
+      const marker = document.createElement('span');
+      app.appendChild(marker);
+      marker.remove();
+    });
+    const visibilityForm = host.locator('#communityRoomControls form[data-community-form="room-visibility"]');
+    await visible(visibilityForm);
+    const publicToggle = visibilityForm.locator('[name="public_listing"]');
+    assert.equal(await publicToggle.isDisabled(), false);
+    assert.equal(await host.locator('#communityRoomControls [data-community-action="invite-panel-toggle"]').count(), 0);
+    await publicToggle.uncheck();
+    await visibilityForm.locator('button[type="submit"]').click();
+    await host.waitForFunction(() => state.room?.public_listing === false);
+
     // The owner closes the first room, then creates a private room and invites friends by role.
     host.once('dialog', dialog => dialog.accept());
     await host.locator('[data-action="back"]').click();
@@ -106,6 +125,11 @@ async function createRoom(page, title, isPublic) {
     await inviteToggle.click();
     const inviteForm = host.locator('form[data-community-form="room-invite"]');
     await visible(inviteForm);
+    const friendOption = host.locator(`#communityRoomControls label:has(input[name="uids"][value="${playerUid}"])`);
+    const friendLabel = await friendOption.innerText();
+    assert(friendLabel.includes('玩家备注'));
+    assert(friendLabel.includes('社区浏览器参赛者'));
+    assert(friendLabel.includes(playerUid));
     await inviteForm.locator(`input[name="uids"][value="${playerUid}"]`).check();
     await inviteForm.locator('select[name="role"]').selectOption('player');
     await inviteForm.locator('button[type="submit"]').click();
