@@ -311,9 +311,9 @@ function clearDmState(){
  state.dmOtherName='';state.dmCanSend=false;state.dmPending=null;state.dmDraft='';state.dmLoadVersion++;
 }
 async function loadSocial(){
- const uid=state.me?.user?.uid,version=++state.socialEpoch;
+ const uid=state.me?.user?.uid,csrf=state.me?.user?.csrf,epoch=state.personalModelEpoch,version=++state.socialEpoch;
  const data=await api('/api/me/social');
- if(state.socialEpoch!==version||state.me?.user?.uid!==uid)return state.social;
+ if(state.socialEpoch!==version||state.personalModelEpoch!==epoch||state.me?.user?.uid!==uid||state.me?.user?.csrf!==csrf)return state.social;
  state.social=data;
  if(state.dmUid){
   const conv=state.social.conversations?.find(x=>x.uid===state.dmUid);
