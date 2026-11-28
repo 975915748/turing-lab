@@ -562,9 +562,9 @@
           method: 'PUT',
           body: { public_listing, public_description: values.public_description || '' },
         });
-        inviteState.visibilityDraft = null;
         if (!accountStillCurrent(account) || state.roomId !== roomIdAtSubmit ||
             state.room?.match_number !== matchAtSubmit || state.roomContextEpoch !== roomEpochAtSubmit) return;
+        inviteState.visibilityDraft = null;
         await refreshRoom();
         if (!accountStillCurrent(account) || state.roomId !== roomIdAtSubmit ||
             state.room?.match_number !== matchAtSubmit || state.roomContextEpoch !== roomEpochAtSubmit) return;
