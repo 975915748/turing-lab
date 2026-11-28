@@ -166,6 +166,15 @@ async function createRoom(page, title, isPublic) {
     const draftArea = questionForm.locator('textarea[name="text"]');
     const draft = await draftArea.inputValue();
     assert(draft.includes('专家'));
+
+    // Random selection respects the active category and fills a question without submitting it.
+    await draftArea.fill('');
+    await judge.locator('[data-community-question-search]').fill('');
+    const logicBank = await api(judge, 'GET', '/api/question-bank?category=logic');
+    await judge.locator('#communityQuestionBank [data-community-action="question-random"]').click();
+    const randomDraft = await draftArea.inputValue();
+    assert(logicBank.questions.some(item => item.text === randomDraft));
+
     await draftArea.fill('保留这段尚未提交的手工草稿');
     judge.once('dialog', dialog => dialog.dismiss());
     await fillButton.click();
