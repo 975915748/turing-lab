@@ -1441,10 +1441,10 @@ def cancel_room_invites(db, room_id, now=None):
     return notifications
 
 
-async def notify_room_invite_updates(notifications):
+async def notify_room_invite_updates(hub, notifications):
     for user_id, invite_ids in (notifications or {}).items():
         for invite_id in invite_ids:
-            await app.state.hub.notify_account(
+            await hub.notify_account(
                 user_id, {'type':'room_invite_updated','invite_id':invite_id}
             )
 
@@ -3163,7 +3163,7 @@ def create_app(db_path=None):
                 await app.state.hub.notify(room_id,'judge_question')
                 await app.state.hub.notify_accounts(name_lock_user_ids, {'type':'name_lock_updated'})
                 if invite_notifications:
-                    await notify_room_invite_updates(invite_notifications)
+                    await notify_room_invite_updates(app.state.hub, invite_notifications)
 
             update_workflow_state(workflow,'generating_answers',keep_worker=True)
             answer_result=await generate_ai_answers_shared(
@@ -3840,7 +3840,7 @@ def create_app(db_path=None):
         await app.state.hub.notify(room_id,'room_closed' if closed else 'member_left')
         await app.state.hub.notify_accounts(affected,{'type':'name_lock_updated'})
         if invite_notifications:
-            await notify_room_invite_updates(invite_notifications)
+            await notify_room_invite_updates(app.state.hub, invite_notifications)
         return {'ok':True,'closed':closed,'match_number':room['match_number']}
 
     @app.post('/api/rooms/{room_id}/leave')
@@ -4502,7 +4502,7 @@ def create_app(db_path=None):
         await app.state.hub.notify(room_id,'judge_question')
         await app.state.hub.notify_accounts(name_lock_user_ids, {'type':'name_lock_updated'})
         if invite_notifications:
-            await notify_room_invite_updates(invite_notifications)
+            await notify_room_invite_updates(app.state.hub, invite_notifications)
         return {'ok':True}
     @app.post('/api/rooms/{room_id}/ai')
     async def add_ai(room_id:int,body:AIData,request:Request):
@@ -4709,7 +4709,7 @@ def create_app(db_path=None):
         if name_lock_user_ids:
             await app.state.hub.notify_accounts(name_lock_user_ids, {'type':'name_lock_updated'})
         if not queued_for_workflow and invite_notifications:
-            await notify_room_invite_updates(invite_notifications)
+            await notify_room_invite_updates(app.state.hub, invite_notifications)
         return {'ok':True,'workflow_pending':queued_for_workflow}
 
     @app.post('/api/rooms/{room_id}/suggestions')
