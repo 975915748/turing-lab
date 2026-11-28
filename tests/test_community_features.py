@@ -202,7 +202,7 @@ def test_public_room_discovery_join_whitelist_and_auto_unlisting(env):
     assert item['public_description'] == '公开简介只允许展示房间信息。'
     empty_description = next(room for room in rooms if room['room_id'] == older_public['room_id'])
     assert empty_description['public_description'] == ''
-    post(admin, f"/api/rooms/{private['room_id']}/visibility", {
+    request(admin, 'PUT', f"/api/rooms/{private['room_id']}/visibility", {
         'public_listing': False, 'public_description': '',
     })
     assert item['max_players'] == 8
@@ -316,7 +316,7 @@ def test_concurrent_invite_acceptance_creates_one_seat_and_is_idempotent(env):
 
     second_session = TestClient(app)
     post(second_session, '/api/login', {
-        'username': 'community_player_0', 'password': 'player-password',
+        'uid': player_uid, 'password': 'player-password',
     })
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(post, player, f'/api/room-invites/{invite_id}/accept')
