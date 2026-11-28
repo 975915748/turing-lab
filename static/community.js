@@ -85,13 +85,16 @@
     if (!target) return;
     const received = state.roomInvites?.received || [];
     const sent = state.roomInvites?.sent || [];
+    const pendingCount = Number(state.roomInvites?.pending_count ?? received.length);
+    const truncated = !!state.roomInvites?.truncated;
     if (!received.length && !sent.length) {
       if (target.innerHTML) target.innerHTML = '';
       return;
     }
     const html = `
       <section class="card community-invites">
-        <div class="label-line"><h2>好友房间邀请</h2><span class="pill">${received.length} 条待处理</span></div>
+        <div class="label-line"><h2>好友房间邀请</h2><span class="pill">${pendingCount} 条待处理</span></div>
+        ${truncated ? '<p class="hint">列表最多显示最近 100 条待处理邀请。</p>' : ''}
         ${received.length ? `
           <h3>收到的邀请</h3>
           <div class="community-list">
@@ -478,6 +481,10 @@
         if (rows.length) fillQuestion(rows[Math.floor(Math.random() * rows.length)].id);
       }
     } catch (error) {
+      if (accountStillCurrent(account) &&
+          ['invite-accept', 'invite-reject', 'invite-cancel'].includes(action)) {
+        await loadRoomInvites().catch(() => {});
+      }
       toast(error.message || '操作失败');
     }
   }, true);
