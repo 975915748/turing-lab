@@ -1227,18 +1227,66 @@ def validate_discovery_join(db, room):
     return first
 
 
-def join_room_seat(db, room, user, role, *, source='invite_code'):
-    """Shared role-conflict, idempotency, capacity and seat-write core."""
+def prepare_invite_code_join(db, room, user, role):
+    """Preserve the legacy /api/join source-specific admission sequence."""
     room_id = int(room['id'])
-    if source != 'invite_code':
-        validate_discovery_join(db, room)
+    if role == 'judge':
+        if user['is_admin']:
+            raise HTTPException(403, '管理员账号不能作为独立真人裁判加入。')
+        if not is_judge(db, room_id, user):
+            check_judge_registration(db, room, user['id'], viewer=user)
+        return
+    if role != 'player':
+        raise HTTPException(422, '加入身份无效。')
+    if is_judge(db, room_id, user):
+        raise HTTPException(409, '本房间裁判不能作为参赛者加入。')
+    old = db.execute('SELECT 1 FROM members WHERE room_id=? AND user_id=? AND removed_at IS NULL',
+                     (room_id, user['id'])).fetchone()
+    if old:
+        return
+    prior = db.execute('''SELECT leave_reason FROM members
+        WHERE room_id=? AND user_id=? AND removed_at IS NOT NULL''',
+        (room_id, user['id'])).fetchone()
+    if prior and (prior['leave_reason'] != 'voluntary' or room['match_started_at']):
+        raise HTTPException(403, '你已离开本场比赛，下一场可以重新加入；被移除者不能重入本场。')
+    ensure_roster_unlocked(db, room, allow_frozen=True)
+
+
+def prepare_discovery_join(db, room, user, role):
+    """Apply the stricter admission policy used only by invitations and public discovery."""
+    validate_discovery_join(db, room)
+    room_id = int(room['id'])
+    if role == 'judge':
+        if user['is_admin']:
+            raise HTTPException(403, '管理员账号不能作为独立真人裁判加入。')
+        if not is_judge(db, room_id, user):
+            check_judge_registration(db, room, user['id'], viewer=user)
+        return
+    if role != 'player':
+        raise HTTPException(422, '加入身份无效。')
+    if is_judge(db, room_id, user):
+        raise HTTPException(409, '本房间裁判不能作为参赛者加入。')
+    old = db.execute('SELECT 1 FROM members WHERE room_id=? AND user_id=? AND removed_at IS NULL',
+                     (room_id, user['id'])).fetchone()
+    if old:
+        return
+    prior = db.execute('''SELECT leave_reason FROM members
+        WHERE room_id=? AND user_id=? AND removed_at IS NOT NULL''',
+        (room_id, user['id'])).fetchone()
+    if prior and (prior['leave_reason'] != 'voluntary' or room['match_started_at']):
+        raise HTTPException(403, '你已离开本场比赛，下一场可以重新加入；被移除者不能重入本场。')
+    ensure_roster_unlocked(db, room, allow_frozen=False)
+
+
+def join_room_seat(db, room, user, role, *, source='invite_code'):
+    """Shared seat-write core: role conflicts, idempotency, capacity and event recording."""
+    room_id = int(room['id'])
     if role == 'judge':
         if user['is_admin']:
             raise HTTPException(403, '管理员账号不能作为独立真人裁判加入。')
         existing = is_judge(db, room_id, user)
         if existing:
             return {'room_id': room_id, 'role': 'judge', 'label': existing['label']}, False
-        check_judge_registration(db, room, user['id'], viewer=user)
         label = norm_text(user['display_name'], 40)
         db.execute('''INSERT INTO room_judges(room_id,user_id,label,created_at) VALUES(?,?,?,?)
             ON CONFLICT(room_id,user_id) DO UPDATE SET left_at=NULL,label=excluded.label''',
@@ -1257,12 +1305,9 @@ def join_room_seat(db, room, user, role, *, source='invite_code'):
                      (room_id, user['id'])).fetchone()
     if old:
         return {'room_id': room_id, 'alias': old['alias']}, False
-    prior = db.execute('''SELECT alias,leave_reason FROM members
+    prior = db.execute('''SELECT alias FROM members
         WHERE room_id=? AND user_id=? AND removed_at IS NOT NULL''',
         (room_id, user['id'])).fetchone()
-    if prior and (prior['leave_reason'] != 'voluntary' or room['match_started_at']):
-        raise HTTPException(403, '你已离开本场比赛，下一场可以重新加入；被移除者不能重入本场。')
-    ensure_roster_unlocked(db, room, allow_frozen=(source == 'invite_code'))
     if prior:
         if active_participant_count(db, room_id) >= MAX_PLAYERS:
             raise HTTPException(409, f'最多支持 {MAX_PLAYERS} 位参赛者。')
@@ -1278,6 +1323,11 @@ def join_room_seat(db, room, user, role, *, source='invite_code'):
                      'public_lobby': '通过公开大厅加入'}[source]
     log_event(db, room_id, 1, 'joined', alias, player_source)
     return {'room_id': room_id, 'alias': alias}, True
+
+
+def join_discovery_room_seat(db, room, user, role, *, source):
+    prepare_discovery_join(db, room, user, role)
+    return join_room_seat(db, room, user, role, source=source)
 
 
 def can_discovery_join_role(db, room, user, role):
@@ -3686,7 +3736,7 @@ def create_app(db_path=None):
             room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
             if not room or not room['public_listing']:
                 raise HTTPException(404,'该房间未公开或已不可加入。')
-            result,created=join_room_seat(db,room,u,body.role,source='public_lobby')
+            result,created=join_discovery_room_seat(db,room,u,body.role,source='public_lobby')
         if created:
             await app.state.hub.notify(room_id,'judge_added' if body.role=='judge' else 'joined')
         return {**result,'role':body.role,'already_joined':not created}
@@ -3844,7 +3894,7 @@ def create_app(db_path=None):
                             if not room:
                                 failure=(404,'房间不存在。')
                             else:
-                                result,created=join_room_seat(db,room,u,role,source='friend_invite')
+                                result,created=join_discovery_room_seat(db,room,u,role,source='friend_invite')
                                 db.execute('''UPDATE room_invites SET status='accepted',responded_at=?,updated_at=?
                                     WHERE id=? AND status='pending' ''',(now,now,invite_id))
                                 result={**result,'role':role,'already_joined':not created}
@@ -4048,6 +4098,7 @@ def create_app(db_path=None):
                                   (room_id,u['id'])).fetchone()
             if left_judge and left_judge['left_at'] is not None and room['match_started_at']:
                 raise HTTPException(403,'你已退出本场比赛，下一场可以重新加入。')
+            prepare_invite_code_join(db,room,u,body.role)
             result,created=join_room_seat(db,room,u,body.role,source='invite_code')
         if created:
             await app.state.hub.notify(room_id,'judge_added' if body.role=='judge' else 'joined')
