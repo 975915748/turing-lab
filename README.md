@@ -57,13 +57,11 @@ $env:PORT = "8000"
 $env:BOOTSTRAP_ADMIN_USERNAME = "admin"
 $env:BOOTSTRAP_ADMIN_DISPLAY = "主持人"
 $env:BOOTSTRAP_ADMIN_PASSWORD = "请替换为至少12位的强密码"
-
-python railway_start.py
 ```
 
 首次启动且数据库中还没有管理员时，启动脚本会使用 `BOOTSTRAP_ADMIN_*` 变量创建管理员；用户名须为 3～30 位 ASCII 字母、数字或下划线，密码至少 12 位。之后启动会沿用数据库中的管理员账号。服务默认监听 `http://127.0.0.1:8000`。
 
-如需在个人中心使用模型 API，还要设置 `MODEL_CREDENTIAL_KEY`。可用下面的命令生成 Fernet 密钥：
+如需在个人中心使用模型 API，请在启动服务前设置 `MODEL_CREDENTIAL_KEY`。可用下面的命令生成 Fernet 密钥：
 
 ```powershell
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
@@ -71,6 +69,12 @@ $env:MODEL_CREDENTIAL_KEY = "替换为生成的密钥"
 ```
 
 请将生成的密钥妥善保存，并在后续启动时使用同一个值。更换或丢失密钥后，旧密钥加密的 API Key 将无法解密，需要重新录入。只使用手动转录流程时，不需要配置模型密钥。
+
+完成环境变量配置后启动服务：
+
+```powershell
+python railway_start.py
+```
 
 ## 1. 账号注册与登录
 
