@@ -7,6 +7,28 @@ async function visible(locator) {
   await locator.waitFor({ state: 'visible' });
 }
 
+async function watchChildMutations(page, selector, key) {
+  await page.locator(selector).waitFor({ state: 'attached' });
+  await page.evaluate(({ selector, key }) => {
+    const target = document.querySelector(selector);
+    if (!target) throw new Error('Missing mutation probe target: ' + selector);
+    const probe = { count: 0, observer: null };
+    probe.observer = new MutationObserver(records => { probe.count += records.length; });
+    probe.observer.observe(target, { childList: true, subtree: true });
+    window[key] = probe;
+  }, { selector, key });
+}
+
+async function assertMutationsSettle(page, key, label) {
+  await page.waitForTimeout(120);
+  const before = await page.evaluate(key => window[key]?.count ?? -1, key);
+  await page.waitForTimeout(160);
+  const after = await page.evaluate(key => window[key]?.count ?? -1, key);
+  await page.evaluate(key => window[key]?.observer?.disconnect(), key);
+  assert(before > 0, `${label}: expected the probe to observe the initial render`);
+  assert.equal(after, before, `${label}: DOM kept mutating after the render settled`);
+}
+
 async function clickSubmit(page, formName) {
   await page.locator(`form[data-form="${formName}"] button[type="submit"]`).click();
 }
@@ -79,6 +101,8 @@ async function createRoom(page, title, isPublic) {
     await Promise.all([host, player, judge].map(page =>
       page.waitForFunction(() => state.dmSocket?.readyState === WebSocket.OPEN)));
 
+    const hostProfile = await api(host, 'PUT', '/api/me/profile', { display_name: '社区 "GPT" 房主' });
+    assert.equal(hostProfile.user?.display_name, '社区 "GPT" 房主');
     await makeFriend(host, player, playerUid);
     await makeFriend(host, judge, judgeUid);
     await api(host, 'PUT', `/api/friends/${playerUid}/note`, { note: '玩家备注' });
@@ -86,10 +110,12 @@ async function createRoom(page, title, isPublic) {
     await host.waitForFunction(() => (state.social?.friends || []).length === 2);
 
     // A public room is visible to a logged-in non-member, and the public join action works.
-    const publicRoomId = await createRoom(host, '公开大厅浏览器测试', true);
+    const publicRoomId = await createRoom(host, '公开 "GPT" 大厅浏览器测试', true);
+    await watchChildMutations(player, '#communityPublicRooms', '__publicRoomsMutationProbe');
     await player.locator('#communityPublicRooms [data-community-action="public-refresh"]').click();
     const publicJoin = player.locator(`#communityPublicRooms [data-community-action="public-join"][data-id="${publicRoomId}"][data-role="player"]`);
     await visible(publicJoin);
+    await assertMutationsSettle(player, '__publicRoomsMutationProbe', 'quoted public-room title');
     await publicJoin.click();
     await player.waitForFunction(id => state.roomId === id, publicRoomId);
     await player.waitForFunction(() => state.dmSocket?.readyState === WebSocket.OPEN);
@@ -118,7 +144,7 @@ async function createRoom(page, title, isPublic) {
     host.once('dialog', dialog => dialog.accept());
     await host.locator('[data-action="back"]').click();
     await host.waitForFunction(() => !state.roomId && !!document.querySelector('form[data-form="room"]'));
-    const privateRoomId = await createRoom(host, '好友邀请与题库浏览器测试', false);
+    const privateRoomId = await createRoom(host, '好友 "GPT" 邀请与题库浏览器测试', false);
     await host.locator('[data-action="room-view"][data-view="admin"]').click();
     const inviteToggle = host.locator('#communityRoomControls [data-community-action="invite-panel-toggle"]');
     await visible(inviteToggle);
@@ -142,10 +168,12 @@ async function createRoom(page, title, isPublic) {
     assert.equal(await host.locator('form[data-community-form="room-invite"] select[name="role"]').inputValue(), 'judge');
     assert.equal(await host.locator(`form[data-community-form="room-invite"] input[name="uids"][value="${playerUid}"]`).isChecked(), true);
     await host.locator('form[data-community-form="room-invite"] select[name="role"]').selectOption('player');
+    await watchChildMutations(player, '#communityRoomInvites', '__inviteMutationProbe');
     await host.locator('form[data-community-form="room-invite"] button[type="submit"]').click();
 
     const incomingPlayerInvite = player.locator('#communityRoomInvites [data-community-action="invite-accept"]');
     await visible(incomingPlayerInvite);
+    await assertMutationsSettle(player, '__inviteMutationProbe', 'quoted inviter name and room title');
     await incomingPlayerInvite.click();
     await player.waitForFunction(id => state.roomId === id, privateRoomId);
 
@@ -200,6 +228,7 @@ async function createRoom(page, title, isPublic) {
       hostUid, playerUid, judgeUid, publicRoomId, privateRoomId,
       accountSocketPersistsOutsidePersonalCenter: true,
       publicJoin: true, friendInvites: true, judgeQuestionBankFillOnly: true,
+      quotedDynamicTextDoesNotLoop: true,
     }));
   } finally {
     await browser.close();

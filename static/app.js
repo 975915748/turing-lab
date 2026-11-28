@@ -468,8 +468,14 @@ function connectDmWs(){
    return;
   }
   if(message.type==='name_lock_updated'){
-   if(!location.hash.startsWith('#profile'))return;
-   try{const refreshedMe=await api('/api/me');if(!current()||refreshedMe.user?.uid!==uid)return;state.me=refreshedMe;renderPersonalCenter();}catch{}
+   const pageContext=capturePersonalCenterContext();
+   if(!isCurrentPersonalCenterContext(pageContext))return;
+   try{
+    const refreshedMe=await api('/api/me');
+    if(!current()||!isCurrentPersonalCenterContext(pageContext)||refreshedMe.user?.uid!==uid)return;
+    state.me=refreshedMe;
+    renderPersonalCenter();
+   }catch{}
    return;
   }
   if(message.type==='dm_message'){

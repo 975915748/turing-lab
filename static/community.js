@@ -17,6 +17,14 @@
     inviteDraft: null,
   };
 
+  const renderedHtmlSignatures = new WeakMap();
+
+  function setRenderedHtml(target, signature, html) {
+    if (renderedHtmlSignatures.get(target) === signature) return;
+    target.innerHTML = html;
+    renderedHtmlSignatures.set(target, signature);
+  }
+
   function formatInviteTime(value) {
     if (!value) return '';
     const date = new Date(value);
@@ -91,8 +99,9 @@
     const sent = state.roomInvites?.sent || [];
     const pendingCount = Number(state.roomInvites?.pending_count ?? received.length);
     const truncated = !!state.roomInvites?.truncated;
+    const signature = JSON.stringify({ received, sent, pendingCount, truncated });
     if (!received.length && !sent.length) {
-      if (target.innerHTML) target.innerHTML = '';
+      setRenderedHtml(target, signature, '');
       return;
     }
     const html = `
@@ -129,13 +138,16 @@
               </article>`).join('')}
           </div>` : ''}
       </section>`;
-    if (target.innerHTML !== html) target.innerHTML = html;
+    setRenderedHtml(target, signature, html);
   }
 
   function renderPublicLobbyPanel() {
     const target = document.getElementById('communityPublicRooms');
     if (!target) return;
     const rooms = state.communityPublicRooms || [];
+    const loading = !!state.communityPublicLoading;
+    const hasMore = !!state.communityPublicHasMore;
+    const signature = JSON.stringify({ rooms, loading, hasMore });
     const cards = rooms.map(room => `
       <article class="card flat community-public-room">
         <div class="label-line">
@@ -156,10 +168,10 @@
           <div><h2>公开大厅</h2><p class="hint">只展示尚未开始、仍允许加入的公开房间。</p></div>
           <button class="small" type="button" data-community-action="public-refresh">刷新</button>
         </div>
-        ${cards || (state.communityPublicLoading ? '<p class="muted">正在加载公开房间…</p>' : '<p class="muted">目前没有可加入的公开房间。</p>')}
-        ${state.communityPublicHasMore ? '<button class="small spaced" type="button" data-community-action="public-more">加载更多</button>' : ''}
+        ${cards || (loading ? '<p class="muted">正在加载公开房间…</p>' : '<p class="muted">目前没有可加入的公开房间。</p>')}
+        ${hasMore ? '<button class="small spaced" type="button" data-community-action="public-more">加载更多</button>' : ''}
       </section>`;
-    if (target.innerHTML !== html) target.innerHTML = html;
+    setRenderedHtml(target, signature, html);
   }
 
   function renderInviteRoomNotice() {
@@ -317,6 +329,7 @@
     if (!target) return;
     const rows = filteredQuestions();
     const categories = inviteState.questionData?.categories || [];
+    const signature = JSON.stringify({ rows, categories });
     const html = rows.length ? rows.map(item => {
       const category = categories.find(entry => entry.id === item.category)?.name || item.category;
       return `
@@ -326,7 +339,7 @@
         <div class="community-tags">${(item.tags || []).map(tag => `<span class="pill">${esc(tag)}</span>`).join('')}</div>
       </article>`;
     }).join('') : '<p class="muted">没有匹配的题目，可以更换分类或搜索词。</p>';
-    if (target.innerHTML !== html) target.innerHTML = html;
+    setRenderedHtml(target, signature, html);
   }
 
   function renderQuestionBank(form) {

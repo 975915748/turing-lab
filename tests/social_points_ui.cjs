@@ -449,6 +449,49 @@ function friendDmButton(page, uid) {
     );
     await pageB.unroute('**/api/me');
 
+    // A delayed name-lock refresh must not replace the room after leaving the personal center.
+    await pageB.goto(site + '/#room=' + roomId);
+    await pageB.waitForFunction(id => state.roomId === id, roomId);
+    await openPersonalCenter(pageB);
+    await pageB.waitForFunction(() => state.dmSocket?.readyState === WebSocket.OPEN);
+    await pageB.waitForTimeout(200);
+    let releaseRoomNameLockResponse;
+    let signalRoomNameLockResponseReady;
+    const roomNameLockGate = new Promise(resolve => { releaseRoomNameLockResponse = resolve; });
+    pendingGateReleases.push(releaseRoomNameLockResponse);
+    const roomNameLockResponseReady = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Timed out waiting for delayed room name-lock refresh')), 10000);
+      signalRoomNameLockResponseReady = status => { clearTimeout(timer); resolve(status); };
+    });
+    let holdRoomNameLockResponse = true;
+    await pageB.route('**/api/me', async route => {
+      if (holdRoomNameLockResponse && route.request().method() === 'GET') {
+        holdRoomNameLockResponse = false;
+        const response = await route.fetch();
+        signalRoomNameLockResponseReady(response.status());
+        await roomNameLockGate;
+        await route.fulfill({ response });
+        return;
+      }
+      await route.continue();
+    });
+    await pageB.evaluate(() => {
+      if (!state.dmSocket || state.dmSocket.readyState !== WebSocket.OPEN) {
+        throw new Error('Expected an open personal-center WebSocket before returning to the room');
+      }
+      state.dmSocket.onmessage({ data: JSON.stringify({ type: 'name_lock_updated' }) });
+    });
+    assert.equal(await roomNameLockResponseReady, 200);
+    await closePersonalCenter(pageB);
+    await pageB.waitForFunction(id => location.hash === '#room=' + id && state.roomId === id, roomId);
+    assert.equal(await pageB.locator('form[data-form="profile-name"]').count(), 0);
+    releaseRoomNameLockResponse();
+    await pageB.waitForTimeout(250);
+    assert.equal(await pageB.evaluate(() => location.hash), '#room=' + roomId);
+    assert.equal(await pageB.evaluate(() => state.roomId), roomId);
+    assert.equal(await pageB.locator('form[data-form="profile-name"]').count(), 0);
+    await pageB.unroute('**/api/me');
+
     // A delayed successful /api/me response from an old 1008 close must not replace the next account.
     await openPersonalCenter(pageA);
     await pageA.waitForFunction(() => state.dmSocket?.readyState === WebSocket.OPEN);
