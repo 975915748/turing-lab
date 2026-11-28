@@ -490,7 +490,8 @@ def register_social_routes(
 
     @app.post("/api/rooms/{room_id}/invites")
     async def send_room_invites(room_id: int, body: RoomInviteBatchData, request: Request):
-        if len(set(body.uids)) != len(body.uids):
+        normalized_uids = [uid.strip().upper() for uid in body.uids]
+        if len(set(normalized_uids)) != len(normalized_uids):
             raise HTTPException(422, "邀请 UID 不能重复。")
         notifications = {}
         results = []
@@ -501,7 +502,7 @@ def register_social_routes(
             _rate_limit(db, user["id"], "room_invite", 20, 3600)
             now = utcnow()
             expires_at = (datetime.fromisoformat(now) + timedelta(minutes=30)).isoformat(timespec="seconds")
-            for raw_uid in body.uids:
+            for raw_uid in normalized_uids:
                 try:
                     target = lookup_account(db, uid=raw_uid)
                 except HTTPException:
