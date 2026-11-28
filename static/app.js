@@ -434,13 +434,13 @@ function connectDmWs(){
  const current=()=>state.dmSocket===ws&&state.me?.user?.uid===uid&&state.me?.user?.csrf===csrf&&state.personalModelEpoch===epoch;
  ws.onopen=async()=>{
   if(!current())return;
-  try{
-   await loadSocial();
-   if(!current())return;
-   if(typeof loadRoomInvites==='function')await loadRoomInvites();
-   if(!current())return;
-   if(location.hash.startsWith('#profile')){if(state.dmUid)await openDm(state.dmUid);else refreshSocialPanel();}
-  }catch{}
+  try{await loadSocial();}catch{}
+  if(!current())return;
+  try{if(typeof loadRoomInvites==='function')await loadRoomInvites();}catch{}
+  if(!current())return;
+  if(location.hash.startsWith('#profile')){
+   try{if(state.dmUid)await openDm(state.dmUid);else refreshSocialPanel();}catch{}
+  }
  };
  ws.onmessage=async event=>{
   if(!current())return;
