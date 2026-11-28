@@ -524,3 +524,52 @@ def test_account_soft_deletion_cancels_pending_invites_and_notifies_inviter(env)
             'SELECT status FROM room_invites WHERE id=?', (invite_id,),
         ).fetchone()['status'] == 'cancelled'
     assert admin.get('/api/me/room-invites').json()['sent'] == []
+
+
+def test_room_invite_permissions_batch_validation_and_recipient_only_actions(env):
+    path, _, admin, users = env
+    player, player_uid = users[0]
+    stranger, stranger_uid = users[1]
+    make_friends(admin, player)
+    room = post(admin, '/api/rooms', {'title': '邀请权限验证'})
+    room_id = room['room_id']
+    admin_uid = admin.get('/api/me').json()['user']['uid']
+
+    post(player, f'/api/rooms/{room_id}/invites', {
+        'uids': [stranger_uid], 'role': 'player',
+    }, status=403)
+    result = post(admin, f'/api/rooms/{room_id}/invites', {
+        'uids': [player_uid, stranger_uid, admin_uid], 'role': 'player',
+    })
+    assert [item['status'] for item in result['results']] == ['sent', 'skipped', 'skipped']
+    assert '不是你的好友' in result['results'][1]['reason']
+    assert '不能邀请自己' in result['results'][2]['reason']
+
+    post(admin, f'/api/rooms/{room_id}/invites', {
+        'uids': [player_uid, player_uid], 'role': 'player',
+    }, status=422)
+    post(admin, f'/api/rooms/{room_id}/invites', {
+        'uids': [player_uid] * 21, 'role': 'player',
+    }, status=422)
+
+    invite_id = result['results'][0]['invite_id']
+    post(stranger, f'/api/room-invites/{invite_id}/accept', status=404)
+    post(stranger, f'/api/room-invites/{invite_id}/reject', status=404)
+    post(player, f'/api/room-invites/{invite_id}/reject')
+    post(player, f'/api/room-invites/{invite_id}/reject')
+    with db_open(path) as db:
+        assert db.execute(
+            'SELECT status FROM room_invites WHERE id=?', (invite_id,),
+        ).fetchone()['status'] == 'rejected'
+
+
+def test_non_manager_cannot_change_public_room_visibility(env):
+    _, _, admin, users = env
+    player, _ = users[0]
+    room = post(admin, '/api/rooms', {
+        'title': '公开设置权限',
+        'public_listing': True,
+    })
+    request(player, 'PUT', f"/api/rooms/{room['room_id']}/visibility", {
+        'public_listing': False, 'public_description': '',
+    }, status=403)
