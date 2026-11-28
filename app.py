@@ -185,6 +185,8 @@ def init_db(path):
             verdict_json TEXT, verdict_locked_at TEXT, revealed_at TEXT,
             model_request_limit INTEGER,
             round_duration_seconds INTEGER,
+            public_listing INTEGER NOT NULL DEFAULT 0,
+            public_description TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS members (
             room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
@@ -431,6 +433,11 @@ def init_db(path):
             db.execute('ALTER TABLE rooms ADD COLUMN model_request_limit INTEGER')
         if 'round_duration_seconds' not in {x['name'] for x in db.execute('PRAGMA table_info(rooms)')}:
             db.execute('ALTER TABLE rooms ADD COLUMN round_duration_seconds INTEGER')
+        room_columns={x['name'] for x in db.execute('PRAGMA table_info(rooms)')}
+        if 'public_listing' not in room_columns:
+            db.execute('ALTER TABLE rooms ADD COLUMN public_listing INTEGER NOT NULL DEFAULT 0')
+        if 'public_description' not in room_columns:
+            db.execute("ALTER TABLE rooms ADD COLUMN public_description TEXT NOT NULL DEFAULT ''")
         if 'deleted_at' not in {x['name'] for x in db.execute('PRAGMA table_info(users)')}:
             db.execute('ALTER TABLE users ADD COLUMN deleted_at TEXT')
         room_sql = db.execute("SELECT sql FROM sqlite_master WHERE name='rooms'").fetchone()['sql']
@@ -672,6 +679,22 @@ class PasswordResetData(ConfirmData):
 class RoomData(BaseModel):
     title: str = Field(min_length=1, max_length=80)
     judge: str = Field(default='裁判', min_length=1, max_length=40)
+    public_listing: bool = False
+    public_description: str = Field(default='', max_length=160)
+
+
+class RoomVisibilityData(BaseModel, extra='forbid'):
+    public_listing: bool
+    public_description: str = Field(default='', max_length=160)
+
+
+class DiscoveryJoinData(BaseModel, extra='forbid'):
+    role: Literal['player', 'judge'] = 'player'
+
+
+class RoomInviteBatchData(BaseModel, extra='forbid'):
+    uids: list[str] = Field(min_length=1, max_length=20)
+    role: Literal['player', 'judge']
 
 
 class AIData(BaseModel):
@@ -1181,6 +1204,177 @@ def active_participant_count(db, room_id):
     return int(humans)+int(ais)
 
 
+def validate_discovery_join(db, room):
+    """Common eligibility gate for friend-invite and public-lobby discovery joins."""
+    if room['status'] != 'open' or room['match_started_at'] or int(room['current_round']) != 1:
+        raise HTTPException(409, '房间已开赛或不可加入。')
+    if room['verdict_locked_at'] or db.execute(
+            'SELECT 1 FROM judge_verdicts WHERE room_id=? LIMIT 1', (room['id'],)).fetchone() or db.execute(
+            'SELECT 1 FROM ai_judge_verdicts WHERE room_id=? LIMIT 1', (room['id'],)).fetchone():
+        raise HTTPException(409, '裁判结论已锁定，不能再加入。')
+    first = db.execute('SELECT * FROM rounds WHERE room_id=? AND number=1', (room['id'],)).fetchone()
+    if not first or first['status'] != 'draft' or first['question']:
+        raise HTTPException(409, '首轮问题已提交或作答已开始，不能再加入。')
+    if db.execute('SELECT 1 FROM judge_questions WHERE room_id=? AND round_number=1 LIMIT 1',
+                  (room['id'],)).fetchone() or db.execute(
+            'SELECT 1 FROM ai_judge_questions WHERE room_id=? AND round_number=1 LIMIT 1',
+            (room['id'],)).fetchone():
+        raise HTTPException(409, '首轮裁判问题已提交，不能再加入。')
+    if is_match_persona_frozen(db, room['id'], room['match_number']):
+        raise HTTPException(409, '本场 AI 席位配置已冻结，不能通过邀请或公开大厅新增席位。')
+    return first
+
+
+def join_room_seat(db, room, user, role, *, source='invite_code'):
+    """Shared role-conflict, idempotency, capacity and seat-write core."""
+    room_id = int(room['id'])
+    if role == 'judge':
+        if user['is_admin']:
+            raise HTTPException(403, '管理员账号不能作为独立真人裁判加入。')
+        existing = is_judge(db, room_id, user)
+        if existing:
+            return {'room_id': room_id, 'role': 'judge', 'label': existing['label']}, False
+        if source != 'invite_code':
+            validate_discovery_join(db, room)
+        check_judge_registration(db, room, user['id'], viewer=user)
+        label = norm_text(user['display_name'], 40)
+        db.execute('''INSERT INTO room_judges(room_id,user_id,label,created_at) VALUES(?,?,?,?)
+            ON CONFLICT(room_id,user_id) DO UPDATE SET left_at=NULL,label=excluded.label''',
+            (room_id, user['id'], label, utcnow()))
+        judge_source = {'invite_code': '真人裁判通过邀请码加入',
+                        'friend_invite': '真人裁判通过好友邀请加入',
+                        'public_lobby': '真人裁判通过公开大厅加入'}[source]
+        log_event(db, room_id, room['current_round'], 'judge_joined', '裁判', judge_source)
+        return {'room_id': room_id, 'role': 'judge'}, True
+
+    if role != 'player':
+        raise HTTPException(422, '加入身份无效。')
+    if is_judge(db, room_id, user):
+        raise HTTPException(409, '本房间裁判不能作为参赛者加入。')
+    old = db.execute('SELECT alias FROM members WHERE room_id=? AND user_id=? AND removed_at IS NULL',
+                     (room_id, user['id'])).fetchone()
+    if old:
+        return {'room_id': room_id, 'alias': old['alias']}, False
+    prior = db.execute('''SELECT alias,leave_reason FROM members
+        WHERE room_id=? AND user_id=? AND removed_at IS NOT NULL''',
+        (room_id, user['id'])).fetchone()
+    if prior and (prior['leave_reason'] != 'voluntary' or room['match_started_at']):
+        raise HTTPException(403, '你已离开本场比赛，下一场可以重新加入；被移除者不能重入本场。')
+    if source != 'invite_code':
+        validate_discovery_join(db, room)
+    ensure_roster_unlocked(db, room, allow_frozen=(source == 'invite_code'))
+    if prior:
+        if active_participant_count(db, room_id) >= MAX_PLAYERS:
+            raise HTTPException(409, f'最多支持 {MAX_PLAYERS} 位参赛者。')
+        alias = prior['alias']
+        db.execute('''UPDATE members SET removed_at=NULL,leave_reason=NULL,joined_at=?
+            WHERE room_id=? AND user_id=?''', (utcnow(), room_id, user['id']))
+    else:
+        alias = new_alias(db, room_id)
+        db.execute('INSERT INTO members(room_id,user_id,alias,joined_at) VALUES(?,?,?,?)',
+                   (room_id, user['id'], alias, utcnow()))
+    player_source = {'invite_code': '加入比赛',
+                     'friend_invite': '通过好友邀请加入',
+                     'public_lobby': '通过公开大厅加入'}[source]
+    log_event(db, room_id, 1, 'joined', alias, player_source)
+    return {'room_id': room_id, 'alias': alias}, True
+
+
+def can_discovery_join_role(db, room, user, role):
+    """Return a viewer-specific join capability without exposing conflict details."""
+    try:
+        validate_discovery_join(db, room)
+        if role == 'player':
+            if is_judge(db, room['id'], user):
+                return False
+            existing = db.execute('''SELECT 1 FROM members WHERE room_id=? AND user_id=?
+                AND removed_at IS NULL''', (room['id'], user['id'])).fetchone()
+            if existing:
+                return True
+            prior = db.execute('''SELECT leave_reason FROM members WHERE room_id=? AND user_id=?
+                AND removed_at IS NOT NULL''', (room['id'], user['id'])).fetchone()
+            if prior and prior['leave_reason'] != 'voluntary':
+                return False
+            ensure_roster_unlocked(db, room, allow_frozen=False)
+            return active_participant_count(db, room['id']) < MAX_PLAYERS
+        if role == 'judge':
+            if user['is_admin'] or room['owner_id'] == user['id']:
+                return False
+            if is_judge(db, room['id'], user):
+                return True
+            check_judge_registration(db, room, user['id'], viewer=user)
+            return True
+    except HTTPException:
+        return False
+    return False
+
+
+def public_room_listing_item(db, room, user):
+    human_judges = int(db.execute('''SELECT COUNT(*) FROM room_judges j
+        JOIN users u ON u.id=j.user_id WHERE j.room_id=? AND j.left_at IS NULL
+        AND u.deleted_at IS NULL''', (room['id'],)).fetchone()[0])
+    ai_judges = int(db.execute('SELECT COUNT(*) FROM ai_judges WHERE room_id=?',
+                               (room['id'],)).fetchone()[0])
+    ai_players = int(db.execute('SELECT COUNT(*) FROM ai_players WHERE room_id=?',
+                                (room['id'],)).fetchone()[0])
+    has_model_ai = bool(db.execute('''SELECT 1 FROM ai_players WHERE room_id=? AND model_profile_id IS NOT NULL
+        UNION ALL SELECT 1 FROM ai_judges WHERE room_id=? AND model_profile_id IS NOT NULL LIMIT 1''',
+        (room['id'], room['id'])).fetchone())
+    can_player = can_discovery_join_role(db, room, user, 'player')
+    can_judge = can_discovery_join_role(db, room, user, 'judge')
+    tags = []
+    if room['round_duration_seconds']:
+        tags.append(f"限时 {int(room['round_duration_seconds'])}s")
+    if ai_players:
+        tags.append('含 AI 参赛席')
+    if has_model_ai:
+        tags.append('含模型 AI')
+    if human_judges and not ai_judges:
+        tags.append('纯真人裁判')
+    if ai_judges:
+        tags.append('含 AI 裁判')
+    return {
+        'room_id': int(room['id']),
+        'title': room['title'],
+        'public_description': room['public_description'] or '',
+        'owner_display_name': room['owner_display_name'],
+        'player_count': active_participant_count(db, room['id']),
+        'max_players': MAX_PLAYERS,
+        'human_judge_count': human_judges,
+        'ai_judge_count': ai_judges,
+        'max_judges': MAX_JUDGES,
+        'round_duration_seconds': room['round_duration_seconds'],
+        'ai_player_count': ai_players,
+        'has_model_ai': has_model_ai,
+        'tags': tags,
+        'created_at': room['created_at'],
+        'can_join_player': can_player,
+        'can_join_judge': can_judge,
+    }
+
+
+def cancel_pending_room_invites(db, room_id, now=None):
+    now = now or utcnow()
+    db.execute('''UPDATE room_invites SET status='cancelled',responded_at=COALESCE(responded_at,?),
+        updated_at=? WHERE room_id=? AND status='pending' ''', (now, now, room_id))
+
+
+def consume_api_rate_limit(db, user_id, action, limit, window_seconds):
+    window_start = int(time.time()) // window_seconds
+    row = db.execute('SELECT count FROM api_rate_limits WHERE user_id=? AND action=? AND window_start=?',
+                     (user_id, action, window_start)).fetchone()
+    if row and int(row['count']) >= limit:
+        raise HTTPException(429, '操作过于频繁，请稍后再试。')
+    if row:
+        db.execute('UPDATE api_rate_limits SET count=count+1 WHERE user_id=? AND action=? AND window_start=?',
+                   (user_id, action, window_start))
+    else:
+        db.execute('INSERT INTO api_rate_limits(user_id,action,window_start,count) VALUES(?,?,?,1)',
+                   (user_id, action, window_start))
+    db.execute('DELETE FROM api_rate_limits WHERE user_id=? AND action=? AND window_start<?',
+               (user_id, action, window_start - 2))
+
+
 def workflow_roster_revision(db, room_id):
     """Fingerprint the actual contestant and judge seats, excluding transient viewers."""
     humans=[tuple(row) for row in db.execute('''SELECT 'human' AS kind,m.alias,m.user_id
@@ -1293,6 +1487,7 @@ def start_round_record(db, room, rnd, question):
         raise HTTPException(409,'本轮状态已变化，请刷新后重试。')
     db.execute('UPDATE rooms SET match_started_at=COALESCE(match_started_at,?) WHERE id=?',
                (started_at,room['id']))
+    cancel_pending_room_invites(db, room['id'], started_at)
     return {'started_at':started_at,'duration_seconds':duration,'deadline_at':deadline}
 
 
@@ -1496,6 +1691,7 @@ def public_room(db, room, user, mine):
                 'created_at':s['created_at'],'alias':s['alias'] or '主持人'})
         return {'id':room['id'],'title':room['title'],'status':room['status'],
             'match_number':room['match_number'],'records_deleted':bool(room['records_deleted']),
+            'public_listing':bool(room['public_listing']),'public_description':room['public_description'] or '',
             'can_manage':False,'is_owner':False,
             'current_round':room['current_round'],'verdict_locked':bool(my_verdict),
             'revealed_at':room['revealed_at'],'mine':None,'is_admin':False,'is_judge':True,
@@ -1540,6 +1736,7 @@ def public_room(db, room, user, mine):
             my_points_result=dict(points_row)
     result={'id':room['id'],'title':room['title'],'judge':room['judge'],
             'match_number':room['match_number'],'records_deleted':bool(room['records_deleted']),
+            'public_listing':bool(room['public_listing']),'public_description':room['public_description'] or '',
             'my_points_result':my_points_result,'match_started':bool(room['match_started_at']),
             'can_manage':manager,'is_owner':room['owner_id']==user['id'],
             'roster_recovery':manager and needs_roster_recovery(db,room),
@@ -3414,8 +3611,11 @@ def create_app(db_path=None):
         with connection(immediate=True) as db:
             u=caller(request,db,mutate=True)
             code=secrets.token_hex(5).upper()
-            cur=db.execute('INSERT INTO rooms(title,code,judge,created_at,owner_id) VALUES(?,?,?,?,?)',
-                           (norm_text(body.title,80),code,norm_text(body.judge,40),utcnow(),u['id']))
+            cur=db.execute('''INSERT INTO rooms(
+                title,code,judge,created_at,owner_id,public_listing,public_description
+            ) VALUES(?,?,?,?,?,?,?)''',
+                (norm_text(body.title,80),code,norm_text(body.judge,40),utcnow(),u['id'],
+                 1 if body.public_listing else 0,body.public_description.strip()))
             room_id=cur.lastrowid
             db.execute('INSERT INTO rounds(room_id,number,created_at) VALUES(?,?,?)',(room_id,1,utcnow()))
             log_event(db,room_id,1,'created','管理员','创建比赛')
