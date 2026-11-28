@@ -11,6 +11,10 @@
     accountUid: null,
     accountCsrf: null,
     accountEpoch: null,
+    roomId: null,
+    matchNumber: null,
+    visibilityDraft: null,
+    inviteDraft: null,
   };
 
   function formatInviteTime(value) {
@@ -211,6 +215,13 @@
     const invitesAllowed = roomInvitesAllowed(room);
     const rosterFrozen = !!(room.persona_frozen || room.personas_frozen);
     const friends = state.social?.friends || [];
+    const roomKey = String(state.roomId) + ':' + String(room.match_number);
+    const visibilityDraft = inviteState.visibilityDraft?.roomKey === roomKey ? inviteState.visibilityDraft : null;
+    const inviteDraft = inviteState.inviteDraft?.roomKey === roomKey ? inviteState.inviteDraft : null;
+    const visibilityChecked = visibilityDraft ? visibilityDraft.public_listing : !!room.public_listing;
+    const visibilityDescription = visibilityDraft ? visibilityDraft.public_description : (room.public_description || '');
+    const inviteRole = inviteDraft?.role || 'player';
+    const inviteUids = new Set(inviteDraft?.uids || []);
     const signature = JSON.stringify({
       roomId: state.roomId,
       matchNumber: room.match_number,
@@ -227,9 +238,9 @@
       <div class="divider"></div>
       ${visibilityEditable ? `
         <form data-community-form="room-visibility">
-          <label class="check-row"><input type="checkbox" name="public_listing" ${room.public_listing ? 'checked' : ''} ${rosterFrozen && !room.public_listing ? 'disabled' : ''}> 在公开大厅展示</label>
+          <label class="check-row"><input type="checkbox" name="public_listing" ${visibilityChecked ? 'checked' : ''} ${rosterFrozen && !room.public_listing ? 'disabled' : ''}> 在公开大厅展示</label>
           <label class="field">公开简介（最多 160 字）</label>
-          <textarea name="public_description" maxlength="160" rows="2" placeholder="介绍比赛主题、参与要求或裁判安排">${esc(room.public_description || '')}</textarea>
+          <textarea name="public_description" maxlength="160" rows="2" placeholder="介绍比赛主题、参与要求或裁判安排">${esc(visibilityDescription)}</textarea>
           <div class="form-actions"><button class="small" type="submit">保存公开设置</button></div>
         </form>
         ${rosterFrozen ? `<p class="hint">名单已冻结，${room.public_listing ? '当前房间不会出现在公开大厅；你仍可关闭公开展示。若要重新公开，请先取消准备。' : '暂不能开启公开展示；取消准备后可以重新公开。'}</p>` : ''}
@@ -239,7 +250,7 @@
           ${inviteState.inviteOpen ? (friends.length ? `
             <form data-community-form="room-invite">
               <label class="field">加入身份</label>
-              <select name="role"><option value="player">参赛者</option><option value="judge">真人裁判</option></select>
+              <select name="role"><option value="player" ${inviteRole === 'player' ? 'selected' : ''}>参赛者</option><option value="judge" ${inviteRole === 'judge' ? 'selected' : ''}>真人裁判</option></select>
               <div class="community-friend-list">
                 ${friends.map(friend => {
                   const note = friend.note || friend.display_name;
@@ -249,7 +260,7 @@
                     : esc(name || note);
                   return `
                     <label class="check-row">
-                      <input type="checkbox" name="uids" value="${esc(friend.uid)}">
+                      <input type="checkbox" name="uids" value="${esc(friend.uid)}" ${inviteUids.has(friend.uid) ? 'checked' : ''}>
                       <span>${label} · ${esc(friend.uid)}</span>
                     </label>`;
                 }).join('')}
@@ -393,10 +404,15 @@
 
   function ensureCommunityUi() {
     const uid = state.me?.user?.uid || null;
-    if (inviteState.roomId !== (state.roomId || null)) {
-      inviteState.roomId = state.roomId || null;
+    const roomId = state.roomId || null;
+    const matchNumber = state.room?.match_number ?? null;
+    if (inviteState.roomId !== roomId || inviteState.matchNumber !== matchNumber) {
+      inviteState.roomId = roomId;
+      inviteState.matchNumber = matchNumber;
       inviteState.inviteOpen = false;
       inviteState.questionOpen = false;
+      inviteState.visibilityDraft = null;
+      inviteState.inviteDraft = null;
     }
     const csrf = state.me?.user?.csrf || null;
     const epoch = state.personalModelEpoch;
@@ -409,6 +425,8 @@
       inviteState.questionData = null;
       inviteState.questionQuery = '';
       inviteState.questionCategory = '';
+      inviteState.visibilityDraft = null;
+      inviteState.inviteDraft = null;
       if (uid) {
         loadRoomInvites().catch(() => {});
         loadPublicRooms().catch(() => {});
@@ -529,6 +547,7 @@
         if (!accountStillCurrent(account) || state.roomId !== roomIdAtSubmit ||
             state.room?.match_number !== matchAtSubmit || state.roomContextEpoch !== roomEpochAtSubmit) return;
         inviteState.inviteOpen = false;
+        inviteState.inviteDraft = null;
         await loadRoomInvites();
         if (!accountStillCurrent(account) || state.roomId !== roomIdAtSubmit ||
             state.room?.match_number !== matchAtSubmit || state.roomContextEpoch !== roomEpochAtSubmit) return;
@@ -543,6 +562,7 @@
           method: 'PUT',
           body: { public_listing, public_description: values.public_description || '' },
         });
+        inviteState.visibilityDraft = null;
         if (!accountStillCurrent(account) || state.roomId !== roomIdAtSubmit ||
             state.room?.match_number !== matchAtSubmit || state.roomContextEpoch !== roomEpochAtSubmit) return;
         await refreshRoom();
@@ -558,13 +578,37 @@
     }
   }, true);
 
+  function saveRoomVisibilityDraft(form) {
+    inviteState.visibilityDraft = {
+      roomKey: String(state.roomId) + ':' + String(state.room?.match_number),
+      public_listing: !!form.elements.public_listing?.checked,
+      public_description: form.elements.public_description?.value || '',
+    };
+  }
+
+  function saveRoomInviteDraft(form) {
+    inviteState.inviteDraft = {
+      roomKey: String(state.roomId) + ':' + String(state.room?.match_number),
+      role: form.elements.role?.value || 'player',
+      uids: [...form.querySelectorAll('input[name="uids"]:checked')].map(input => input.value),
+    };
+  }
+
   document.addEventListener('input', event => {
+    const visibilityForm = event.target.closest('form[data-community-form="room-visibility"]');
+    if (visibilityForm) saveRoomVisibilityDraft(visibilityForm);
+    const inviteForm = event.target.closest('form[data-community-form="room-invite"]');
+    if (inviteForm) saveRoomInviteDraft(inviteForm);
     if (event.target.matches('[data-community-question-search]')) {
       inviteState.questionQuery = event.target.value;
       renderQuestionResults();
     }
   });
   document.addEventListener('change', event => {
+    const visibilityForm = event.target.closest('form[data-community-form="room-visibility"]');
+    if (visibilityForm) saveRoomVisibilityDraft(visibilityForm);
+    const inviteForm = event.target.closest('form[data-community-form="room-invite"]');
+    if (inviteForm) saveRoomInviteDraft(inviteForm);
     if (event.target.matches('[data-community-question-category]')) {
       inviteState.questionCategory = event.target.value;
       renderQuestionResults();
