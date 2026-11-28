@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_dockerfile_copies_all_runtime_python_modules():
     """Prevent startup imports from being omitted from the production image."""
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-    required_modules = {"app.py", "model_api.py", "railway_start.py", "points.py", "social.py", "match_orchestration.py"}
+    required_modules = {"app.py", "model_api.py", "railway_start.py", "points.py", "social.py", "match_orchestration.py", "question_bank.py"}
     copy_commands = [
         line.split()
         for line in dockerfile.splitlines()
