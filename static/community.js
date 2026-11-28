@@ -635,6 +635,7 @@
 
   window.loadRoomInvites = loadRoomInvites;
   window.loadPublicRooms = loadPublicRooms;
+  window.refreshCommunityRoomControls = renderRoomManagementControls;
 
   const observer = new MutationObserver(() => ensureCommunityUi());
   observer.observe(app, { childList: true, subtree: true });
