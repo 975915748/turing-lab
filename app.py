@@ -1220,22 +1220,20 @@ def validate_discovery_join(db, room):
             'SELECT 1 FROM ai_judge_questions WHERE room_id=? AND round_number=1 LIMIT 1',
             (room['id'],)).fetchone():
         raise HTTPException(409, '首轮裁判问题已提交，不能再加入。')
-    if is_match_persona_frozen(db, room['id'], room['match_number']):
-        raise HTTPException(409, '本场 AI 席位配置已冻结，不能通过邀请或公开大厅新增席位。')
     return first
 
 
 def join_room_seat(db, room, user, role, *, source='invite_code'):
     """Shared role-conflict, idempotency, capacity and seat-write core."""
     room_id = int(room['id'])
+    if source != 'invite_code':
+        validate_discovery_join(db, room)
     if role == 'judge':
         if user['is_admin']:
             raise HTTPException(403, '管理员账号不能作为独立真人裁判加入。')
         existing = is_judge(db, room_id, user)
         if existing:
             return {'room_id': room_id, 'role': 'judge', 'label': existing['label']}, False
-        if source != 'invite_code':
-            validate_discovery_join(db, room)
         check_judge_registration(db, room, user['id'], viewer=user)
         label = norm_text(user['display_name'], 40)
         db.execute('''INSERT INTO room_judges(room_id,user_id,label,created_at) VALUES(?,?,?,?)
@@ -1260,8 +1258,6 @@ def join_room_seat(db, room, user, role, *, source='invite_code'):
         (room_id, user['id'])).fetchone()
     if prior and (prior['leave_reason'] != 'voluntary' or room['match_started_at']):
         raise HTTPException(403, '你已离开本场比赛，下一场可以重新加入；被移除者不能重入本场。')
-    if source != 'invite_code':
-        validate_discovery_join(db, room)
     ensure_roster_unlocked(db, room, allow_frozen=(source == 'invite_code'))
     if prior:
         if active_participant_count(db, room_id) >= MAX_PLAYERS:
@@ -3636,11 +3632,7 @@ def create_app(db_path=None):
             room,_=require_room_manager(db,room_id,u)
             rnd=current_round(db,room)
             if (room['status']!='open' or room['match_started_at'] or room['current_round']!=1 or
-                    rnd['status']!='draft' or rnd['question'] or
-                    db.execute('SELECT 1 FROM judge_questions WHERE room_id=? AND round_number=1 LIMIT 1',
-                               (room_id,)).fetchone() or
-                    db.execute('SELECT 1 FROM ai_judge_questions WHERE room_id=? AND round_number=1 LIMIT 1',
-                               (room_id,)).fetchone() or room['verdict_locked_at']):
+                    rnd['status']!='draft' or room['verdict_locked_at']):
                 raise HTTPException(409,'首轮问题提交或开赛后，不能再修改公开大厅设置。')
             description=body.public_description.strip()
             db.execute('UPDATE rooms SET public_listing=?,public_description=? WHERE id=?',
@@ -3668,6 +3660,8 @@ def create_app(db_path=None):
                     try:
                         validate_discovery_join(db,room)
                     except HTTPException:
+                        continue
+                    if is_match_persona_frozen(db,room['id'],room['match_number']):
                         continue
                     item=public_room_listing_item(db,room,u)
                     if item['can_join_player'] or item['can_join_judge']:
@@ -3705,6 +3699,8 @@ def create_app(db_path=None):
             u=caller(request,db,mutate=True)
             room,_=require_room_manager(db,room_id,u)
             validate_discovery_join(db,room)
+            if is_match_persona_frozen(db,room_id,room['match_number']):
+                raise HTTPException(409,'本场名单已冻结，不能发送新的房间邀请。')
             consume_api_rate_limit(db,u['id'],'room_invite_batch',8,60)
             for raw_uid in body.uids:
                 target=lookup_account(db,str(raw_uid).strip(),None)
@@ -3789,7 +3785,7 @@ def create_app(db_path=None):
             return {'incoming':incoming,'outgoing':outgoing,
                     'pending_incoming_count':len(incoming)}
 
-    @app.post('/api/me/room-invites/{invite_id}/accept')
+    @app.post('/api/room-invites/{invite_id}/accept')
     async def accept_room_invite(invite_id:int,request:Request):
         failure=None
         result=None
@@ -3855,7 +3851,7 @@ def create_app(db_path=None):
         await app.state.hub.notify_accounts([u['id'],inviter_id],{'type':'room_invite_updated'})
         return result
 
-    @app.post('/api/me/room-invites/{invite_id}/reject')
+    @app.post('/api/room-invites/{invite_id}/reject')
     async def reject_room_invite(invite_id:int,request:Request):
         inviter_id=None
         with connection(immediate=True) as db:
@@ -3877,7 +3873,7 @@ def create_app(db_path=None):
         await app.state.hub.notify_accounts([u['id'],inviter_id],{'type':'room_invite_updated'})
         return {'ok':True}
 
-    @app.post('/api/me/room-invites/{invite_id}/cancel')
+    @app.post('/api/room-invites/{invite_id}/cancel')
     async def cancel_room_invite(invite_id:int,request:Request):
         invitee_id=None
         with connection(immediate=True) as db:
