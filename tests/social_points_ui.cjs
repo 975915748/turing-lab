@@ -151,6 +151,7 @@ function friendDmButton(page, uid) {
     await pageC.locator('#questionBankResults').waitFor({ state: 'visible' });
     await pageC.locator('#questionBankCategory').selectOption('logic');
     await pageC.locator('#questionBankSearch').fill('草地');
+    pageC.once('dialog', dialog => dialog.accept());
     await pageC.locator('[data-action="question-bank-random"]').click();
     assert.match(await judgeQuestion.inputValue(), /草地/);
     assert.equal(judgeQuestionRequests.length, 0);
