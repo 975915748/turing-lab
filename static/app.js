@@ -1,7 +1,7 @@
 'use strict';
 const $ = (selector) => document.querySelector(selector);
 const app = $('#app');
-const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelSavePending:{},social:null,dmMessages:[],dmBeforeId:null,dmHasMore:false,accountSocket:null,accountSocketUid:null,accountSocketCsrf:null,accountSocketEpoch:0,accountReconnect:null,personalModelEpoch:0,modelOperationRecords:[],modelOperationStats:{},modelOperationProfileOptions:[],modelOperationTotal:0,modelOperationOffset:0,modelOperationFilters:{profile_id:'',purpose:'',status:''},modelOperationsExpanded:false,modelOperationRequestVersion:0,modelOperationHistoryPanels:{},personaDrafts:{},personaEditorOpen:{},serverTimeOffset:0,dmUid:null,dmOtherName:'',dmCanSend:false,dmPending:null,dmDraft:'',roomInvites:{incoming:[],outgoing:[],pending_incoming_count:0},roomInviteRequestVersion:0,publicRooms:[],publicRoomsBeforeId:null,publicRoomsHasMore:false,publicRoomsRequestVersion:0,questionBankOpen:false,questionBankData:null,questionBankCategory:'',questionBankQuery:'',roomInvitePanelOpen:false,publicRoomsLoaded:false,dmLoadVersion:0,socialEpoch:0,pointsLedgerEntries:[],pointsLedgerBeforeId:null,pointsLedgerHasMore:false,pointsLedgerLoaded:false,roomContextEpoch:0,roomRefreshVersion:0,personalModelListRequestVersion:0,pendingIdempotencyKeys:{}};
+const state = {me:null,room:null,roomId:null,selectedRound:null,ws:null,reconnect:null,tab:'login',legacyLogin:false,roomView:'match',drafts:{},typing:{},lastTyping:null,accounts:[],packetPanels:{},chat:[],chatDraft:'',personalModels:[],modelApiEnabled:true,personalReturn:null,personalModelExpanded:{},personalModelDrafts:{},modelTestResults:{},personalModelTestVersions:{},personalModelTestPending:{},personalModelSavePending:{},social:null,dmMessages:[],dmBeforeId:null,dmHasMore:false,accountSocket:null,accountSocketUid:null,accountSocketCsrf:null,accountSocketEpoch:0,accountReconnect:null,personalModelEpoch:0,modelOperationRecords:[],modelOperationStats:{},modelOperationProfileOptions:[],modelOperationTotal:0,modelOperationOffset:0,modelOperationFilters:{profile_id:'',purpose:'',status:''},modelOperationsExpanded:false,modelOperationRequestVersion:0,modelOperationHistoryPanels:{},personaDrafts:{},personaEditorOpen:{},serverTimeOffset:0,dmUid:null,dmOtherName:'',dmCanSend:false,dmPending:null,dmDraft:'',roomInvites:{incoming:[],outgoing:[],pending_incoming_count:0},roomInviteRequestVersion:0,publicRooms:[],publicRoomsBeforeId:null,publicRoomsHasMore:false,publicRoomsRequestVersion:0,questionBankOpen:false,questionBankData:null,questionBankCategory:'',questionBankQuery:'',questionBankRequestVersion:0,roomInvitePanelOpen:false,publicRoomsLoaded:false,dmLoadVersion:0,socialEpoch:0,pointsLedgerEntries:[],pointsLedgerBeforeId:null,pointsLedgerHasMore:false,pointsLedgerLoaded:false,roomContextEpoch:0,roomRefreshVersion:0,personalModelListRequestVersion:0,pendingIdempotencyKeys:{}};
 ;
 const esc = (v) => String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const shortDate = s => s ? new Date(s).toLocaleString('zh-CN',{hour12:false}) : '';
@@ -1059,6 +1059,48 @@ function renderJudgeWorkflowPanel(r){
  if(!r.revealed_at&&allDone&&allRoundsDone)html+='<button class="danger" data-action="reveal">正式揭晓</button>';
  return html+'</section>';
 }
+async function loadQuestionBank(){
+ const uid=state.me?.user?.uid,csrf=state.me?.user?.csrf,epoch=state.personalModelEpoch,
+  version=++state.questionBankRequestVersion;
+ const data=await api('/api/question-bank?limit=100');
+ if(state.questionBankRequestVersion!==version||state.me?.user?.uid!==uid||
+    state.me?.user?.csrf!==csrf||state.personalModelEpoch!==epoch)return;
+ state.questionBankData=data;
+ renderQuestionBankResults();
+}
+function renderQuestionBankResults(){
+ const root=$('#questionBankResults');if(!root)return;
+ const questions=state.questionBankData?.questions||[];
+ const category=state.questionBankCategory,needle=String(state.questionBankQuery||'').trim().toLocaleLowerCase();
+ const visible=questions.filter(item=>(!category||item.category===category)&&
+  (!needle||[item.title,item.text,...(item.tags||[])].join(' ').toLocaleLowerCase().includes(needle)));
+ root.innerHTML=visible.length?visible.map(item=>{
+  const categoryName=state.questionBankData.categories?.find(x=>x.id===item.category)?.name||item.category;
+  const preview=item.text.length>110?item.text.slice(0,110)+'…':item.text;
+  return '<article class="feed-item"><div class="label-line"><strong>'+esc(item.title)+'</strong><span class="pill">'+esc(categoryName)+'</span></div><p class="hint">'+esc(preview)+'</p><button class="small" type="button" data-action="question-bank-fill" data-id="'+esc(item.id)+'">填入</button></article>';
+ }).join(''):D('没有符合条件的题目。');
+}
+function renderQuestionBankPanel(){
+ const root=$('#questionBankPanel');if(!root)return;
+ root.classList.toggle('hide',!state.questionBankOpen);
+ if(!state.questionBankOpen){root.innerHTML='';return;}
+ if(!state.questionBankData){root.innerHTML=D('正在加载出题灵感…');return;}
+ const categories=state.questionBankData.categories||[];
+ root.innerHTML='<div class="notice"><div class="label-line"><strong>出题灵感库</strong><button class="small" type="button" data-action="question-bank-toggle">收起</button></div>'+
+  '<div class="grid2"><div><label class="field">分类</label><select id="questionBankCategory"><option value="">全部分类</option>'+categories.map(item=>'<option value="'+esc(item.id)+'" '+(state.questionBankCategory===item.id?'selected':'')+'>'+esc(item.name)+'</option>').join('')+'</select></div>'+
+  '<div><label class="field">关键词</label><input id="questionBankSearch" maxlength="120" value="'+esc(state.questionBankQuery)+'" placeholder="搜索标题、正文或标签"></div></div>'+
+  '<div class="buttonrow spaced"><button class="small" type="button" data-action="question-bank-random">随机抽取</button></div><div id="questionBankResults" class="feed"></div></div>';
+ renderQuestionBankResults();
+}
+function fillQuestionBankQuestion(questionId){
+ const question=state.questionBankData?.questions?.find(item=>item.id===questionId);
+ const textarea=app.querySelector('form[data-form="judge-question"] textarea[name="text"]');
+ if(!question||!textarea)return;
+ if(textarea.value.trim()&&!confirm('替换当前已经输入的问题草稿？'))return;
+ textarea.value=question.text;
+ textarea.dispatchEvent(new Event('input',{bubbles:true}));
+ textarea.focus();
+}
 function renderJudgeRoom(r){
  const n=state.selectedRound||r.current_round;
  const round=r.rounds.find(x=>x.number===n)||r.rounds[r.rounds.length-1];
@@ -1080,7 +1122,7 @@ function renderJudgeRoom(r){
  ${finishedActions(r)}<div class="room-layout"><aside class="aside"><section class="card flat"><h2>匿名参赛者</h2><p class="hint">仅显示固定代号，隐藏所有账号、昵称和真实身份。即使比赛结束，此视图也不显示真实身份。</p>${aliases.map(a=>`<div class="roster-person"><span class="alias">${esc(a)}</span><span>匿名参赛者</span></div>`).join('')}</section><section class="card flat"><h2>比赛轮次</h2><div class="round-tags">${buttons}</div></section></aside>
  <div class="stack"><section class="card"><div class="label-line"><h2>第 ${n} 轮问题</h2><span class="pill">${round.status==='draft'?'收集问题中':round.status==='collecting'?'等待答复':'回答已公开'}</span></div><div class="feed">${questions}</div>${round.question?`<div class="question spaced">${esc(round.question)}</div>${renderRoundTimer(r,round,active)}`:''}<div class="buttonrow spaced"><button data-action="download-log" class="small">↓ 下载匿名 Log</button>${finished?'<button data-action="download-full-log" class="small">↓ 下载整场匿名 Log</button>':''}</div></section>
  <section class="card"><h2>匿名回答</h2>${answers}</section></div>
- <div class="right-panel"><section class="card"><h2>我的裁判操作</h2>${active&&pending&&!questionSubmitted?`<form data-form="judge-question"><p class="hint">每位裁判每轮最多提交一个问题，房主统一开启本轮作答。</p><textarea name="text" data-draft="judge-question" maxlength="3000" required placeholder="输入你要向所有参赛者提出的问题…">${myDraft('judge-queion')}</textarea><div class="form-actions"><button class="primary" type="submit">提交并实时同步问题</button></div></form>`:pending?D('你已提交本轮问题，等待房主开启作答。'):D('本轮已经开始作答，不能再添加新问题。')}
+ <div class="right-panel"><section class="card"><h2>我的裁判操作</h2>${active&&pending&&!questionSubmitted?`<form data-form="judge-question"><p class="hint">每位裁判每轮最多提交一个问题，房主统一开启本轮作答。</p><div class="buttonrow"><button class="small" type="button" data-action="question-bank-toggle">出题灵感</button></div><div id="questionBankPanel" class="hide"></div><textarea name="text" data-draft="judge-question" maxlength="3000" required placeholder="输入你要向所有参赛者提出的问题…">${myDraft('judge-question')}</textarea><div class="form-actions"><button class="primary" type="submit">提交并实时同步问题</button></div></form>`:pending?D('你已提交本轮问题，等待房主开启作答。'):D('本轮已经开始作答，不能再添加新问题。')}
  <div class="divider"></div><h3>独立身份判决</h3>${form}</section></div></div>${renderRevealedSeatPersonas(r)}`;
 }
 function renderRevealedSeatPersonas(r){
