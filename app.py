@@ -3621,6 +3621,274 @@ def create_app(db_path=None):
             log_event(db,room_id,1,'created','管理员','创建比赛')
             return {'room_id':room_id, 'code':code}
 
+    @app.put('/api/rooms/{room_id}/visibility')
+    async def update_room_visibility(room_id:int,body:RoomVisibilityData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            rnd=current_round(db,room)
+            if (room['status']!='open' or room['match_started_at'] or room['current_round']!=1 or
+                    rnd['status']!='draft' or rnd['question'] or
+                    db.execute('SELECT 1 FROM judge_questions WHERE room_id=? AND round_number=1 LIMIT 1',
+                               (room_id,)).fetchone() or
+                    db.execute('SELECT 1 FROM ai_judge_questions WHERE room_id=? AND round_number=1 LIMIT 1',
+                               (room_id,)).fetchone() or room['verdict_locked_at']):
+                raise HTTPException(409,'首轮问题提交或开赛后，不能再修改公开大厅设置。')
+            description=body.public_description.strip()
+            db.execute('UPDATE rooms SET public_listing=?,public_description=? WHERE id=?',
+                       (1 if body.public_listing else 0,description,room_id))
+        await app.state.hub.notify(room_id,'room_visibility_changed')
+        return {'ok':True,'public_listing':body.public_listing,'public_description':description}
+
+    @app.get('/api/public/rooms')
+    def list_public_rooms(request:Request,limit:int=Query(default=30,ge=1,le=50),
+                          before_id:Optional[int]=Query(default=None,ge=1)):
+        with connection() as db:
+            u=caller(request,db)
+            cursor=int(before_id) if before_id is not None else 9223372036854775807
+            visible=[]
+            while len(visible)<=limit:
+                rows=db.execute('''SELECT r.*,CASE WHEN owner.deleted_at IS NULL
+                        THEN owner.display_name ELSE '账号已删除' END AS owner_display_name
+                    FROM rooms r LEFT JOIN users owner ON owner.id=r.owner_id
+                    WHERE r.public_listing=1 AND r.id<? ORDER BY r.id DESC LIMIT 100''',
+                    (cursor,)).fetchall()
+                if not rows:
+                    break
+                cursor=int(rows[-1]['id'])
+                for room in rows:
+                    try:
+                        validate_discovery_join(db,room)
+                    except HTTPException:
+                        continue
+                    item=public_room_listing_item(db,room,u)
+                    if item['can_join_player'] or item['can_join_judge']:
+                        visible.append(item)
+                    if len(visible)>limit:
+                        break
+                if len(visible)>limit or len(rows)<100:
+                    break
+            has_more=len(visible)>limit
+            visible=visible[:limit]
+            next_before_id=visible[-1]['room_id'] if has_more and visible else None
+            return {'rooms':visible,'has_more':has_more,'next_before_id':next_before_id}
+
+    @app.post('/api/rooms/{room_id}/join')
+    async def join_public_room(room_id:int,body:DiscoveryJoinData,request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
+            if not room or not room['public_listing']:
+                raise HTTPException(404,'该房间未公开或已不可加入。')
+            result,created=join_room_seat(db,room,u,body.role,source='public_lobby')
+        if created:
+            await app.state.hub.notify(room_id,'judge_added' if body.role=='judge' else 'joined')
+        return {**result,'role':body.role,'already_joined':not created}
+
+    @app.post('/api/rooms/{room_id}/invites')
+    async def send_room_invites(room_id:int,body:RoomInviteBatchData,request:Request):
+        if len({str(uid).strip().upper() for uid in body.uids})!=len(body.uids):
+            raise HTTPException(422,'邀请名单中不能包含重复 UID。')
+        created_invites=[]
+        results=[]
+        now=utcnow()
+        expires=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat(timespec='seconds')
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            room,_=require_room_manager(db,room_id,u)
+            validate_discovery_join(db,room)
+            consume_api_rate_limit(db,u['id'],'room_invite_batch',8,60)
+            for raw_uid in body.uids:
+                target=lookup_account(db,str(raw_uid).strip(),None)
+                if not target:
+                    results.append({'uid':str(raw_uid),'status':'skipped','reason':'UID 无效或账号不存在'})
+                    continue
+                target_id=int(target['id'])
+                target_uid=user_uid(target_id)
+                if target_id==int(u['id']):
+                    results.append({'uid':target_uid,'status':'skipped','reason':'不能邀请自己'})
+                    continue
+                low,high=sorted((int(u['id']),target_id))
+                if not db.execute('SELECT 1 FROM friendships WHERE user_low_id=? AND user_high_id=?',
+                                  (low,high)).fetchone():
+                    results.append({'uid':target_uid,'status':'skipped','reason':'只能邀请当前好友'})
+                    continue
+                if db.execute('''SELECT 1 FROM members WHERE room_id=? AND user_id=? AND removed_at IS NULL
+                    UNION ALL SELECT 1 FROM room_judges WHERE room_id=? AND user_id=? AND left_at IS NULL LIMIT 1''',
+                    (room_id,target_id,room_id,target_id)).fetchone():
+                    results.append({'uid':target_uid,'status':'skipped','reason':'该好友已在房间中'})
+                    continue
+                db.execute('''UPDATE room_invites SET status='expired',responded_at=?,updated_at=?
+                    WHERE room_id=? AND invitee_user_id=? AND status='pending' AND expires_at<=?''',
+                    (now,now,room_id,target_id,now))
+                existing=db.execute('''SELECT id,role FROM room_invites
+                    WHERE room_id=? AND invitee_user_id=? AND status='pending' ''',
+                    (room_id,target_id)).fetchone()
+                if existing:
+                    if existing['role']==body.role:
+                        results.append({'uid':target_uid,'status':'existing','invite_id':int(existing['id'])})
+                    else:
+                        results.append({'uid':target_uid,'status':'skipped','reason':'该好友已有不同身份的待处理邀请'})
+                    continue
+                cur=db.execute('''INSERT INTO room_invites(
+                    room_id,inviter_user_id,invitee_user_id,role,status,created_at,expires_at,updated_at
+                ) VALUES(?,?,?,?, 'pending',?,?,?)''',
+                    (room_id,u['id'],target_id,body.role,now,expires,now))
+                invite_id=int(cur.lastrowid)
+                created_invites.append((target_id,invite_id))
+                results.append({'uid':target_uid,'status':'created','invite_id':invite_id})
+        for target_id,invite_id in created_invites:
+            await app.state.hub.notify_account(target_id,{'type':'room_invite_created','invite_id':invite_id})
+        if created_invites:
+            await app.state.hub.notify_account(u['id'],{'type':'room_invite_updated'})
+        return {'ok':True,'results':results,
+                'created':sum(1 for item in results if item['status']=='created'),
+                'existing':sum(1 for item in results if item['status']=='existing'),
+                'skipped':sum(1 for item in results if item['status']=='skipped')}
+
+    @app.get('/api/me/room-invites')
+    def list_my_room_invites(request:Request):
+        with connection(immediate=True) as db:
+            u=caller(request,db)
+            now=utcnow()
+            db.execute('''UPDATE room_invites SET status='expired',responded_at=?,updated_at=?
+                WHERE status='pending' AND expires_at<=? AND
+                (inviter_user_id=? OR invitee_user_id=?)''',
+                (now,now,now,u['id'],u['id']))
+            def invite_view(row,side):
+                return {
+                    'id':int(row['id']),'room_id':int(row['room_id']),
+                    'room_title':row['room_title'],'role':row['role'],
+                    'created_at':row['created_at'],'expires_at':row['expires_at'],
+                    'inviter_uid':user_uid(int(row['inviter_user_id'])),
+                    'inviter_name':row['inviter_name'],
+                    'invitee_uid':user_uid(int(row['invitee_user_id'])),
+                    'invitee_name':row['invitee_name'],
+                    'side':side,
+                }
+            select='''SELECT i.*,r.title AS room_title,
+                CASE WHEN inviter.deleted_at IS NULL THEN inviter.display_name ELSE '账号已删除' END AS inviter_name,
+                CASE WHEN invitee.deleted_at IS NULL THEN invitee.display_name ELSE '账号已删除' END AS invitee_name
+                FROM room_invites i JOIN rooms r ON r.id=i.room_id
+                JOIN users inviter ON inviter.id=i.inviter_user_id
+                JOIN users invitee ON invitee.id=i.invitee_user_id '''
+            incoming=[invite_view(row,'incoming') for row in db.execute(
+                select+'''WHERE i.invitee_user_id=? AND i.status='pending'
+                    ORDER BY i.created_at DESC,i.id DESC''',(u['id'],)).fetchall()]
+            outgoing=[invite_view(row,'outgoing') for row in db.execute(
+                select+'''WHERE i.inviter_user_id=? AND i.status='pending'
+                    ORDER BY i.created_at DESC,i.id DESC''',(u['id'],)).fetchall()]
+            return {'incoming':incoming,'outgoing':outgoing,
+                    'pending_incoming_count':len(incoming)}
+
+    @app.post('/api/me/room-invites/{invite_id}/accept')
+    async def accept_room_invite(invite_id:int,request:Request):
+        failure=None
+        result=None
+        created=False
+        room_id=None
+        inviter_id=None
+        role=None
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            row=db.execute('SELECT * FROM room_invites WHERE id=? AND invitee_user_id=?',
+                           (invite_id,u['id'])).fetchone()
+            if not row:
+                raise HTTPException(404,'房间邀请不存在。')
+            room_id=int(row['room_id'])
+            inviter_id=int(row['inviter_user_id'])
+            role=row['role']
+            if row['status']=='accepted':
+                if role=='player':
+                    seat=db.execute('''SELECT alias FROM members WHERE room_id=? AND user_id=?
+                        AND removed_at IS NULL''',(room_id,u['id'])).fetchone()
+                    if seat:
+                        result={'room_id':room_id,'alias':seat['alias'],'role':role,'already_joined':True}
+                else:
+                    seat=is_judge(db,room_id,u)
+                    if seat:
+                        result={'room_id':room_id,'role':role,'label':seat['label'],'already_joined':True}
+                if result is None:
+                    raise HTTPException(409,'该邀请已处理，当前席位不存在。')
+            elif row['status']!='pending':
+                raise HTTPException(409,'该邀请已失效或已处理。')
+            else:
+                now=utcnow()
+                if row['expires_at']<=now:
+                    db.execute('''UPDATE room_invites SET status='expired',responded_at=?,updated_at=?
+                        WHERE id=? AND status='pending' ''',(now,now,invite_id))
+                    failure=(410,'邀请已过期。')
+                else:
+                    inviter=db.execute('SELECT deleted_at FROM users WHERE id=?',(inviter_id,)).fetchone()
+                    if not inviter or inviter['deleted_at'] is not None:
+                        db.execute('''UPDATE room_invites SET status='cancelled',responded_at=?,updated_at=?
+                            WHERE id=? AND status='pending' ''',(now,now,invite_id))
+                        failure=(409,'邀请人账号已不可用。')
+                    else:
+                        low,high=sorted((int(u['id']),inviter_id))
+                        if not db.execute('SELECT 1 FROM friendships WHERE user_low_id=? AND user_high_id=?',
+                                          (low,high)).fetchone():
+                            db.execute('''UPDATE room_invites SET status='cancelled',responded_at=?,updated_at=?
+                                WHERE id=? AND status='pending' ''',(now,now,invite_id))
+                            failure=(403,'好友关系已解除，不能接受该邀请。')
+                        else:
+                            room=db.execute('SELECT * FROM rooms WHERE id=?',(room_id,)).fetchone()
+                            if not room:
+                                failure=(404,'房间不存在。')
+                            else:
+                                result,created=join_room_seat(db,room,u,role,source='friend_invite')
+                                db.execute('''UPDATE room_invites SET status='accepted',responded_at=?,updated_at=?
+                                    WHERE id=? AND status='pending' ''',(now,now,invite_id))
+                                result={**result,'role':role,'already_joined':not created}
+        if failure:
+            raise HTTPException(failure[0],failure[1])
+        if created:
+            await app.state.hub.notify(room_id,'judge_added' if role=='judge' else 'joined')
+        await app.state.hub.notify_accounts([u['id'],inviter_id],{'type':'room_invite_updated'})
+        return result
+
+    @app.post('/api/me/room-invites/{invite_id}/reject')
+    async def reject_room_invite(invite_id:int,request:Request):
+        inviter_id=None
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            row=db.execute('SELECT * FROM room_invites WHERE id=? AND invitee_user_id=?',
+                           (invite_id,u['id'])).fetchone()
+            if not row:
+                raise HTTPException(404,'房间邀请不存在。')
+            if row['status']!='pending':
+                raise HTTPException(409,'该邀请已失效或已处理。')
+            now=utcnow()
+            if row['expires_at']<=now:
+                db.execute('UPDATE room_invites SET status=? ,responded_at=?,updated_at=? WHERE id=?',
+                           ('expired',now,now,invite_id))
+                raise HTTPException(410,'邀请已过期。')
+            inviter_id=int(row['inviter_user_id'])
+            db.execute('''UPDATE room_invites SET status='rejected',responded_at=?,updated_at=?
+                WHERE id=? AND status='pending' ''',(now,now,invite_id))
+        await app.state.hub.notify_accounts([u['id'],inviter_id],{'type':'room_invite_updated'})
+        return {'ok':True}
+
+    @app.post('/api/me/room-invites/{invite_id}/cancel')
+    async def cancel_room_invite(invite_id:int,request:Request):
+        invitee_id=None
+        with connection(immediate=True) as db:
+            u=caller(request,db,mutate=True)
+            row=db.execute('SELECT * FROM room_invites WHERE id=?',(invite_id,)).fetchone()
+            if not row:
+                raise HTTPException(404,'房间邀请不存在。')
+            room=db.execute('SELECT * FROM rooms WHERE id=?',(row['room_id'],)).fetchone()
+            if int(row['inviter_user_id'])!=int(u['id']) and (not room or not can_manage_room(room,u)):
+                raise HTTPException(403,'只有邀请发起者或房主 / 管理员可以撤回邀请。')
+            if row['status']!='pending':
+                raise HTTPException(409,'该邀请已失效或已处理。')
+            now=utcnow()
+            db.execute('''UPDATE room_invites SET status='cancelled',responded_at=?,updated_at=?
+                WHERE id=? AND status='pending' ''',(now,now,invite_id))
+            invitee_id=int(row['invitee_user_id'])
+        await app.state.hub.notify_accounts([u['id'],invitee_id],{'type':'room_invite_updated'})
+        return {'ok':True}
+
     @app.get('/api/admin/users')
     def list_users(request:Request):
         with connection() as db:
@@ -3750,52 +4018,17 @@ def create_app(db_path=None):
             room=db.execute('SELECT * FROM rooms WHERE code=?',(body.code.strip().upper(),)).fetchone()
             if not room:
                 raise HTTPException(404,'邀请码无效。')
-            room_id=room['id']
+            room_id=int(room['id'])
             if room['status']=='closed':
                 raise HTTPException(409,'房间已关闭，不能加入。')
             left_judge=db.execute('SELECT left_at FROM room_judges WHERE room_id=? AND user_id=?',
                                   (room_id,u['id'])).fetchone()
             if left_judge and left_judge['left_at'] is not None and room['match_started_at']:
                 raise HTTPException(403,'你已退出本场比赛，下一场可以重新加入。')
-            if body.role == 'judge':
-                if u['is_admin']:
-                    raise HTTPException(403,'管理员账号不能作为独立真人裁判加入。')
-                existing_judge=is_judge(db,room_id,u)
-                if existing_judge:
-                    return {'room_id':room_id,'role':'judge','label':existing_judge['label']}
-                check_judge_registration(db,room,u['id'],viewer=u)
-                label=norm_text(u['display_name'],40)
-                db.execute('''INSERT INTO room_judges(room_id,user_id,label,created_at) VALUES(?,?,?,?)
-                    ON CONFLICT(room_id,user_id) DO UPDATE SET left_at=NULL,label=excluded.label''',
-                           (room_id,u['id'],label,utcnow()))
-                log_event(db,room_id,room['current_round'],'judge_joined','裁判','真人裁判通过邀请码加入')
-                role='judge'
-            else:
-                if is_judge(db,room_id,u):
-                    raise HTTPException(409,'本房间裁判不能作为参赛者加入。')
-                old=db.execute('SELECT alias FROM members WHERE room_id=? AND user_id=? AND removed_at IS NULL',
-                               (room_id,u['id'])).fetchone()
-                if old:
-                    return {'room_id':room_id,'alias':old['alias']}
-                prior=db.execute('SELECT alias,leave_reason FROM members WHERE room_id=? AND user_id=? AND removed_at IS NOT NULL',
-                                 (room_id,u['id'])).fetchone()
-                if prior and (prior['leave_reason']!='voluntary' or room['match_started_at']):
-                    raise HTTPException(403,'你已离开本场比赛，下一场可以重新加入；被移除者不能重入本场。')
-                ensure_roster_unlocked(db,room,allow_frozen=True)
-                if prior:
-                    if active_participant_count(db,room_id)>=MAX_PLAYERS:
-                        raise HTTPException(409,f'最多支持 {MAX_PLAYERS} 位参赛者。')
-                    alias=prior['alias']
-                    db.execute('UPDATE members SET removed_at=NULL,leave_reason=NULL,joined_at=? WHERE room_id=? AND user_id=?',
-                               (utcnow(),room_id,u['id']))
-                else:
-                    alias=new_alias(db,room_id)
-                    db.execute('INSERT INTO members(room_id,user_id,alias,joined_at) VALUES(?,?,?,?)',
-                               (room_id,u['id'],alias,utcnow()))
-                log_event(db,room_id,1,'joined',alias,'加入比赛')
-                role='player'
-        await app.state.hub.notify(room_id,'judge_added' if role=='judge' else 'joined')
-        return {'room_id':room_id,'role':'judge'} if role=='judge' else {'room_id':room_id,'alias':alias}
+            result,created=join_room_seat(db,room,u,body.role,source='invite_code')
+        if created:
+            await app.state.hub.notify(room_id,'judge_added' if body.role=='judge' else 'joined')
+        return result
 
     @app.get('/api/rooms/{room_id}')
     def room_info(room_id:int,request:Request):
