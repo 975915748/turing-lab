@@ -450,6 +450,7 @@ function connectDmWs(){
    if(!current())return;
    if(typeof loadRoomInvites==='function')await loadRoomInvites().catch(()=>{});
    if(!current())return;
+   if(typeof refreshCommunityRoomControls==='function')refreshCommunityRoomControls();
    return;
   }
   if(message.type==='room_invite_created'||message.type==='room_invite_updated'){
