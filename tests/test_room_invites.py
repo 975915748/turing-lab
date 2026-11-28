@@ -159,3 +159,63 @@ def test_only_room_manager_can_send_invites(lab):
     post(player, f"/api/rooms/{room['room_id']}/invites", {
         "uids": [other.get("/api/me").json()["user"]["uid"]], "role": "player",
     }, status=403)
+
+
+def test_concurrent_duplicate_invite_creation_and_acceptance_are_idempotent(lab):
+    from concurrent.futures import ThreadPoolExecutor
+    from fastapi.testclient import TestClient
+
+    path, app, _, host, player, _, _ = lab
+    _, player_uid = make_friends(host, player)
+    host_uid = host.get("/api/me").json()["user"]["uid"]
+    room = create_room(host, "Concurrent invite")
+    route = f"/api/rooms/{room['room_id']}/invites"
+    second_host = TestClient(app)
+    post(second_host, "/api/login", {"uid": host_uid, "password": "player-password"})
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(
+            lambda client: post(client, route, {"uids": [player_uid], "role": "player"}),
+            (host, second_host),
+        ))
+    assert sum(result["created"] for result in results) == 1
+    assert sum(result["existing"] for result in results) == 1
+    invite_id = next(item["invite_id"] for result in results for item in result["results"] if item["status"] == "pending")
+
+    second_player = TestClient(app)
+    post(second_player, "/api/login", {"uid": player_uid, "password": "player-password"})
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        accepted = list(pool.map(
+            lambda client: post(client, f"/api/room-invites/{invite_id}/accept"),
+            (player, second_player),
+        ))
+    assert all(item["room_id"] == room["room_id"] for item in accepted)
+    assert sorted(item.get("already_joined", False) for item in accepted) == [False, True]
+    with db_open(path) as db:
+        assert db.execute("SELECT COUNT(*) FROM room_invites WHERE id=?", (invite_id,)).fetchone()[0] == 1
+        assert db.execute(
+            "SELECT COUNT(*) FROM members WHERE room_id=? AND user_id=? AND removed_at IS NULL",
+            (room["room_id"], int(player_uid[2:])),
+        ).fetchone()[0] == 1
+
+
+def test_reject_and_sender_cancel_have_distinct_terminal_states(lab):
+    path, _, _, host, player, _, _ = lab
+    _, player_uid = make_friends(host, player)
+    room = create_room(host, "Reject and cancel")
+
+    rejected = post(host, f"/api/rooms/{room['room_id']}/invites", {
+        "uids": [player_uid], "role": "player",
+    })["results"][0]
+    post(player, f"/api/room-invites/{rejected['invite_id']}/reject")
+    with db_open(path) as db:
+        assert db.execute("SELECT status FROM room_invites WHERE id=?",
+                          (rejected["invite_id"],)).fetchone()["status"] == "rejected"
+
+    cancelled = post(host, f"/api/rooms/{room['room_id']}/invites", {
+        "uids": [player_uid], "role": "player",
+    })["results"][0]
+    post(host, f"/api/room-invites/{cancelled['invite_id']}/cancel")
+    with db_open(path) as db:
+        assert db.execute("SELECT status FROM room_invites WHERE id=?",
+                          (cancelled["invite_id"],)).fetchone()["status"] == "cancelled"
