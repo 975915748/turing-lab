@@ -134,12 +134,13 @@ async function createRoom(page, title, isPublic) {
     await visibilityForm.locator('textarea[name="public_description"]').fill('刷新期间保留的公开简介草稿');
     await inviteForm.locator(`input[name="uids"][value="${playerUid}"]`).check();
     await inviteForm.locator('select[name="role"]').selectOption('judge');
+    await host.evaluate(() => { window.__communityRoomBeforeSync = state.room; });
     await host.locator('[data-action="sync"]').click();
-    await host.waitForFunction(id => state.roomId === id && !!document.querySelector('#communityRoomControls'), privateRoomId);
-    await assert.equal(await host.locator('form[data-community-form="room-visibility"] textarea[name="public_description"]').inputValue(),
+    await host.waitForFunction(() => state.room !== window.__communityRoomBeforeSync);
+    assert.equal(await host.locator('form[data-community-form="room-visibility"] textarea[name="public_description"]').inputValue(),
       '刷新期间保留的公开简介草稿');
-    await assert.equal(await host.locator('form[data-community-form="room-invite"] select[name="role"]').inputValue(), 'judge');
-    await assert.equal(await host.locator(`form[data-community-form="room-invite"] input[name="uids"][value="${playerUid}"]`).isChecked(), true);
+    assert.equal(await host.locator('form[data-community-form="room-invite"] select[name="role"]').inputValue(), 'judge');
+    assert.equal(await host.locator(`form[data-community-form="room-invite"] input[name="uids"][value="${playerUid}"]`).isChecked(), true);
     await host.locator('form[data-community-form="room-invite"] select[name="role"]').selectOption('player');
     await host.locator('form[data-community-form="room-invite"] button[type="submit"]').click();
 
