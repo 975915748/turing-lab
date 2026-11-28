@@ -72,29 +72,40 @@ function friendDmButton(page, uid) {
   const contextA = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const contextB = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const contextC = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const contextD = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const pageA = await contextA.newPage();
   const pageB = await contextB.newPage();
   const pageC = await contextC.newPage();
-  for (const page of [pageA, pageB, pageC]) page.setDefaultTimeout(10000);
+  const pageD = await contextD.newPage();
+  for (const page of [pageA, pageB, pageC, pageD]) page.setDefaultTimeout(10000);
   const errors = [];
   const dmRequests = [];
   const pendingGateReleases = [];
   pageA.on('request', request => {
     if (request.url().includes('/api/messages/')) dmRequests.push({ method: request.method(), url: request.url() });
   });
-  for (const page of [pageA, pageB, pageC]) page.on('pageerror', error => errors.push(String(error)));
+  for (const page of [pageA, pageB, pageC, pageD]) page.on('pageerror', error => errors.push(String(error)));
+  const judgeQuestionRequests = [];
+  pageC.on('request', request => {
+    if (request.url().includes('/judge-questions') && request.method() === 'POST') judgeQuestionRequests.push(request.url());
+  });
   try {
     await pageA.goto(site);
     await pageB.goto(site);
     await pageC.goto(site);
+    await pageD.goto(site);
     const uidA = await register(pageA, '好友测试甲');
     const uidB = await register(pageB, '好友测试乙');
     const uidC = await register(pageC, '独立裁判丙');
+    const uidD = await register(pageD, '公开大厅观察丁');
     assert.equal(uidA, 'TL00000002');
     assert.equal(uidB, 'TL00000003');
     assert.equal(uidC, 'TL00000004');
+    assert.equal(uidD, 'TL00000005');
 
     await pageA.locator('form[data-form="room"] [name="title"]').fill('好友与积分浏览器验收');
+    await pageA.locator('form[data-form="room"] [name="public_listing"]').check();
+    await pageA.locator('form[data-form="room"] [name="public_description"]').fill('浏览器公开大厅验收');
     await clickSubmit(pageA, 'room');
     await pageA.waitForFunction(() => /^#room=\d+$/.test(location.hash));
     const roomHash = await pageA.evaluate(() => location.hash);
@@ -102,10 +113,20 @@ function friendDmButton(page, uid) {
     assert(roomId > 0);
     const room = await api(pageA, 'GET', `/api/rooms/${roomId}`);
     const base = `/api/rooms/${roomId}`;
+    await pageD.locator('[data-action="public-rooms-refresh"]').click();
+    const publicRooms = await api(pageD, 'GET', '/api/public/rooms');
+    const publicItem = publicRooms.rooms.find(item => item.room_id === roomId);
+    assert(publicItem && publicItem.can_join_player && publicItem.can_join_judge);
+    assert.equal(publicItem.public_description, '浏览器公开大厅验收');
+    assert.equal('invite_code' in publicItem, false);
+    assert.equal('owner_uid' in publicItem, false);
+    await pageB.locator('[data-action="public-rooms-refresh"]').click();
+    await pageB.locator('[data-action="public-room-join"][data-id="' + roomId + '"][data-role="player"]').click();
+    await pageB.waitForFunction(id => location.hash === '#room=' + id, roomId);
+    const playerJoin = await api(pageB, 'GET', base);
     const hostJoin = await api(pageA, 'POST', '/api/join', { code: room.invite_code, role: 'player' });
-    const playerJoin = await api(pageB, 'POST', '/api/join', { code: room.invite_code, role: 'player' });
     const judgeJoin = await api(pageC, 'POST', '/api/join', { code: room.invite_code, role: 'judge' });
-    assert(hostJoin.alias && playerJoin.alias);
+    assert(hostJoin.alias && playerJoin.mine);
     assert.equal(judgeJoin.role, 'judge');
 
     await pageA.locator('[data-action="friend-from-room"]').waitFor();
@@ -124,7 +145,21 @@ function friendDmButton(page, uid) {
     assert.equal(await pageA.getByText('全部裁判已锁定', { exact: false }).count(), 0);
     assert.equal(await pageA.getByText('当前独立裁判的题目将在房主开启本轮作答后汇总', { exact: false }).count(), 0);
 
-    await api(pageC, 'POST', base + '/judge-questions', { text: '独立裁判统一问题' }, 1);
+    const judgeQuestion = pageC.locator('form[data-form="judge-question"] textarea[name="text"]');
+    await judgeQuestion.fill('原问题草稿');
+    await pageC.locator('[data-action="question-bank-toggle"]').click();
+    await pageC.locator('#questionBankResults').waitFor({ state: 'visible' });
+    await pageC.locator('#questionBankCategory').selectOption('logic');
+    await pageC.locator('#questionBankSearch').fill('草地');
+    await pageC.locator('[data-action="question-bank-random"]').click();
+    assert.match(await judgeQuestion.inputValue(), /草地/);
+    assert.equal(judgeQuestionRequests.length, 0);
+    await clickSubmit(pageC, 'judge-question');
+    await pageC.waitForFunction(() => document.querySelector('form[data-form="judge-question"]') === null ||
+      document.querySelector('form[data-form="judge-question"] textarea[name="text"]')?.value === '');
+    assert.equal(judgeQuestionRequests.length, 1);
+    await pageD.locator('[data-action="public-rooms-refresh"]').click();
+    assert.equal(await pageD.locator('[data-action="public-room-join"][data-id="' + roomId + '"]').count(), 0);
     await api(pageA, 'POST', base + '/start', {}, 1);
     const judgeChatStatus = await pageC.evaluate(async roomId => {
       const response = await fetch('/api/rooms/' + roomId + '/chat?match_number=1');
