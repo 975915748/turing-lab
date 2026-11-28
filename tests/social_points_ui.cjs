@@ -267,7 +267,7 @@ function friendDmButton(page, uid) {
         dmMessages: state.dmMessages,
         dmLoadVersion: state.dmLoadVersion,
         dmPending: state.dmPending,
-        dmSocketState: state.dmSocket?.readyState,
+        accountSocketState: state.accountSocket?.readyState,
         toast: document.querySelector('#toast')?.textContent || '',
         conversations: state.social?.conversations || [],
       }));
@@ -410,8 +410,8 @@ function friendDmButton(page, uid) {
       await openPersonalCenter(pageB);
     }
     await visible(pageB.locator('form[data-form="profile-name"]'));
-    await pageB.waitForFunction(() => state.dmSocket?.readyState === 1);
-    await pageB.evaluate(() => { window.__previousDmSocket = state.dmSocket; });
+    await pageB.waitForFunction(() => state.accountSocket?.readyState === 1);
+    await pageB.evaluate(() => { window.__previousAccountSocket = state.accountSocket; });
 
     let releaseNameLockResponse;
     let signalNameLockResponseReady;
@@ -434,22 +434,22 @@ function friendDmButton(page, uid) {
       await route.continue();
     });
     await pageB.evaluate(() => {
-      if (!state.dmSocket || state.dmSocket.readyState !== WebSocket.OPEN) {
+      if (!state.accountSocket || state.accountSocket.readyState !== WebSocket.OPEN) {
         throw new Error('Expected an open personal-center WebSocket');
       }
-      state.dmSocket.onmessage({ data: JSON.stringify({ type: 'name_lock_updated' }) });
+      state.accountSocket.onmessage({ data: JSON.stringify({ type: 'name_lock_updated' }) });
     });
     assert.equal(await nameLockResponseReady, 200);
     await switchAccount(pageB, uidC);
     await openPersonalCenter(pageB);
-    await pageB.waitForFunction(() => state.dmSocket?.readyState === 1);
+    await pageB.waitForFunction(() => state.accountSocket?.readyState === 1);
     const accountCAfterLogin = await pageB.evaluate(() => ({
       uid: state.me?.user?.uid,
       csrf: state.me?.user?.csrf,
       displayName: state.me?.user?.display_name,
     }));
     assert.equal(accountCAfterLogin.uid, uidC);
-    assert.equal(await pageB.evaluate(() => state.dmSocket !== window.__previousDmSocket), true);
+    assert.equal(await pageB.evaluate(() => state.accountSocket !== window.__previousAccountSocket), true);
     releaseNameLockResponse();
     await pageB.waitForTimeout(250);
     assert.equal(await pageB.evaluate(() => state.me?.user?.uid), uidC);
@@ -463,7 +463,7 @@ function friendDmButton(page, uid) {
 
     // A delayed successful /api/me response from an old 1008 close must not replace the next account.
     await openPersonalCenter(pageA);
-    await pageA.waitForFunction(() => state.dmSocket?.readyState === WebSocket.OPEN);
+    await pageA.waitForFunction(() => state.accountSocket?.readyState === WebSocket.OPEN);
     let releaseCloseSuccessResponse;
     let signalCloseSuccessResponseReady;
     const closeSuccessGate = new Promise(resolve => { releaseCloseSuccessResponse = resolve; });
@@ -485,7 +485,7 @@ function friendDmButton(page, uid) {
       await route.continue();
     });
     await pageA.evaluate(() => {
-      const ws = state.dmSocket;
+      const ws = state.accountSocket;
       if (!ws || ws.readyState !== WebSocket.OPEN || typeof ws.onclose !== 'function') {
         throw new Error('Expected a live personal-center WebSocket close handler');
       }
@@ -509,7 +509,7 @@ function friendDmButton(page, uid) {
 
     // A delayed 401 from an old 1008 close must not clear the next account either.
     await openPersonalCenter(pageA);
-    await pageA.waitForFunction(() => state.dmSocket?.readyState === WebSocket.OPEN);
+    await pageA.waitForFunction(() => state.accountSocket?.readyState === WebSocket.OPEN);
     let releaseCloseFailureResponse;
     let signalCloseFailureResponseReady;
     const closeFailureGate = new Promise(resolve => { releaseCloseFailureResponse = resolve; });
@@ -534,7 +534,7 @@ function friendDmButton(page, uid) {
       await route.continue();
     });
     await pageA.evaluate(() => {
-      const ws = state.dmSocket;
+      const ws = state.accountSocket;
       if (!ws || ws.readyState !== WebSocket.OPEN || typeof ws.onclose !== 'function') {
         throw new Error('Expected a live personal-center WebSocket close handler');
       }
