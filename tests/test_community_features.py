@@ -1,4 +1,5 @@
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi.testclient import TestClient
@@ -265,6 +266,73 @@ def test_invite_code_join_keeps_legacy_frozen_roster_recovery_but_discovery_join
     listed = discovery_player.get('/api/public/rooms').json()['rooms']
     assert room['room_id'] not in {item['room_id'] for item in listed}
 
+
+
+def test_expired_invite_can_be_resent_without_loading_inbox(env):
+    path, _, admin, users = env
+    player, player_uid = users[0]
+    make_friends(admin, player)
+    room = post(admin, '/api/rooms', {'title': '过期邀请直接重发'})
+    room_id = room['room_id']
+    first = post(admin, f'/api/rooms/{room_id}/invites', {
+        'uids': [player_uid], 'role': 'player',
+    })['results'][0]['invite_id']
+    with db_open(path) as db:
+        db.execute(
+            "UPDATE room_invites SET expires_at='2000-01-01T00:00:00+00:00' WHERE id=?",
+            (first,),
+        )
+
+    # Do not call GET /api/me/room-invites: sending must expire the old row itself.
+    second_result = post(admin, f'/api/rooms/{room_id}/invites', {
+        'uids': [player_uid], 'role': 'player',
+    })['results'][0]
+    second = second_result['invite_id']
+    assert second_result['status'] == 'sent'
+    assert second != first
+    with db_open(path) as db:
+        statuses = {
+            row['id']: row['status']
+            for row in db.execute('SELECT id,status FROM room_invites WHERE room_id=?', (room_id,))
+        }
+    assert statuses == {first: 'expired', second: 'pending'}
+
+    post(admin, f'/api/room-invites/{second}/cancel')
+    post(admin, f'/api/room-invites/{second}/cancel')
+    assert player.get('/api/me/room-invites').json()['received'] == []
+    with db_open(path) as db:
+        assert db.execute('SELECT status FROM room_invites WHERE id=?', (second,)).fetchone()['status'] == 'cancelled'
+
+
+def test_concurrent_invite_acceptance_creates_one_seat_and_is_idempotent(env):
+    path, app, admin, users = env
+    player, player_uid = users[0]
+    make_friends(admin, player)
+    room = post(admin, '/api/rooms', {'title': '并发接受邀请'})
+    room_id = room['room_id']
+    invite_id = post(admin, f'/api/rooms/{room_id}/invites', {
+        'uids': [player_uid], 'role': 'player',
+    })['results'][0]['invite_id']
+
+    second_session = TestClient(app)
+    post(second_session, '/api/login', {
+        'username': 'community_player_0', 'password': 'player-password',
+    })
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(post, player, f'/api/room-invites/{invite_id}/accept')
+        second = pool.submit(post, second_session, f'/api/room-invites/{invite_id}/accept')
+        results = [first.result(), second.result()]
+
+    assert all(result['ok'] for result in results)
+    assert sorted(bool(result.get('already_joined')) for result in results) == [False, True]
+    with db_open(path) as db:
+        assert db.execute(
+            'SELECT COUNT(*) FROM members WHERE room_id=? AND user_id=? AND removed_at IS NULL',
+            (room_id, int(player_uid[2:])),
+        ).fetchone()[0] == 1
+        assert db.execute(
+            'SELECT status FROM room_invites WHERE id=?', (invite_id,),
+        ).fetchone()['status'] == 'accepted'
 
 def test_question_bank_is_read_only_bounded_and_versioned(env):
     _, _, admin, users = env
