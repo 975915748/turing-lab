@@ -199,6 +199,11 @@ def test_public_room_discovery_join_whitelist_and_auto_unlisting(env):
     assert player.get('/api/public/rooms?limit=51').status_code == 422
     item = next(room for room in rooms if room['room_id'] == public['room_id'])
     assert item['public_description'] == '公开简介只允许展示房间信息。'
+    empty_description = next(room for room in rooms if room['room_id'] == older_public['room_id'])
+    assert empty_description['public_description'] == ''
+    post(admin, f"/api/rooms/{private['room_id']}/visibility", {
+        'public_listing': False, 'public_description': '',
+    })
     assert item['max_players'] == 8
     assert item['max_judges'] == 12
     assert item['can_join_player'] is True
