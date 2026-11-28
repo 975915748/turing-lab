@@ -207,10 +207,12 @@ async function leaveCurrentRoom(){
 function renderClosedRoom(r){
  const rounds=r.rounds.map(round=>'<section class="card"><h2>第 '+round.number+' 轮</h2><div class="question">'+esc(round.question||(round.questions||[]).map(q=>q.text).join('\n\n')||'尚未开启作答')+'</div><div class="feed spaced">'+Object.entries(round.answers||{}).map(([alias,a])=>'<article class="feed-item"><strong>'+esc(alias)+'</strong><div class="feed-text">'+esc(a.text)+'</div></article>').join('')+'</div><button class="small" data-action="closed-round-log" data-round="'+round.number+'">下载本轮 Log</button></section>').join('');
  const packets=r.can_manage&&r.packets?.length?'<section class="card"><details><summary>单轮裁判包快照（'+r.packets.length+'）</summary><div class="feed spaced">'+r.packets.map(p=>'<div class="label-line"><strong>第 '+p.through_round+' 轮 · v'+p.version+'</strong><button class="small" data-action="view-packet" data-id="'+p.id+'">查看 / 复制</button></div>').join('')+'</div></details></section>':'';
- app.innerHTML='<div class="pagehead"><div><h1>'+esc(r.title)+'</h1><h2>房间已关闭</h2><p class="muted">比赛已停止，记录保留，未结算积分。</p></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button data-action="back">← 返回大厅</button></div></div><div class="buttonrow spaced"><button data-action="download-full-log">下载整场 Log</button>'+(r.can_manage?'<button class="primary" data-action="restart-match">再次开赛</button>':'')+'</div><div class="stack spaced">'+rounds+packets+renderPublicChat(r)+'</div>';
+ app.innerHTML='<div class="pagehead"><div><h1>'+esc(r.title)+'</h1><h2>房间已关闭</h2><p class="muted">比赛已停止，记录保留，未结算积分。</p></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button data-action="back">← 返回大厅</button></div></div><div id="roomInviteNotice"></div><div class="buttonrow spaced"><button data-action="download-full-log">下载整场 Log</button>'+(r.can_manage?'<button class="primary" data-action="restart-match">再次开赛</button>':'')+'</div><div class="stack spaced">'+rounds+packets+renderPublicChat(r)+'</div>';
+ renderRoomInviteNotice();
 }
 function renderReadyRoom(r){
- app.innerHTML=`<div class="pagehead"><div><div class="overline">ROOM ${r.id} · 第 ${r.match_number} 场</div><h1>${esc(r.title)}</h1></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button data-action="back">← 返回大厅</button></div></div>${renderMyPointsResult(r)}<section class="card"><h2>${r.can_manage?'开始下一场比赛':'等待再次开赛'}</h2>${finishedActions(r)}</section>`;
+ app.innerHTML=`<div class="pagehead"><div><div class="overline">ROOM ${r.id} · 第 ${r.match_number} 场</div><h1>${esc(r.title)}</h1></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button data-action="back">← 返回大厅</button></div></div><div id="roomInviteNotice"></div>${renderMyPointsResult(r)}<section class="card"><h2>${r.can_manage?'开始下一场比赛':'等待再次开赛'}</h2>${finishedActions(r)}</section>`;
+ renderRoomInviteNotice();
 }
 async function openRoom(id,options={}){
  clearDmState();const epoch=++state.roomContextEpoch,accountEpoch=state.personalModelEpoch,uid=state.me?.user?.uid,csrf=state.me?.user?.csrf;
@@ -936,6 +938,34 @@ function renderRoundTimerSettings(r){
   '<form data-form="round-timer" class="operation-limit-form"><input name="seconds" type="number" min="30" max="3600" step="1" value="'+value+'" placeholder="留空表示关闭">'+
   '<button class="small" type="submit">保存限时</button></form></section>';
 }
+function renderRoomVisibilitySettings(r){
+ if(!r.can_manage||r.is_judge)return '';
+ if(r.match_started)return r.public_listing?'<p class="hint">本场公开大厅展示已在首轮开赛后自动停止；下一场开始前可以重新设置。</p>':'';
+ if(r.status!=='open'||r.current_round!==1||r.rounds?.[0]?.status!=='draft')return '';
+ return '<section class="card compact"><h3>公开大厅设置</h3><form data-form="room-visibility">'+
+  '<label class="field"><input type="checkbox" name="public_listing" '+(r.public_listing?'checked':'')+'> 允许公开大厅展示</label>'+
+  '<label class="field">公开说明（最多 160 字）</label><input name="public_description" maxlength="160" value="'+esc(r.public_description||'')+'" placeholder="简单介绍本场测试主题或参与要求">'+
+  '<p class="hint">首轮开赛后自动停止展示；私密房间不会出现在公开列表。</p><button class="small" type="submit">保存公开设置</button></form></section>';
+}
+function renderRoomInviteControls(r){
+ const first=r.rounds?.find(x=>x.number===1);
+ const canInvite=!!r.can_manage&&!r.is_judge&&r.status==='open'&&!r.match_started&&r.current_round===1&&
+  first?.status==='draft'&&!first.question&&!(first.questions||[]).length&&!r.personas_frozen&&!r.verdict_locked;
+ if(!canInvite)return '';
+ return '<section class="card compact"><div class="label-line"><h3>邀请好友加入</h3><button class="small" data-action="room-invite-toggle">'+(state.roomInvitePanelOpen?'收起':'选择好友')+'</button></div>'+
+  '<p class="hint">可以一次邀请多名好友，并分别指定参赛者或真人裁判身份。</p><div id="roomInvitePanel" class="'+(state.roomInvitePanelOpen?'':'hide')+'"></div></section>';
+}
+function renderRoomInvitePanel(){
+ const root=$('#roomInvitePanel');if(!root)return;
+ if(!state.roomInvitePanelOpen){root.classList.add('hide');root.innerHTML='';return;}
+ root.classList.remove('hide');
+ if(!state.social){root.innerHTML=D('正在加载好友列表…');return;}
+ const friends=state.social.friends||[];
+ if(!friends.length){root.innerHTML=D('你还没有好友。可先到个人中心添加好友。')+'<button class="small" data-action="personal-center">打开个人中心</button>';return;}
+ root.innerHTML='<form data-form="room-invite-send"><label class="field">邀请身份</label><select name="role"><option value="player">参赛者</option><option value="judge">真人裁判</option></select><div class="feed spaced">'+
+  friends.map(friend=>'<label class="feed-item" style="display:flex;align-items:center;gap:10px"><input type="checkbox" name="uids" value="'+esc(friend.uid)+'"><span><strong>'+esc(friend.note||friend.display_name)+'</strong><span class="hint">'+esc(friend.uid)+'</span></span></label>').join('')+
+  '</div><div class="form-actions"><button class="primary small" type="submit">发送邀请</button></div></form>';
+}
 function serverNowMs(){return Date.now()+(Number(state.serverTimeOffset)||0)}
 function formatCountdown(ms){
  const seconds=Math.max(0,Math.ceil(ms/1000));
@@ -1046,7 +1076,7 @@ function renderJudgeRoom(r){
  const form=canLock?`<form data-form="judge-verdict"><p class="hint">只根据匿名回答判断。所有预测只保存在你的独立记录中，其他裁判始终无法通过网站读取。</p>${aliases.map(a=>`<div class="label-line" style="margin:8px 0"><label>参与者 ${esc(a)}</label><select name="pred-${esc(a)}" required><option value="">选择</option><option value="Human">人类</option><option value="AI">AI</option></select></div>`).join('')}<label class="field">判断依据</label><textarea name="evidence" data-draft="judge-evidence" required maxlength="5000">${myDraft('judge-evidence')}</textarea><label class="field">置信度 (0-100)</label><input name="confidence" type="number" min="0" max="100" value="50" required><label class="field">最弱环节（可选）</label><textarea name="weakness" maxlength="5000"></textarea><label class="field">可能误判原因（可选）</label><textarea name="possible_error" maxlength="5000"></textarea><div class="form-actions"><button class="primary" type="submit">锁定我自己的判断</button></div></form>`:
  r.my_verdict?`<div class="locked">🔒 你的判决已锁定，不能修改。其他裁判的判断对你保密。</div><div class="answer-card"><strong>我的判断</strong><div class="answer-content">${aliases.map(a=>a+'：'+(r.my_verdict.predictions[a]==='Human'?'人类':'AI')).join('\n')}</div><div class="hint">依据：${esc(r.my_verdict.evidence)}</div></div>`:
  '';
- app.innerHTML=`<div class="pagehead"><div><div class="overline">INDEPENDENT JUDGE / ROOM ${r.id}</div><h1>${esc(r.title)}</h1><div class="stat-row"><span class="pill">独立裁判 · ${esc(r.my_judge_label)}</span><span class="pill">${aliases.length} 位匿名参赛者</span><span class="pill">${finished?'比赛已结束':'匿名盲测中'}</span></div></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button data-action="back" class="ghost">← 返回大厅</button><button data-action="sync">↻ 刷新</button></div></div>
+ app.innerHTML=`<div id="roomInviteNotice"></div><div class="pagehead"><div><div class="overline">INDEPENDENT JUDGE / ROOM ${r.id}</div><h1>${esc(r.title)}</h1><div class="stat-row"><span class="pill">独立裁判 · ${esc(r.my_judge_label)}</span><span class="pill">${aliases.length} 位匿名参赛者</span><span class="pill">${finished?'比赛已结束':'匿名盲测中'}</span></div></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button data-action="back" class="ghost">← 返回大厅</button><button data-action="sync">↻ 刷新</button></div></div>
  ${finishedActions(r)}<div class="room-layout"><aside class="aside"><section class="card flat"><h2>匿名参赛者</h2><p class="hint">仅显示固定代号，隐藏所有账号、昵称和真实身份。即使比赛结束，此视图也不显示真实身份。</p>${aliases.map(a=>`<div class="roster-person"><span class="alias">${esc(a)}</span><span>匿名参赛者</span></div>`).join('')}</section><section class="card flat"><h2>比赛轮次</h2><div class="round-tags">${buttons}</div></section></aside>
  <div class="stack"><section class="card"><div class="label-line"><h2>第 ${n} 轮问题</h2><span class="pill">${round.status==='draft'?'收集问题中':round.status==='collecting'?'等待答复':'回答已公开'}</span></div><div class="feed">${questions}</div>${round.question?`<div class="question spaced">${esc(round.question)}</div>${renderRoundTimer(r,round,active)}`:''}<div class="buttonrow spaced"><button data-action="download-log" class="small">↓ 下载匿名 Log</button>${finished?'<button data-action="download-full-log" class="small">↓ 下载整场匿名 Log</button>':''}</div></section>
  <section class="card"><h2>匿名回答</h2>${answers}</section></div>
@@ -1077,7 +1107,7 @@ function renderRoom(){
  const answerView=round.status==='revealed'?roster.map(p=>`<div class="answer-card"><strong>${esc(p.alias)} · ${esc(p.label)}</strong><span class="pill" style="margin-left:7px">${p.role}</span>${round.timed_out?.includes(p.alias)?'<span class="pill">超时未提交</span>':''}<div class="tiny muted">${esc(shortDate(round.answers[p.alias]?.submitted_at))}</div>${round.answers[p.alias]?.edited_at?'<span class="pill">主持人已修订</span>':''}<div class="answer-content">${esc(round.answers[p.alias]?.text||(round.timed_out?.includes(p.alias)?'（超时未提交）':'（无回答）'))}</div></div>`).join(''):
    `<div class="notice">🔒 回答暂时隐藏。已提交 ${round.submitted.length} / ${roster.length}；全部参赛者（含 AI）提交后，服务器会自动向所有在线玩家公布。</div>${round.answers[r.mine]?.text?`<div class="answer-card"><strong>我已提交的回答</strong><div class="answer-content">${esc(round.answers[r.mine].text)}</div></div>`:''}`;
  const canAnswer=active&&!finished&&round.status==='collecting'&&r.mine&&!submitted.has(r.mine);
- const judgeBox= canManage?`<section class="card compact"><div class="label-line"><h2>参赛者管理</h2><span class="pill">${r.is_owner?'房主':'管理员'}</span></div>${renderRoundTimerSettings(r)}
+ const judgeBox= canManage?`<section class="card compact"><div class="label-line"><h2>参赛者管理</h2><span class="pill">${r.is_owner?'房主':'管理员'}</span></div>${renderRoundTimerSettings(r)}${renderRoomVisibilitySettings(r)}${renderRoomInviteControls(r)}
  ${active&&round.status==='draft'&&!finished&&!round.questions?.length&&!(r.judges||[]).length?`<div class="divider"></div><form id="manual-question-form" data-form="question"><label class="field">录入裁判的第 ${n} 轮问题</label><textarea name="question" data-draft="question" maxlength="6000" required placeholder="从裁判聊天窗口复制原文…">${myDraft('question')}</textarea><div class="form-actions"><button class="primary" type="submit">向所有玩家发布问题</button></div></form>`:''}
  ${active&&round.status==='collecting'&&!finished&&r.ais.some(a=>a.model_profile_id&&a.model_profile?.credential_status==='ok'&&!submitted.has(a.alias))?`<div class="divider"></div><button class="primary" data-action="generate-ai-answers">自动生成模型 AI 回复</button>`:''}
   ${active&&round.status==='collecting'&&!finished&&r.ais.some(a=>(!a.model_profile_id||a.model_profile?.credential_status!=='ok')&&!submitted.has(a.alias))?`<div class="divider"></div><form data-form="ai-answer"><label class="field">录入 AI 原始回答</label><select name="alias">${r.ais.filter(a=>(!a.model_profile_id||a.model_profile?.credential_status!=='ok')&&!submitted.has(a.alias)).map(a=>`<option value="${a.alias}">${a.alias} · ${esc(a.name)}</option>`).join('')}</select><label class="field">AI 回答（复制原文）</label><textarea name="answer" data-draft="ai-answer" maxlength="12000" required placeholder="请粘贴 AI 原样回答，不做修改…">${myDraft('ai-answer')}</textarea><div class="fom-actions"><button class="primary" type="submit">录入 AI 回答</button></div></form>`:''}
@@ -1094,7 +1124,7 @@ function renderRoom(){
  ${!finished&&!(r.judges||[]).length?`<div class="divider"></div><h3>裁判最终判断</h3>${locked?`<p class="locked">🔒 结论已锁定，揭晓后所有玩家都能查看。</p><button class="danger" data-action="reveal">揭晓身份与计分</button>`: (r.rounds.every(x=>x.status==='revealed')?`<form data-form="verdict"><p class="hint">手动录入裁判的最终判断。锁定前不能修改身份判决；请勿提前公布真实身份。</p>${roster.map(p=>`<div class="label-line" style="margin:8px 0"><label for="pred-${p.alias}">参与者 ${p.alias}</label><select required style="max-width:120px" name="pred-${p.alias}" id="pred-${p.alias}"><option value="">选择</option><option value="Human">人类</option><option value="AI">AI</option></select></div>`).join('')}<label class="field">裁判主要依据（必填）</label><textarea name="evidence" data-draft="evidence" required maxlength="5000" placeholder="裁判的判断依据…">${myDraft('evidence')}</textarea><label class="field">置信度（0–100）</label><input type="text" name="confidence" inputmode="numeric" pattern="[0-9]{1,3}" value="50" required><label class="field">最弱环节（可选）</label><textarea name="weakness" data-draft="weakness" maxlength="5000">${myDraft('weakness')}</textarea><label class="field">如果判断错误可能错在哪（可选）</label><textarea name="possible_error" data-draft="possible_error" maxlength="5000">${myDraft('possible_error')}</textarea><div class="form-actions"><button class="primary" type="submit">锁定裁判结论</button></div></form>`:``)}`:''}</section>`:'';
  const scored=r.verdict&&finished?roster.filter(p=>r.verdict.predictions[p.alias]===(p.role==='AI'?'AI':'Human')).length:null;
  app.innerHTML=`<div class="pagehead"><div><div class="overline">ROOM ${r.id} / REAL-TIME MATCH</div><h1>${esc(r.title)}</h1><div class="stat-row"><span class="pill ${finished?'ok':'warn'}">${finished?'比赛已结束':'比赛进行中'}</span><span cass="pill">${humans} 位人类 · ${ais} 位 AI</span><span class="pill">${r.judges?.length?`${r.judges.length} 位裁判（真人 / AI）`:`外部裁判：${esc(r.judge)}`}</span></div></div><div class="buttonrow"><button data-action="personal-center">个人中心</button><button class="ghost" data-action="back">← 比赛大厅</button><button data-action="sync">↻ 刷新</button></div></div>
- ${finishedActions(r)}${renderMyPointsResult(r)}<div class="room-layout ${canManage?'admin-room-layout':''}"><aside class="aside"><section class="card flat"><h2>参赛者身份</h2><div class="roster">${makeRoster(r)}</div></section><section class="card flat"><h2>比赛轮次</h2><div class="round-tags">${rtab}</div></section></aside>
+ <div id="roomInviteNotice"></div>${finishedActions(r)}${renderMyPointsResult(r)}<div class="room-layout ${canManage?'admin-room-layout':''}"><aside class="aside"><section class="card flat"><h2>参赛者身份</h2><div class="roster">${makeRoster(r)}</div></section><section class="card flat"><h2>比赛轮次</h2><div class="round-tags">${rtab}</div></section></aside>
  <div class="stack">${canManage&&state.roomView==='human-judges'?renderHumanJudgeAdminPanel(r):canManage&&state.roomView==='ai-judges'?judgeAdminPanel(r)+renderModelOperationPanel(r):canManage&&state.roomView==='admin'?judgeBox+renderPersonaPreparationControl(r)+renderReadinessPanel(r)+renderJudgeWorkflowPanel(r)+renderModelOperationPanel(r):''}
  <div class="${canManage&&state.roomView!=='match'?'hide':'stack'}"><section class="card"><div class="label-line"><div><div class="overline">JUDGE / ROUND ${n}</div><h2 style="margin:5px 0 0">裁判问题</h2></div><span class="pill ${round.status==='revealed'?'ok':'warn'}">${round.status==='draft'?'等待发布':round.status==='collecting'?'正在收集回答':'本轮已揭晓'}</span></div><div class="question spaced">${esc(round.question||'管理员尚未开启本轮作答。')}</div>${renderRoundTimer(r,round,active)}${round.status==='draft'&&round.questions?.length?`<div class="feed spaced">${round.questions.map(q=>`<div class="feed-item"><strong>${esc(q.judge)}</strong><div class="feed-text">${esc(q.text)}</div></div>`).join('')}</div>`:''}<div class="buttonrow spaced"><button class="small" data-action="download-log">↓ 下载本轮 Log (.md)</button>${finished?'<button class="small" data-action="download-full-log">↓ 下载整场 Log (.md)</button>':''}</div></section>
  <section class="card"><div class="label-line"><h2>参赛者回答</h2><span class="pill">${round.submitted.length}/${roster.length} 已提交</span></div>${answerView}
@@ -1106,7 +1136,8 @@ ${renderPublicChat(r)}
  </div>
  ${renderRevealedSeatPersonas(r)}
  </div><div class="right-panel">${canManage?renderAdminRoomNav(r,finished):`<section class="card flat"><div class="overline">PARTICIPANT</div><h2>等待主持人推进比赛</h2><p class="hint">你的每次提交都会发送到服务器；全员提交完成后自动揭晓。若网络断开，请等待自动重连或手动刷新。</p></section>`}</div></div>`;
- updateTypingBadges();
+ renderRoomInvitePanel();renderRoomInviteNotice();
+  updateTypingBadges();
  updateRoundCountdown();
  if(editingDraft){
    const next=app.querySelector(`[data-draft="${editingDraft}"]`);
