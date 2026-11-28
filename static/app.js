@@ -1197,6 +1197,7 @@ app.addEventListener('toggle',e=>{
  if(e.target.matches('details[data-model-operation-history]'))state.modelOperationHistoryPanels[e.target.dataset.key]=e.target.open;
 },true);
 app.addEventListener('input',e=>{
+ if(e.target.matches('#questionBankSearch')){state.questionBankQuery=e.target.value;renderQuestionBankResults();return;}
  const dmInput=e.target.closest('form[data-form="dm-send"] textarea[name="text"]');
  if(dmInput){state.dmDraft=dmInput.value;return;}
  if(rememberSeatPersonaDraft(e.target))return;
@@ -1209,6 +1210,7 @@ app.addEventListener('input',e=>{
  }
 });
 app.addEventListener('change',e=>{
+ if(e.target.matches('#questionBankCategory')){state.questionBankCategory=e.target.value;renderQuestionBankResults();return;}
  const personaPreset=e.target.closest('form[data-form="seat-persona"] select[name="preset_id"]');
  if(personaPreset){
   const customPrompt=personaPreset.form.elements.namedItem('custom_system_prompt');
@@ -1228,6 +1230,20 @@ app.addEventListener('change',e=>{
 $('#judgeNoticeClose').addEventListener('click',()=>$('#judgeNotice').close());
 app.addEventListener('click',async e=>{const b=e.target.closest('[data-action]');if(!b)return;const action=b.dataset.action;let roomErrorGuard=null;
  try{
+  if(action==='question-bank-toggle'){
+   state.questionBankOpen=!state.questionBankOpen;
+   if(state.questionBankOpen&&!state.questionBankData)await loadQuestionBank();
+   renderQuestionBankPanel();
+  }
+  if(action==='question-bank-fill')fillQuestionBankQuestion(b.dataset.id);
+  if(action==='question-bank-random'){
+   const all=state.questionBankData?.questions||[],category=state.questionBankCategory,
+    needle=String(state.questionBankQuery||'').trim().toLocaleLowerCase();
+   const visible=all.filter(item=>(!category||item.category===category)&&
+    (!needle||[item.title,item.text,...(item.tags||[])].join(' ').toLocaleLowerCase().includes(needle)));
+   if(visible.length){const item=visible[Math.floor(Math.random()*visible.length)];fillQuestionBankQuestion(item.id);}
+   else toast('当前筛选条件下没有可抽取的题目。');
+  }
   if(action==='tab-login'||action==='tab-register'){state.tab=action==='tab-login'?'login':'register';renderAuth()}
   if(action==='toggle-legacy-login'){state.legacyLogin=!state.legacyLogin;renderAuth()}
   if(action==='copy-uid'){if(!b.dataset.uid)throw new Error('UID 不可用');await navigator.clipboard.writeText(b.dataset.uid);toast('UID 已复制')}
