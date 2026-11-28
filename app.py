@@ -1189,6 +1189,10 @@ def validate_discovery_join(db, room, user, role):
         ).fetchone()
         if prior and prior['leave_reason'] != 'voluntary':
             raise HTTPException(403, '你已被移出本场比赛，不能重新加入。')
+        # ensure_roster_unlocked has a deleted-account recovery exception. Discovery
+        # joins must still reject every new seat while this match is persona-frozen.
+        if is_match_persona_frozen(db, room['id'], room['match_number']):
+            raise HTTPException(409, '本场名单及 AI 席位配置已冻结，不能通过邀请或公开大厅新增参赛者。')
         ensure_roster_unlocked(db, room, allow_frozen=False)
         if prior and active_participant_count(db, room['id']) >= MAX_PLAYERS:
             raise HTTPException(409, f'最多支持 {MAX_PLAYERS} 位参赛者。')
@@ -1201,7 +1205,8 @@ def validate_discovery_join(db, room, user, role):
         raise HTTPException(403, '管理员账号不能作为独立真人裁判加入。')
     if is_judge(db, room['id'], user):
         return
-    check_judge_registration(db, room, user['id'], viewer=user)
+    # Discovery entry points must not disclose the name or ID of another room.
+    check_judge_registration(db, room, user['id'], viewer=None)
 
 
 def join_room_seat(db, room, user, role, *, allow_frozen=True, source='invite_code'):
