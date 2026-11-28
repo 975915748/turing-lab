@@ -9,7 +9,7 @@ const val = (id) => document.getElementById(id)?.value??'';
 const D = (txt='暂无记录') => `<p class="muted hint">${esc(txt)}</p>`;
 let toastTimer;
 function clearPersonalModelState(){
- stopDmWs();state.social=null;state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;state.dmOtherName='';state.dmCanSend=false;state.dmPending=null;state.dmDraft='';state.dmLoadVersion++;state.socialEpoch++;state.pointsLedgerEntries=[];state.pointsLedgerBeforeId=null;state.pointsLedgerHasMore=false;state.pointsLedgerLoaded=false;
+ stopAccountSocket();state.social=null;state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;state.dmOtherName='';state.dmCanSend=false;state.dmPending=null;state.dmDraft='';state.dmLoadVersion++;state.socialEpoch++;state.pointsLedgerEntries=[];state.pointsLedgerBeforeId=null;state.pointsLedgerHasMore=false;state.pointsLedgerLoaded=false;
  state.personalModelEpoch=(state.personalModelEpoch||0)+1;state.personalModelListRequestVersion=(state.personalModelListRequestVersion||0)+1;state.modelOperationRequestVersion=(state.modelOperationRequestVersion||0)+1;state.roomContextEpoch=(state.roomContextEpoch||0)+1;state.roomRefreshVersion=(state.roomRefreshVersion||0)+1;state.pendingIdempotencyKeys={};
  state.personalModelExpanded={};state.personalModelDrafts={};state.modelTestResults={};state.personalModelTestVersions={};state.personalModelTestPending={};state.personalModelSavePending={};state.modelOperationRecords=[];state.modelOperationStats={};state.modelOperationProfileOptions=[];state.modelOperationTotal=0;state.modelOperationOffset=0;state.modelOperationFilters={profile_id:'',purpose:'',status:''};state.modelOperationsExpanded=false;state.modelOperationHistoryPanels={};state.personaDrafts={};state.personaEditorOpen={};
 }
@@ -104,7 +104,7 @@ async function refreshRoom(expectedContext=null){
 }
 async function init(){applyPrefs();try{const previousUid=state.me?.user?.uid,previousCsrf=state.me?.user?.csrf;state.me=await api('/api/me');if(previousUid&&(previousUid!==state.me?.user?.uid||previousCsrf!==state.me?.user?.csrf))clearPersonalModelState();connectDmWs();$('#logoutBtn').classList.remove('hide');const q=/^#room=(\d+)$/.exec(location.hash);if(location.hash.startsWith('#profile')){state.personalReturn=profileReturnFromHash();await openPersonalCenter({fromHash:true});}else if(q){await openRoom(Number(q[1]));}else renderLobby()}catch(e){state.me=null;state.roomId=null;state.personalModels=[];state.chat=[];$('#logoutBtn').classList.add('hide');renderAuth();}}
 function renderAuth(){
- clearDmState();state.social=null;stopDmWs();stopWs();$('#logoutBtn').classList.add('hide');setConnection('未登录',false);
+ clearDmState();state.social=null;stopAccountSocket();stopWs();$('#logoutBtn').classList.add('hide');setConnection('未登录',false);
  const reg=state.tab==='register',legacy=!!state.legacyLogin;
  app.innerHTML=`<div class="auth"><div class="intro"><div class="hero-mark">T.</div><div class="overline">HUMAN × AI / ANONYMOUS JUDGING</div><h1>在同一个房间里，<br>验证谁更像人类。</h1><p class="muted">支持真人裁判独立登录与 AI 裁判由房主手动转录；各裁判独立判断。AI 回答仍由房主手动录入；全部参赛者提交后统一公布回答。</p><div class="stat-row"><div class="stat">◈ 自由注册</div><div class="stat">◈ 匿名裁判包</div><div class="stat">◈ 完整轮次日志</div></div></div>
  <section class="card"><div class="overline">欢迎加入</div><h2 style="margin:7px 0 0">${reg?'创建你的账号':'登录图灵实验室'}</h2>
@@ -302,10 +302,11 @@ function makeRoster(r){
  return people.map(p=>`<div class="roster-person"><div class="person-left"><span class="alias">${esc(p.alias)}</span><div style="min-width:0"><span class="person-name" title="${esc(p.label)}">${esc(p.label)}</span><span class="roster-role">${p.role==='人类'?'人类 · '+esc(p.uid):'AI 参赛位'}${p.alias===r.mine?' · 我':''}</span></div></div><span class="pill ${submitted.has(p.alias)?'ok':''}" ${p.role==='人类'&&p.alias===r.mine?`data-typing-alias="${esc(p.alias)}"`:''} title="本轮提交状态">${submitted.has(p.alias)?'√':p.role==='人类'&&p.alias===r.mine?(state.selectedRound===r.current_round&&state.typing[p.alias]?'....':'X'):'—'}</span>${p.role==='人类'&&p.alias!==r.mine?`<button class="small" data-action="friend-from-room" data-uid="${esc(p.uid)}">加好友</button>`:''}</div>`).join('')||D('等待人类玩家加入');
 }
 function profileReturnFromHash(){const m=/^#profile\?room=(\d+)&view=([^&]+)&round=(\d+)(?:&match=(\d+))?$/.exec(location.hash);return m?{roomId:Number(m[1]),view:decodeURIComponent(m[2]),round:Number(m[3]),matchNumber:m[4]?Number(m[4]):null}:null;}
-function stopDmWs(){
+function stopAccountSocket(){
  if(state.dmReconnect)clearTimeout(state.dmReconnect);state.dmReconnect=null;
  if(state.dmSocket){const ws=state.dmSocket;state.dmSocket=null;ws.onclose=null;try{ws.close();}catch{}}
 }
+function stopDmWs(){stopAccountSocket();}
 function clearDmState(){
  state.dmUid=null;state.dmMessages=[];state.dmBeforeId=null;state.dmHasMore=false;
  state.dmOtherName='';state.dmCanSend=false;state.dmPending=null;state.dmDraft='';state.dmLoadVersion++;
@@ -426,7 +427,7 @@ function connectDmWs(){
  const uid=state.me?.user?.uid,csrf=state.me?.user?.csrf,epoch=state.personalModelEpoch;
  if(!uid)return;
  if(state.dmSocket&&state.dmSocket.__accountUid===uid&&state.dmSocket.__accountCsrf===csrf&&state.dmSocket.__accountEpoch===epoch&&state.dmSocket.readyState!==WebSocket.CLOSED)return;
- stopDmWs();
+ stopAccountSocket();
  const proto=location.protocol==='https:'?'wss:':'ws:';
  const ws=new WebSocket(`${proto}//${location.host}/ws/messages`);state.dmSocket=ws;
  ws.__accountUid=uid;ws.__accountCsrf=csrf;ws.__accountEpoch=epoch;
